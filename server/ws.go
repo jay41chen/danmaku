@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -17,7 +18,21 @@ var (
 	mutex   sync.Mutex
 )
 
+const (
+	maxClients     = 100
+	maxMessageSize = 500
+	rateLimit      = 5
+)
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	mutex.Lock()
+	if len(clients) >= maxClients {
+		mutex.Unlock()
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
+	mutex.Unlock()
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("upgrade error:", err)
@@ -31,6 +46,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("new client connected, total:", len(clients))
 
+	var msgCount int
+	windowStart := time.Now()
+
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -41,6 +59,22 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		log.Printf("received: %s", msg)
+
+		now := time.Now()
+		if now.Sub(windowStart) > time.Second {
+			msgCount = 0
+			windowStart = now
+		}
+		msgCount++
+		if msgCount > rateLimit {
+			log.Println("rate limit exceeded, message dropped")
+			continue
+		}
+
+		if len(msg) > maxMessageSize {
+			log.Printf("message too large: %d bytes, dropped", len(msg))
+			continue
+		}
 
 		if err := SaveMessage(string(msg)); err != nil {
 			log.Println("save error:", err)
