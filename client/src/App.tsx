@@ -1,19 +1,22 @@
 import { useState, useRef, useEffect } from "react";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
+const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8080/ws";
+
 function App() {
   const [msgs, setMsgs] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    fetch("http://localhost:8080/messages")
+    fetch(`${API_URL}/messages`)
       .then((res) => res.json())
       .then((data) => {
         setMsgs(data.map((m: { content: string }) => m.content));
       })
       .catch(console.error);
 
-    const ws = new WebSocket("ws://localhost:8080/ws");
+    const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onmessage = (e) => {

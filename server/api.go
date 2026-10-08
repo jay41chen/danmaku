@@ -3,10 +3,15 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 )
 
 func handleMessages(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+	origin := os.Getenv("CORS_ORIGIN")
+	if origin == "" {
+		origin = "*"
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Content-Type", "application/json")
 
 	msgs, err := GetMessages(50)
