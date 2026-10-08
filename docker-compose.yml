@@ -1,0 +1,15 @@
+services:
+    postgres:
+        image: postgres:17
+        container_name: danmaku-db
+        ports:
+            - 3192:5432 # 5432為image default port，不能改
+        environment:
+            POSTGRES_USER: danmaku
+            POSTGRES_PASSWORD: danmaku
+            POSTGRES_DB: danmaku
+    redis:
+        image: redis:7
+        container_name: danmaku-redis
+        ports:
+            - 2907:6379 # 6379為image default port，不能改
