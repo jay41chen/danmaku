@@ -6,6 +6,13 @@ function App() {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
+    fetch("http://localhost:8080/messages")
+      .then((res) => res.json())
+      .then((data) => {
+        setMsgs(data.map((m: { content: string }) => m.content));
+      })
+      .catch(console.error);
+
     const ws = new WebSocket("ws://localhost:8080/ws");
     wsRef.current = ws;
 

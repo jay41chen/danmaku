@@ -11,3 +11,4 @@ server/tmp/
 
 # OS
 .DS_Store
+server/server
