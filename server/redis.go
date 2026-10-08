@@ -11,11 +11,12 @@ import (
 var rdb *redis.Client
 
 func InitRedis(addr string) error {
-	rdb = redis.NewClient(
-		&redis.Options{
-			Addr: addr,
-		},
-	)
+	opt, err := redis.ParseURL(addr)
+	if err != nil {
+		opt = &redis.Options{Addr: addr}
+	}
+
+	rdb = redis.NewClient(opt)
 
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		return err
