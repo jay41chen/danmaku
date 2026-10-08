@@ -46,13 +46,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Println("save error:", err)
 		}
 
+		if err := Publish(string(msg)); err != nil {
+			log.Println("publish error:", err)
+		}
+	}
+}
+
+func StartBroadcast() {
+	Subscribe(func(msg string) {
 		mutex.Lock()
 		for client := range clients {
-			if err := client.WriteMessage(websocket.TextMessage, msg); err != nil {
+			if err := client.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 				client.Close()
 				delete(clients, client)
 			}
 		}
 		mutex.Unlock()
-	}
+	})
 }
