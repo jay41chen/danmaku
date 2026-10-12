@@ -7,35 +7,56 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var dbPool *pgxpool.Pool
+
+type DBStoreInterface interface {
+	SaveMessage(ctx context.Context, context string) error
+    QueryMessage(ctx context.Context, limit int) ([]Message, error)
+    CheckDBHealth(ctx context.Context) error
+}
+
+type DBStore struct { 
+	dbPool *pgxpool.Pool
+}
 
 type Message struct {
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func InitDB(connStr string) error {
-	p, err := pgxpool.New(context.Background(), connStr)
-	if err != nil {
-		return err
-	}
-	dbPool = p
-	return nil
+func NewDBStore(ctx context.Context, urlString string) (*DBStore, error) {
+    pool, err := pgxpool.New(ctx, urlString)
+    if err != nil {
+        return nil, err
+    }
+    return &DBStore{dbPool: pool}, nil
 }
 
-func CheckDBHealth(ctx context.Context)error{
-  return dbPool.Ping(ctx)
+func (this *DBStore) CheckDBHealth(ctx context.Context) error {
+	return this.dbPool.Ping(ctx)
 }
 
-func SaveMessage(content string) error {
-	_, err := dbPool.Exec(context.Background(),
-		"INSERT INTO messages (content) VALUES ($1)", content)
+func (this *DBStore) SaveMessage(ctx context.Context, content string) error {
+	_, err := this.dbPool.Exec(ctx,
+		`
+			INSERT 
+			INTO messages (content) 
+			VALUES ($1)
+		`, content)
 	return err
 }
 
-func GetMessages(limit int) ([]Message, error) {
-	rows, err := dbPool.Query(context.Background(),
-		"SELECT content, created_at FROM (SELECT id, content, created_at FROM messages ORDER BY id DESC LIMIT $1) sub ORDER BY id ASC", limit)
+func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]Message, error) {
+	rows, err := this.dbPool.Query(ctx, 
+		`
+			SELECT content, created_at
+			FROM (
+				SELECT id, content, created_at
+				FROM messages
+				ORDER BY id DESC
+				LIMIT $1
+			) sub
+			 ORDER BY id ASC
+		`, limit)	
 	if err != nil {
 		return nil, err
 	}
@@ -43,11 +64,12 @@ func GetMessages(limit int) ([]Message, error) {
 
 	msgs := []Message{}
 	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.Content, &m.CreatedAt); err != nil {
+		var msg Message
+		// 這行是幹嘛?為啥會有m?
+		if err := rows.Scan(&msg.Content, &msg.CreatedAt); err != nil {
 			return nil, err
 		}
-		msgs = append(msgs, m)
+		msgs = append(msgs, msg)
 	}
 	return msgs, nil
 }

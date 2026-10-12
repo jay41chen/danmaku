@@ -76,13 +76,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if err := SaveMessage(string(msg)); err != nil {
-			log.Println("save error:", err)
-		}
+		// 先註解起來，後續commit再調整
+		// if err := SaveMessage(string(msg)); err != nil {
+		// 	log.Println("save error:", err)
+		// }
 
-		if err := Publish(string(msg)); err != nil {
-			log.Println("publish error:", err)
-		}
+		// if err := Publish(string(msg)); err != nil {
+		// 	log.Println("publish error:", err)
+		// }
 	}
 }
 

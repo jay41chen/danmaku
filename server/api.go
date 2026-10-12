@@ -9,27 +9,39 @@ import (
 	"time"
 )
 
-func handleMessages(w http.ResponseWriter, r *http.Request) {
+type APIHandler struct {
+	db DBStoreInterface
+}
+
+func setCors(w http.ResponseWriter){
 	origin := os.Getenv("CORS_ORIGIN")
 	if origin == "" {
 		origin = "*"
 	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", origin)	
+}
 
-	msgs, err := GetMessages(50)
+func setContentType(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+}
+
+func (this *APIHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
+	setCors(w)
+	setContentType(w)
+	
+	msgs, err := this.db.QueryMessage(r.Context(), 50)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return 
 	}
 
 	json.NewEncoder(w).Encode(msgs)
 }
 
 // check server is alive
-func checkServerHealth(w http.ResponseWriter, r *http.Request) {
+func (this *APIHandler) checkServerHealth(w http.ResponseWriter, r *http.Request) {
 	/// no need check cors since its just a health check api
-	w.Header().Set("Content-Type", "application/json")
+	setContentType(w)
 
 	/// setting timeout
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -38,15 +50,18 @@ func checkServerHealth(w http.ResponseWriter, r *http.Request) {
 	// goroutine, fire 2 parallel method
 	var wg sync.WaitGroup
 	var dbError, redisError error
-	wg.Add(2)
+	// 等redis弄完再加上
+	// wg.Add(2)
+	wg.Add(1)
 	go func() { 
 		defer wg.Done()
-		dbError = CheckDBHealth(ctx)
+		dbError = this.db.CheckDBHealth(ctx)
 	}()
-	go func() {
-		defer wg.Done()
-		redisError = CheckRedisHealth(ctx)
-	}()
+	// 等redis弄完再加上
+	// go func() {
+	// 	defer wg.Done()
+	// 	redisError = CheckRedisHealth(ctx)
+	// }()
 	wg.Wait()
 
 	if dbError != nil || redisError != nil {
@@ -65,4 +80,3 @@ func checkServerHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status":"ok"})
 }
-
