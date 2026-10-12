@@ -50,18 +50,19 @@ func checkServerHealth(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	if dbError != nil || redisError != nil {
+		errorMsg := map[string]string{}
+		if dbError != nil {
+			errorMsg["db error"] = dbError.Error()
+		}
+		if redisError != nil {
+			errorMsg["redis error"]= redisError.Error()
+		}
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(
-			map[string]string{
-				"status":"internal error",
-				"redis error": redisError.Error(),
-				"db error": dbError.Error(),
-			})
+		json.NewEncoder(w).Encode(errorMsg)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status":"ok"})
 }
-
 
