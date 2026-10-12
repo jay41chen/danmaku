@@ -10,41 +10,49 @@ import (
 
 const channel = "danmaku:messages"
 
-var redisClient *redis.Client
+type RedisStoreInterface interface { 
+	Publish(ctx context.Context, msg string) error
+	Subscribe(ctx context.Context, handler func(string)) error
+	CheckHealth(ctx context.Context) error 
+}
 
-func InitRedis(addr string) error {
-	opt, err := redis.ParseURL(addr)
+type RedisStore struct {
+	client *redis.Client
+}
+
+// constuctor
+func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
+	option, err := redis.ParseURL(address)
 	if err != nil {
-		opt = &redis.Options{Addr: addr}
+		option = &redis.Options { Addr: address }
 	}
 
-	redisClient = redis.NewClient(opt)
-
-	if err := redisClient.Ping(context.Background()).Err(); err != nil {
-		return err
+	client := redis.NewClient(option)
+	
+	if err := client.Ping(ctx).Err(); err != nil {
+		return nil, err
 	}
-
 	log.Println("redis connected")
-	return nil
+	return &RedisStore{ client: client}, nil
 }
 
-func CheckRedisHealth(ctx context.Context) error {
-	return redisClient.Ping(ctx).Err()
+func (this *RedisStore) CheckHealth(ctx context.Context) error {
+	return this.client.Ping(ctx).Err()
 }
 
-func Publish(msg string) error {
-	return redisClient.Publish(context.Background(), channel, msg).Err()
+func (this *RedisStore) Publish(ctx context.Context, msg string) error{
+	return this.client.Publish(ctx, channel, msg).Err()
 }
 
-func Subscribe(handler func(string)) {
+func (this *RedisStore) Subscribe(ctx context.Context, handler func(string)) error{
 	for {
-		sub := redisClient.Subscribe(context.Background(), channel)
+		sub := this.client.Subscribe(ctx, channel)
 		ch := sub.Channel()
 		for msg := range ch {
 			handler(msg.Payload)
 		}
 		sub.Close()
 		log.Println("redis subscription lost, reconnecting in 1s...")
-		time.Sleep(time.Second)
+		time.Sleep(time.Second)	
 	}
 }

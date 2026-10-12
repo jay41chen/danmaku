@@ -11,7 +11,7 @@ import (
 type DBStoreInterface interface {
 	SaveMessage(ctx context.Context, context string) error
     QueryMessage(ctx context.Context, limit int) ([]Message, error)
-    CheckDBHealth(ctx context.Context) error
+    CheckHealth(ctx context.Context) error
 }
 
 type DBStore struct { 
@@ -23,6 +23,7 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// constuctor
 func NewDBStore(ctx context.Context, urlString string) (*DBStore, error) {
     pool, err := pgxpool.New(ctx, urlString)
     if err != nil {
@@ -31,7 +32,7 @@ func NewDBStore(ctx context.Context, urlString string) (*DBStore, error) {
     return &DBStore{dbPool: pool}, nil
 }
 
-func (this *DBStore) CheckDBHealth(ctx context.Context) error {
+func (this *DBStore) CheckHealth(ctx context.Context) error {
 	return this.dbPool.Ping(ctx)
 }
 

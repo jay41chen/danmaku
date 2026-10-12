@@ -11,6 +11,15 @@ import (
 
 type APIHandler struct {
 	db DBStoreInterface
+	redis RedisStoreInterface
+}
+
+// constructor
+func NewAPIHandler(db DBStoreInterface, redis RedisStoreInterface,) *APIHandler {
+	return &APIHandler{
+		db: db,
+		redis: redis,
+	}
 }
 
 func setCors(w http.ResponseWriter){
@@ -51,17 +60,15 @@ func (this *APIHandler) checkServerHealth(w http.ResponseWriter, r *http.Request
 	var wg sync.WaitGroup
 	var dbError, redisError error
 	// 等redis弄完再加上
-	// wg.Add(2)
-	wg.Add(1)
+	wg.Add(2)
 	go func() { 
 		defer wg.Done()
-		dbError = this.db.CheckDBHealth(ctx)
+		dbError = this.db.CheckHealth(ctx)
 	}()
-	// 等redis弄完再加上
-	// go func() {
-	// 	defer wg.Done()
-	// 	redisError = CheckRedisHealth(ctx)
-	// }()
+	go func() {
+		defer wg.Done()
+		redisError = this.redis.CheckHealth(ctx)
+	}()
 	wg.Wait()
 
 	if dbError != nil || redisError != nil {
