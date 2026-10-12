@@ -28,6 +28,7 @@ func main() {
 
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/messages", handleMessages)
+	http.HandleFunc("/healthcheck", checkServerHealth)
 
 	port := os.Getenv("PORT")
 	if port == "" {

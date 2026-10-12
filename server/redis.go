@@ -8,7 +8,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var rdb *redis.Client
+const channel = "danmaku:messages"
+
+var redisClient *redis.Client
 
 func InitRedis(addr string) error {
 	opt, err := redis.ParseURL(addr)
@@ -16,9 +18,9 @@ func InitRedis(addr string) error {
 		opt = &redis.Options{Addr: addr}
 	}
 
-	rdb = redis.NewClient(opt)
+	redisClient = redis.NewClient(opt)
 
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
 		return err
 	}
 
@@ -26,15 +28,17 @@ func InitRedis(addr string) error {
 	return nil
 }
 
-const channel = "danmaku:messages"
+func CheckRedisHealth(ctx context.Context) error {
+	return redisClient.Ping(ctx).Err()
+}
 
 func Publish(msg string) error {
-	return rdb.Publish(context.Background(), channel, msg).Err()
+	return redisClient.Publish(context.Background(), channel, msg).Err()
 }
 
 func Subscribe(handler func(string)) {
 	for {
-		sub := rdb.Subscribe(context.Background(), channel)
+		sub := redisClient.Subscribe(context.Background(), channel)
 		ch := sub.Channel()
 		for msg := range ch {
 			handler(msg.Payload)

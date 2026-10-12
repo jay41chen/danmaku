@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var pool *pgxpool.Pool
+var dbPool *pgxpool.Pool
 
 type Message struct {
 	Content   string    `json:"content"`
@@ -19,18 +19,22 @@ func InitDB(connStr string) error {
 	if err != nil {
 		return err
 	}
-	pool = p
+	dbPool = p
 	return nil
 }
 
+func CheckDBHealth(ctx context.Context)error{
+  return dbPool.Ping(ctx)
+}
+
 func SaveMessage(content string) error {
-	_, err := pool.Exec(context.Background(),
+	_, err := dbPool.Exec(context.Background(),
 		"INSERT INTO messages (content) VALUES ($1)", content)
 	return err
 }
 
 func GetMessages(limit int) ([]Message, error) {
-	rows, err := pool.Query(context.Background(),
+	rows, err := dbPool.Query(context.Background(),
 		"SELECT content, created_at FROM (SELECT id, content, created_at FROM messages ORDER BY id DESC LIMIT $1) sub ORDER BY id ASC", limit)
 	if err != nil {
 		return nil, err
