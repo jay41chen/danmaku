@@ -22,14 +22,16 @@
 
 ## W3 — Structured Logging + Metrics + Error Handling
 
-- [ ] Structured logging（slog，JSON format）
+- [x] Structured logging（slog，JSON format）
+- [ ] Log aggregation（Promtail → Loki → Grafana）
 - [ ] Metrics（Prometheus + Grafana）
 - [ ] Production error handling 強化
 
-## W4 — Auth + Migration + Room
+## W4 — Auth + Migration + Room + Middleware
 
+- [ ] HTTP middleware pattern（request logging + request ID）
 - [ ] Database migration tool（golang-migrate）
-- [ ] Authentication（JWT）
+- [ ] Authentication（JWT middleware）
 - [ ] Authorization（RBAC）
 - [ ] Room 概念（房間 + 房主）
 
