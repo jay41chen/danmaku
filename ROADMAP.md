@@ -23,8 +23,8 @@
 ## W3 — Structured Logging + Metrics + Error Handling
 
 - [x] Structured logging（slog，JSON format）
-- [ ] Log aggregation（Promtail → Loki → Grafana）
-- [ ] Metrics（Prometheus + Grafana）
+- [x] Log aggregation（Promtail → Loki → Grafana） ← local dev only
+- [ ] Metrics（Prometheus + Grafana） ← local dev only
 - [ ] Production error handling 強化
 
 ## W4 — Auth + Migration + Room + Middleware
