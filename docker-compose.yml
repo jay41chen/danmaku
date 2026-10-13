@@ -44,7 +44,32 @@ services:
             - server-1
             - server-2
         volumes:
-            - ./nginx.conf:/etc/nginx/nginx.conf # 把本機的nginx config覆蓋到container內
+            - ./config/nginx.conf:/etc/nginx/nginx.conf:ro # 把本機的nginx config覆蓋到container內
         ports:
             - 5390:80
-            
+    
+    loki:
+        image: grafana/loki:3.0.0
+        container_name: danmaku-loki
+        ports:
+            - 5391:3100
+    
+    promtail:
+        image: grafana/promtail:3.0.0
+        container_name: danmaku-promtail
+        depends_on:
+            - loki
+        # promtail比較特別，不需要port，因為他只是relay去loki而已
+        volumes:
+            - ./config/promtail-config.yml:/etc/promtail/config.yml:ro
+            - /var/lib/docker/containers:/var/lib/docker/containers:ro
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    grafana:
+        image: grafana/grafana:11.0.0
+        container_name: danmaku-grafana
+        depends_on:
+            - loki
+        ports:
+            - 5392:3000
+
