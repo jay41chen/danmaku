@@ -1,0 +1,48 @@
+# Roadmap
+
+## W1 — 基礎彈幕系統 ✅
+
+- [x] Go HTTP server（gorilla/mux）
+- [x] WebSocket 即時廣播（gorilla/websocket）
+- [x] PostgreSQL 訊息持久化（pgx）
+- [x] Redis Pub/Sub 跨 instance 廣播
+- [x] REST API（POST /messages、GET /messages、GET /healthcheck）
+- [x] React 前端（TypeScript + Vite）
+- [x] 部署：Railway（server）+ GitHub Pages（前端）
+- [x] CORS 處理
+
+## W2 — 架構改善 & 多 instance 驗證 ✅
+
+- [x] DI 重構（interface 抽取、依賴注入）
+- [x] Dockerfile（layer caching 優化）
+- [x] Docker Compose 編排（PostgreSQL、Redis、server x2、nginx）
+- [x] Nginx reverse proxy + load balancer（least_conn）
+- [x] WebSocket 透過 nginx 轉發（upgrade headers）
+- [x] 跨 instance WebSocket 廣播驗證
+
+## W3 — Structured Logging + Metrics + Error Handling
+
+- [ ] Structured logging（slog，JSON format）
+- [ ] Metrics（Prometheus + Grafana）
+- [ ] Production error handling 強化
+
+## W4 — Auth + Migration + Room
+
+- [ ] Database migration tool（golang-migrate）
+- [ ] Authentication（JWT）
+- [ ] Authorization（RBAC）
+- [ ] Room 概念（房間 + 房主）
+
+## W5 — API 設計強化
+
+- [ ] Rate limiting（middleware）
+- [ ] Pagination
+- [ ] API versioning
+- [ ] 統一 error response 格式
+
+## W6 — CI/CD + 進階穩定性
+
+- [ ] CI/CD（GitHub Actions）
+- [ ] Redis List replay（搭配前端 auto-reconnect）
+- [ ] Alerts
+- [ ] Chaos testing
