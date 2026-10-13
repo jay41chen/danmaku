@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -12,15 +13,17 @@ import (
 )
 
 type APIHandler struct {
-	db    store.DBStoreInterface
-	redis store.RedisStoreInterface
+	db     store.DBStoreInterface
+	redis  store.RedisStoreInterface
+	logger *slog.Logger
 }
 
 // constructor
 func NewAPIHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *APIHandler {
 	return &APIHandler{
-		db:    db,
-		redis: redis,
+		db:     db,
+		redis:  redis,
+		logger: slog.Default().With("component", "api"),
 	}
 }
 

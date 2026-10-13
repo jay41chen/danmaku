@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -19,10 +18,16 @@ type ApplicationStore struct {
 }
 
 func main() {
+	initApp()
 	// generate application store to keep singleton instances
 	newApplicationStore()
 
 	startServer()
+}
+
+func initApp() {
+	// init slog
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 }
 
 func newApplicationStore() *ApplicationStore {
@@ -45,7 +50,8 @@ func (this *ApplicationStore) initDB() {
 	dbStore, err := store.NewDBStore(context.Background(), dbURL)
 	if err != nil {
 		// fatal will terminate the execution!!
-		log.Fatal("db init error:", err)
+		slog.Error("db init failed", "error", err)
+		os.Exit(1)
 	}
 	this.dbStore = dbStore
 }
@@ -57,7 +63,8 @@ func (this *ApplicationStore) initRedis() {
 	}
 	redisStore, err := store.NewRedisStore(context.Background(), redisURL)
 	if err != nil {
-		log.Fatal("redis init error", err)
+		slog.Error("redis init failed", "error", err)
+		os.Exit(1)
 	}
 	this.redisStore = redisStore
 }
@@ -84,6 +91,10 @@ func startServer() {
 	if port == "" {
 		port = "8080"
 	}
-	fmt.Printf("Server listening on :%s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+
+	slog.Info("server listening", "port", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
 }

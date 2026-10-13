@@ -3,7 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -23,6 +23,7 @@ type WebsocketHandler struct {
 	db      store.DBStoreInterface
 	clients map[*websocket.Conn]bool
 	mutex   sync.Mutex
+	logger  *slog.Logger
 }
 
 var upgrader = websocket.Upgrader{
@@ -35,6 +36,7 @@ func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterf
 		redis:   redis,
 		db:      db,
 		clients: make(map[*websocket.Conn]bool),
+		logger:  slog.Default().With("component", "websocket"),
 	}
 }
 
@@ -52,7 +54,7 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	// server 同意後才切換協定。
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("upgrade error:", err)
+		this.logger.Error("ws upgrade failed", "error", err)
 		return
 	}
 	defer connection.Close()
@@ -81,7 +83,7 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 			this.removeClient(connection)
 			break
 		}
-		log.Printf("received: %s", msg)
+		this.logger.Debug("info received", "msg", string(msg))
 		// 加上一秒內5則的rate limit
 		now := time.Now()
 		if now.Sub(windowStart) > time.Second {
@@ -90,7 +92,7 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 		}
 		msgCount++
 		if msgCount > rateLimit {
-			log.Println("rate limit exceeded, message dropped")
+			this.logger.Warn("too many msgs sent", "limit", rateLimit)
 			continue
 		}
 
@@ -103,25 +105,26 @@ func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 	this.clients[conn] = true
-	log.Println("new client connected, total:", len(this.clients))
+	/// 有辦法找到conn的uuid之類的嗎
+	this.logger.Info("new client connected", "total", len(this.clients))
 }
 
 func (this *WebsocketHandler) removeClient(conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 	delete(this.clients, conn)
-	log.Println("client disconnected, total:", len(this.clients))
+	this.logger.Info("client disconnected", "total", len(this.clients))
 }
 
 func (this *WebsocketHandler) processRemoteMessage(msg string) {
 	ctx := context.Background()
 	// 檢查是否可以寫入DB
 	if err := this.db.SaveMessage(ctx, msg); err != nil {
-		log.Println("save error:", err)
+		this.logger.Error("save message to db failed", "error", err)
 	}
 	// 檢查是否可以發到redis
 	if err := this.redis.Publish(ctx, msg); err != nil {
-		log.Println("publish error:", err)
+		this.logger.Error("publish to redis failed", "error", err)
 	}
 }
 

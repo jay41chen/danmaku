@@ -2,29 +2,32 @@ package store
 
 import (
 	"context"
+	"log/slog"
+
 	"github.com/jay41chen/danmaku/server/internal/model"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-
 type DBStoreInterface interface {
 	SaveMessage(ctx context.Context, context string) error
-    QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
-    CheckHealth(ctx context.Context) error
+	QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
+	CheckHealth(ctx context.Context) error
 }
 
-type DBStore struct { 
+type DBStore struct {
 	dbPool *pgxpool.Pool
+	logger *slog.Logger
 }
 
 // constuctor
 func NewDBStore(ctx context.Context, urlString string) (*DBStore, error) {
-    pool, err := pgxpool.New(ctx, urlString)
-    if err != nil {
-        return nil, err
-    }
-    return &DBStore{dbPool: pool}, nil
+	logger := slog.Default().With("component", "db")
+	pool, err := pgxpool.New(ctx, urlString)
+	if err != nil {
+		return nil, err
+	}
+	return &DBStore{dbPool: pool, logger: logger}, nil
 }
 
 func (this *DBStore) CheckHealth(ctx context.Context) error {
@@ -42,7 +45,7 @@ func (this *DBStore) SaveMessage(ctx context.Context, content string) error {
 }
 
 func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
-	rows, err := this.dbPool.Query(ctx, 
+	rows, err := this.dbPool.Query(ctx,
 		`
 			SELECT content, created_at
 			FROM (
@@ -52,7 +55,7 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 				LIMIT $1
 			) sub
 			 ORDER BY id ASC
-		`, limit)	
+		`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +64,6 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 	msgs := []model.Message{}
 	for rows.Next() {
 		var msg model.Message
-		// 這行是幹嘛?為啥會有m?
 		if err := rows.Scan(&msg.Content, &msg.CreatedAt); err != nil {
 			return nil, err
 		}
