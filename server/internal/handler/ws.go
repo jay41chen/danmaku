@@ -1,13 +1,15 @@
-package main
+package handler
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
 	"time"
-	"fmt"
-	"context"
+
 	"github.com/gorilla/websocket"
+	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 const (
@@ -17,8 +19,8 @@ const (
 )
 
 type WebsocketHandler struct {
-	redis RedisStoreInterface
-	db DBStoreInterface
+	redis   store.RedisStoreInterface
+	db      store.DBStoreInterface
 	clients map[*websocket.Conn]bool
 	mutex   sync.Mutex
 }
@@ -28,30 +30,30 @@ var upgrader = websocket.Upgrader{
 }
 
 // constuctor
-func NewWebsocketHandler(redis RedisStoreInterface, db DBStoreInterface) *WebsocketHandler {
-    return &WebsocketHandler{
-        redis:   redis,
-        db:      db,
-        clients: make(map[*websocket.Conn]bool),
-    }
+func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterface) *WebsocketHandler {
+	return &WebsocketHandler{
+		redis:   redis,
+		db:      db,
+		clients: make(map[*websocket.Conn]bool),
+	}
 }
 
-func (this *WebsocketHandler) handleWebsocket(w http.ResponseWriter, r *http.Request) {
+func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// 先檢查上限
 	this.mutex.Lock()
 	err := this.checkClientLimit(w)
 	if err != nil {
 		this.mutex.Unlock()
-		return 
+		return
 	}
 	this.mutex.Unlock()
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
 	// 瀏覽器先發一個 HTTP request 說「我想升級成 WebSocket」，
 	// server 同意後才切換協定。
-	connection, err := upgrader.Upgrade(w, r, nil)	
+	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-    	log.Println("upgrade error:", err)
-    	return
+		log.Println("upgrade error:", err)
+		return
 	}
 	defer connection.Close()
 
@@ -59,7 +61,7 @@ func (this *WebsocketHandler) handleWebsocket(w http.ResponseWriter, r *http.Req
 	this.listenConnection(connection)
 }
 
-func (this *WebsocketHandler) checkClientLimit(w http.ResponseWriter) error{ 
+func (this *WebsocketHandler) checkClientLimit(w http.ResponseWriter) error {
 	if len(this.clients) >= maxClients {
 		// ??? 不懂為什麼http.Error是void
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
@@ -94,21 +96,21 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 
 		this.processRemoteMessage(string(msg))
 	}
-	
+
 }
 
 func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
 	this.mutex.Lock()
-    defer this.mutex.Unlock()
-    this.clients[conn] = true
-    log.Println("new client connected, total:", len(this.clients))
+	defer this.mutex.Unlock()
+	this.clients[conn] = true
+	log.Println("new client connected, total:", len(this.clients))
 }
 
 func (this *WebsocketHandler) removeClient(conn *websocket.Conn) {
 	this.mutex.Lock()
-    defer this.mutex.Unlock()
-    delete(this.clients, conn)
-    log.Println("client disconnected, total:", len(this.clients))
+	defer this.mutex.Unlock()
+	delete(this.clients, conn)
+	log.Println("client disconnected, total:", len(this.clients))
 }
 
 func (this *WebsocketHandler) processRemoteMessage(msg string) {
@@ -124,7 +126,7 @@ func (this *WebsocketHandler) processRemoteMessage(msg string) {
 }
 
 func (this *WebsocketHandler) StartBroadcast() {
-	this.redis.Subscribe(context.Background(), func(msg string){
+	this.redis.Subscribe(context.Background(), func(msg string) {
 		this.mutex.Lock()
 		for client := range this.clients {
 			if err := client.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {

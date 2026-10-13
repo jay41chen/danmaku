@@ -1,8 +1,8 @@
-package main
+package store
 
 import (
 	"context"
-	"time"
+	"github.com/jay41chen/danmaku/server/internal/model"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -10,17 +10,12 @@ import (
 
 type DBStoreInterface interface {
 	SaveMessage(ctx context.Context, context string) error
-    QueryMessage(ctx context.Context, limit int) ([]Message, error)
+    QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
     CheckHealth(ctx context.Context) error
 }
 
 type DBStore struct { 
 	dbPool *pgxpool.Pool
-}
-
-type Message struct {
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
 }
 
 // constuctor
@@ -46,7 +41,7 @@ func (this *DBStore) SaveMessage(ctx context.Context, content string) error {
 	return err
 }
 
-func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]Message, error) {
+func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
 	rows, err := this.dbPool.Query(ctx, 
 		`
 			SELECT content, created_at
@@ -63,9 +58,9 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]Message, er
 	}
 	defer rows.Close()
 
-	msgs := []Message{}
+	msgs := []model.Message{}
 	for rows.Next() {
-		var msg Message
+		var msg model.Message
 		// 這行是幹嘛?為啥會有m?
 		if err := rows.Scan(&msg.Content, &msg.CreatedAt); err != nil {
 			return nil, err

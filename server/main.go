@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"context"
+
+	"github.com/jay41chen/danmaku/server/internal/handler"
+	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 type ApplicationStore struct {
-	dbStore *DBStore
-	redisStore *RedisStore
-	apiHandler *APIHandler
-	websocketHandler *WebsocketHandler
+	dbStore          *store.DBStore
+	redisStore       *store.RedisStore
+	apiHandler       *handler.APIHandler
+	websocketHandler *handler.WebsocketHandler
 }
 
 func main() {
@@ -39,10 +42,10 @@ func (this *ApplicationStore) initDB() {
 	if dbURL == "" {
 		dbURL = "postgres://danmaku:danmaku@localhost:3192/danmaku"
 	}
-	dbStore, err := NewDBStore(context.Background(), dbURL)
+	dbStore, err := store.NewDBStore(context.Background(), dbURL)
 	if err != nil {
 		// fatal will terminate the execution!!
-		log.Fatal("db init error:", err) 
+		log.Fatal("db init error:", err)
 	}
 	this.dbStore = dbStore
 }
@@ -52,7 +55,7 @@ func (this *ApplicationStore) initRedis() {
 	if redisURL == "" {
 		redisURL = "localhost:2907"
 	}
-	redisStore, err := NewRedisStore(context.Background(), redisURL)
+	redisStore, err := store.NewRedisStore(context.Background(), redisURL)
 	if err != nil {
 		log.Fatal("redis init error", err)
 	}
@@ -60,20 +63,20 @@ func (this *ApplicationStore) initRedis() {
 }
 
 func (this *ApplicationStore) initAPIHandler() {
-	this.apiHandler = NewAPIHandler(this.dbStore, this.redisStore,)
+	this.apiHandler = handler.NewAPIHandler(this.dbStore, this.redisStore)
 }
 
 func (this *ApplicationStore) initWebsocketHandler() {
-	this.websocketHandler = NewWebsocketHandler(this.redisStore, this.dbStore)
+	this.websocketHandler = handler.NewWebsocketHandler(this.redisStore, this.dbStore)
 }
 
 func (this *ApplicationStore) registerAPIRoute() {
-	http.HandleFunc("/messages", this.apiHandler.handleMessages)
-	http.HandleFunc("/healthcheck", this.apiHandler.checkServerHealth)
+	http.HandleFunc("/messages", this.apiHandler.HandleMessages)
+	http.HandleFunc("/healthcheck", this.apiHandler.CheckServerHealth)
 }
 
 func (this *ApplicationStore) registerWSRoute() {
-	http.HandleFunc("/ws", this.websocketHandler.handleWebsocket)
+	http.HandleFunc("/ws", this.websocketHandler.HandleWebsocket)
 }
 
 func startServer() {

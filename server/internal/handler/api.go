@@ -1,54 +1,56 @@
-package main
+package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
-	"context"
 	"sync"
 	"time"
+
+	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 type APIHandler struct {
-	db DBStoreInterface
-	redis RedisStoreInterface
+	db    store.DBStoreInterface
+	redis store.RedisStoreInterface
 }
 
 // constructor
-func NewAPIHandler(db DBStoreInterface, redis RedisStoreInterface,) *APIHandler {
+func NewAPIHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *APIHandler {
 	return &APIHandler{
-		db: db,
+		db:    db,
 		redis: redis,
 	}
 }
 
-func setCors(w http.ResponseWriter){
+func setCors(w http.ResponseWriter) {
 	origin := os.Getenv("CORS_ORIGIN")
 	if origin == "" {
 		origin = "*"
 	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)	
+	w.Header().Set("Access-Control-Allow-Origin", origin)
 }
 
 func setContentType(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 }
 
-func (this *APIHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
+func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	setCors(w)
 	setContentType(w)
-	
+
 	msgs, err := this.db.QueryMessage(r.Context(), 50)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return 
+		return
 	}
 
 	json.NewEncoder(w).Encode(msgs)
 }
 
 // check server is alive
-func (this *APIHandler) checkServerHealth(w http.ResponseWriter, r *http.Request) {
+func (this *APIHandler) CheckServerHealth(w http.ResponseWriter, r *http.Request) {
 	/// no need check cors since its just a health check api
 	setContentType(w)
 
@@ -61,7 +63,7 @@ func (this *APIHandler) checkServerHealth(w http.ResponseWriter, r *http.Request
 	var dbError, redisError error
 	// 等redis弄完再加上
 	wg.Add(2)
-	go func() { 
+	go func() {
 		defer wg.Done()
 		dbError = this.db.CheckHealth(ctx)
 	}()
@@ -77,7 +79,7 @@ func (this *APIHandler) checkServerHealth(w http.ResponseWriter, r *http.Request
 			errorMsg["db error"] = dbError.Error()
 		}
 		if redisError != nil {
-			errorMsg["redis error"]= redisError.Error()
+			errorMsg["redis error"] = redisError.Error()
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(errorMsg)
@@ -85,5 +87,5 @@ func (this *APIHandler) checkServerHealth(w http.ResponseWriter, r *http.Request
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status":"ok"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
