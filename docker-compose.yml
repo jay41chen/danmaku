@@ -13,3 +13,33 @@ services:
         container_name: danmaku-redis
         ports:
             - 2907:6379 # 6379為image default port，不能改
+    server-1: #  key name, 其他 container 用 "server-1" 就能找到它
+        build: ./server # dockerfile path
+        container_name: danmaku-server-1
+        depends_on:
+            - postgres
+            - redis
+        environment:
+            # 走內網，所以port用5432
+            DATABASE_URL: postgres://danmaku:danmaku@postgres:5432/danmaku
+            REDIS_URL: redis:6379
+        ports:
+            - 5388:8080
+    server-2:
+        build: ./server
+        container_name: danmaku-server-2
+        depends_on:
+            - postgres
+            - redis
+        environment:
+            # 走內網，所以port用5432
+            DATABASE_URL: postgres://danmaku:danmaku@postgres:5432/danmaku
+            REDIS_URL: redis:6379
+        ports:
+            - 5389:8080
+    nginx:
+        image: nginx:1.27-alpine
+        container_name: danmaku-nginx
+        ports:
+            - 5390:80
+            
