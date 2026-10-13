@@ -10,6 +10,18 @@
 - **Frontend**: React + TypeScript + Vite
 - **Database**: PostgreSQL 17
 - **Cache**: Redis 7 (Pub/Sub)
+- **Reverse Proxy**: Nginx 1.27
+- **Infrastructure**: Docker Compose
+
+## Architecture
+
+```
+Client → Nginx (load balancer, least_conn)
+           ├── Server-1 (Go :8080)
+           └── Server-2 (Go :8080)
+                ├── PostgreSQL (持久化)
+                └── Redis (Pub/Sub 跨 instance 廣播)
+```
 
 ## Getting Started
 
@@ -19,18 +31,35 @@
 - Node.js 18+
 - Docker
 
-### Setup
-
-1. 啟動 Postgres 和 Redis：
+### Docker Compose（多 instance）
 
 ```bash
-docker compose up -d
+docker compose up --build
 ```
 
-2. 建立資料表：
+啟動後包含：PostgreSQL、Redis、兩個 Go server、Nginx load balancer。
+
+Nginx 入口：`http://localhost:5390`
+
+前端連線：
 
 ```bash
-docker exec -it danmaku-postgres psql -U danmaku
+VITE_WS_URL=ws://localhost:5390/ws VITE_API_URL=http://localhost:5390 npm run dev
+```
+
+### Local Development（單機開發）
+
+1. 單獨啟動 PostgreSQL 和 Redis：
+
+```bash
+docker run -d --name danmaku-db -p 3192:5432 -e POSTGRES_USER=danmaku -e POSTGRES_PASSWORD=danmaku -e POSTGRES_DB=danmaku postgres:17
+docker run -d --name danmaku-redis -p 2907:6379 redis:7
+```
+
+2. 建立資料表（server 不會自動 migrate）：
+
+```bash
+docker exec -it danmaku-db psql -U danmaku
 ```
 
 ```sql
@@ -56,11 +85,13 @@ npm install
 npm run dev
 ```
 
-5. 開啟 http://localhost:5173
+5. 開啟 http://localhost:5173/danmaku/
 
 ## Environment Variables
 
-| Variable | Description | Default |
+Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以下為 Local Development 的預設值。
+
+| Variable | Description | Local Default |
 |---|---|---|
 | `REDIS_URL` | Redis 連線地址 | `localhost:2907` |
 | `DATABASE_URL` | PostgreSQL 連線字串 | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
