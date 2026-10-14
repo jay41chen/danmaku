@@ -8,6 +8,8 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	"github.com/jay41chen/danmaku/server/internal/store"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type ApplicationStore struct {
@@ -19,10 +21,16 @@ type ApplicationStore struct {
 
 func main() {
 	initApp()
+	registerPrometheus()
 	// generate application store to keep singleton instances
 	newApplicationStore()
 
 	startServer()
+}
+
+func registerPrometheus() {
+	// 如果要custom registry再換
+	http.Handle("/metrics", promhttp.Handler())
 }
 
 func initApp() {
@@ -34,6 +42,7 @@ func newApplicationStore() *ApplicationStore {
 	appStore := ApplicationStore{}
 	appStore.initDB()
 	appStore.initRedis()
+
 	appStore.initAPIHandler()
 	appStore.registerAPIRoute()
 	appStore.initWebsocketHandler()

@@ -64,6 +64,8 @@ services:
             - ./config/promtail-config.yml:/etc/promtail/config.yml:ro
             - /var/lib/docker/containers:/var/lib/docker/containers:ro
             - /var/run/docker.sock:/var/run/docker.sock:ro
+        group_add: # 提供權限讓promtail可以透過docker socket去問有哪些container
+            - "0"
     
     grafana:
         image: grafana/grafana:11.0.0
@@ -73,3 +75,15 @@ services:
         ports:
             - 5392:3000
 
+    prometheus:
+        image: prom/prometheus:v3.15.0
+        container_name: danmaku-prometheus
+        volumes:
+            - ./config/prometheus-config.yml:/etc/prometheus/prometheus.yml:ro
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+        group_add:
+            - "0"
+        ports:
+            - 5393:9090
+
+    

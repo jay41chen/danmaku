@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: danmaku-server
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+    relabel_configs:
+      # 只保留 container name 含 "danmaku-server" 的 target
+      - source_labels: [__meta_docker_container_name]
+        regex: '.*danmaku-server.*'
+        action: keep
+      # 把 container name 存成 label
+      - source_labels: [__meta_docker_container_name]
+        target_label: container

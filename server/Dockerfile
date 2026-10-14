@@ -10,4 +10,5 @@ COPY . .
 # 編譯產生執行檔
 RUN go build -o main .
 # 執行server application
+EXPOSE 8080
 CMD ["./main"]
