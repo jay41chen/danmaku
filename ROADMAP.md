@@ -24,7 +24,7 @@
 
 - [x] Structured logging（slog，JSON format）
 - [x] Log aggregation（Promtail → Loki → Grafana） ← local dev only
-- [ ] Metrics（Prometheus + Grafana） ← local dev only
+- [x] Metrics（Prometheus + Grafana） ← local dev only
 - [ ] Production error handling 強化
 
 ## W4 — Auth + Migration + Room + Middleware

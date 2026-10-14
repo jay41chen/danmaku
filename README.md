@@ -12,7 +12,7 @@
 - **Cache**: Redis 7 (Pub/Sub)
 - **Reverse Proxy**: Nginx 1.27
 - **Infrastructure**: Docker Compose
-- **Observability (local dev)**: Promtail → Loki → Grafana
+- **Observability (local dev)**: Promtail → Loki → Grafana, Prometheus → Grafana
 
 ## Architecture
 
@@ -38,12 +38,13 @@ Client → Nginx (load balancer, least_conn)
 docker compose up --build
 ```
 
-啟動後包含：PostgreSQL、Redis、兩個 Go server、Nginx load balancer、Loki + Promtail + Grafana（log aggregation）。
+啟動後包含：PostgreSQL、Redis、兩個 Go server、Nginx load balancer、Loki + Promtail + Grafana（log aggregation）、Prometheus（metrics）。
 
 | Service | URL |
 |---|---|
 | Nginx 入口 | `http://localhost:5390` |
 | Grafana | `http://localhost:5392`（admin / admin） |
+| Prometheus | `http://localhost:5393` |
 
 前端連線：
 
@@ -99,7 +100,7 @@ npm run dev
 | Database | PostgreSQL container | Railway PostgreSQL |
 | Cache | Redis container | Railway Redis |
 | Logs | Promtail → Loki → Grafana | Railway built-in logs |
-| Metrics | Prometheus + Grafana（planned） | — |
+| Metrics | Prometheus + Grafana | — |
 
 Observability stack（Loki、Promtail、Grafana、Prometheus）只存在於 local dev 環境，不部署到 production。
 
