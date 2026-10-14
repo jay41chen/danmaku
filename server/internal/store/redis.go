@@ -8,7 +8,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const channel = "danmaku:messages"
+const (
+	channel       = "danmaku:messages"
+	retryMaxDelay = 30 * time.Second
+)
 
 type RedisStoreInterface interface {
 	Publish(ctx context.Context, msg string) error
@@ -51,14 +54,22 @@ func (this *RedisStore) Publish(ctx context.Context, msg string) error {
 }
 
 func (this *RedisStore) Subscribe(ctx context.Context, handler func(string)) error {
+	var delayTime time.Duration
 	for {
-		sub := this.client.Subscribe(ctx, channel)
-		ch := sub.Channel()
+		subscription := this.client.Subscribe(ctx, channel)
+		// 成功連上redis，重設delayTime
+		delayTime = 1 * time.Second
+		ch := subscription.Channel()
 		for msg := range ch {
 			handler(msg.Payload)
 		}
-		sub.Close()
-		this.logger.Warn("redis subscription lost, retry in 1 second")
-		time.Sleep(time.Second)
+		subscription.Close()
+		this.logger.Warn("redis subscription lost", "retryIn", delayTime)
+		time.Sleep(delayTime)
+		// backoff retry
+		delayTime *= 2
+		if delayTime >= retryMaxDelay {
+			delayTime = retryMaxDelay
+		}
 	}
 }

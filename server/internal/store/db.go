@@ -10,7 +10,7 @@ import (
 )
 
 type DBStoreInterface interface {
-	SaveMessage(ctx context.Context, context string) error
+	SaveMessage(ctx context.Context, content string) error
 	QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
 	CheckHealth(ctx context.Context) error
 }

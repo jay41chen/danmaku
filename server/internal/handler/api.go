@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -39,7 +40,16 @@ func setContentType(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 }
 
+func checkMethodValidation(r *http.Request, allowMethods []string) bool {
+	return slices.Contains(allowMethods, r.Method)
+}
+
 func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
+	if !checkMethodValidation(r, []string{http.MethodGet}) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	setCors(w)
 	setContentType(w)
 
@@ -55,6 +65,10 @@ func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 // check server is alive
 func (this *APIHandler) CheckServerHealth(w http.ResponseWriter, r *http.Request) {
+	if !checkMethodValidation(r, []string{http.MethodGet, http.MethodHead}) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	/// no need check cors since its just a health check api
 	setContentType(w)
 

@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -14,9 +13,9 @@ import (
 )
 
 const (
-	maxClients     = 100
-	maxMessageSize = 500
-	rateLimit      = 5
+	maxClients      = 100
+	maxMessageBytes = 500
+	rateLimit       = 5
 )
 
 type WebsocketHandler struct {
@@ -42,14 +41,6 @@ func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterf
 }
 
 func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
-	// 先檢查上限
-	this.mutex.Lock()
-	err := this.checkClientLimit(w)
-	if err != nil {
-		this.mutex.Unlock()
-		return
-	}
-	this.mutex.Unlock()
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
 	// 瀏覽器先發一個 HTTP request 說「我想升級成 WebSocket」，
 	// server 同意後才切換協定。
@@ -60,17 +51,19 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	}
 	defer connection.Close()
 
-	this.addClient(connection)
-	this.listenConnection(connection)
-}
-
-func (this *WebsocketHandler) checkClientLimit(w http.ResponseWriter) error {
+	this.mutex.Lock()
 	if len(this.clients) >= maxClients {
-		// ??? 不懂為什麼http.Error是void
-		http.Error(w, "too many connections", http.StatusServiceUnavailable)
-		return fmt.Errorf("too many connections")
+		this.logger.Warn("too many connections")
+		this.mutex.Unlock()
+		return
 	}
-	return nil
+	this.addClientLocked(connection)
+	// 有辦法找到conn的uuid之類的嗎
+	this.logger.Info("new client connected", "total", len(this.clients))
+	this.mutex.Unlock()
+	// 連線成功，設定每次發送的上限
+	connection.SetReadLimit(maxMessageBytes)
+	this.listenConnection(connection)
 }
 
 func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
@@ -100,14 +93,6 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 		this.processRemoteMessage(string(msg))
 	}
 
-}
-
-func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
-	this.mutex.Lock()
-	defer this.mutex.Unlock()
-	this.addClientLocked(conn)
-	/// 有辦法找到conn的uuid之類的嗎
-	this.logger.Info("new client connected", "total", len(this.clients))
 }
 
 func (this *WebsocketHandler) removeClient(conn *websocket.Conn) {
