@@ -17,18 +17,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type ApplicationStore struct {
-	dbStore          *store.DBStore
-	redisStore       *store.RedisStore
-	apiHandler       *handler.APIHandler
-	websocketHandler *handler.WebsocketHandler
-}
-
 func main() {
 	initApp()
 	registerPrometheus()
-	// generate application store to keep singleton instances
-	newApplicationStore()
+	db := initDatabase()
+	redis := initRedis()
+
+	apiHandler := handler.NewAPIHandler(db, redis)
+	registerAPIRoute(apiHandler)
+
+	wsHandler := handler.NewWebsocketHandler(redis, db)
+	registerWSRoute(wsHandler)
+	go wsHandler.StartBroadcast()
 
 	startServer()
 }
@@ -43,20 +43,7 @@ func initApp() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 }
 
-func newApplicationStore() *ApplicationStore {
-	appStore := ApplicationStore{}
-	appStore.initDB()
-	appStore.initRedis()
-
-	appStore.initAPIHandler()
-	appStore.registerAPIRoute()
-	appStore.initWebsocketHandler()
-	go appStore.websocketHandler.StartBroadcast()
-	appStore.registerWSRoute()
-	return &appStore
-}
-
-func (this *ApplicationStore) initDB() {
+func initDatabase() *store.DBStore {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://danmaku:danmaku@localhost:3192/danmaku"
@@ -67,10 +54,10 @@ func (this *ApplicationStore) initDB() {
 		slog.Error("db init failed", "error", err)
 		os.Exit(1)
 	}
-	this.dbStore = dbStore
+	return dbStore
 }
 
-func (this *ApplicationStore) initRedis() {
+func initRedis() *store.RedisStore {
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		redisURL = "localhost:2907"
@@ -80,24 +67,16 @@ func (this *ApplicationStore) initRedis() {
 		slog.Error("redis init failed", "error", err)
 		os.Exit(1)
 	}
-	this.redisStore = redisStore
+	return redisStore
 }
 
-func (this *ApplicationStore) initAPIHandler() {
-	this.apiHandler = handler.NewAPIHandler(this.dbStore, this.redisStore)
+func registerAPIRoute(apiHandler *handler.APIHandler) {
+	http.HandleFunc("/messages", apiHandler.HandleMessages)
+	http.HandleFunc("/healthcheck", apiHandler.CheckServerHealth)
 }
 
-func (this *ApplicationStore) initWebsocketHandler() {
-	this.websocketHandler = handler.NewWebsocketHandler(this.redisStore, this.dbStore)
-}
-
-func (this *ApplicationStore) registerAPIRoute() {
-	http.HandleFunc("/messages", this.apiHandler.HandleMessages)
-	http.HandleFunc("/healthcheck", this.apiHandler.CheckServerHealth)
-}
-
-func (this *ApplicationStore) registerWSRoute() {
-	http.HandleFunc("/ws", this.websocketHandler.HandleWebsocket)
+func registerWSRoute(wsHandler *handler.WebsocketHandler) {
+	http.HandleFunc("/ws", wsHandler.HandleWebsocket)
 }
 
 func startServer() {
