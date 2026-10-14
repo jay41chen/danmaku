@@ -105,8 +105,7 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
-	this.clients[conn] = true
-	prom.WebsocketConnections.Inc()
+	this.addClientLocked(conn)
 	/// 有辦法找到conn的uuid之類的嗎
 	this.logger.Info("new client connected", "total", len(this.clients))
 }
@@ -114,8 +113,7 @@ func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
 func (this *WebsocketHandler) removeClient(conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
-	prom.WebsocketConnections.Dec()
-	delete(this.clients, conn)
+	this.removeClientLocked(conn)
 	this.logger.Info("client disconnected", "total", len(this.clients))
 }
 
@@ -139,9 +137,18 @@ func (this *WebsocketHandler) StartBroadcast() {
 				/// for loop check other client is alive, if not
 				/// remove it from client list
 				client.Close()
-				delete(this.clients, client)
+				this.removeClientLocked(client)
 			}
 		}
 		this.mutex.Unlock()
 	})
+}
+
+func (this *WebsocketHandler) addClientLocked(conn *websocket.Conn) {
+	this.clients[conn] = true
+	prom.WebsocketConnections.Inc()
+}
+func (this *WebsocketHandler) removeClientLocked(conn *websocket.Conn) {
+	prom.WebsocketConnections.Dec()
+	delete(this.clients, conn)
 }

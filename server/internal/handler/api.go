@@ -45,7 +45,8 @@ func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	msgs, err := this.db.QueryMessage(r.Context(), 50)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		this.logger.Error("query messages failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -79,12 +80,13 @@ func (this *APIHandler) CheckServerHealth(w http.ResponseWriter, r *http.Request
 	if dbError != nil || redisError != nil {
 		errorMsg := map[string]string{}
 		if dbError != nil {
-			errorMsg["db error"] = dbError.Error()
+			errorMsg["db"] = "error"
 		}
 		if redisError != nil {
-			errorMsg["redis error"] = redisError.Error()
+			errorMsg["redis"] = "error"
 		}
 		w.WriteHeader(http.StatusInternalServerError)
+		this.logger.Error("health check failed", "dbError", dbError, "redisError", redisError)
 		json.NewEncoder(w).Encode(errorMsg)
 		return
 	}
