@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
@@ -103,9 +106,38 @@ func startServer() {
 		port = "8080"
 	}
 
-	slog.Info("server listening", "port", port)
-	if err := http.ListenAndServe(":"+port, middleware.RecoverPanic(prom.HttpMetrics(http.DefaultServeMux))); err != nil {
-		slog.Error("server stopped", "error", err)
+	// 建立SERVER
+	server := http.Server{
+		Addr:    ":" + port,
+		Handler: middleware.RecoverPanic(prom.HttpMetrics(http.DefaultServeMux)),
+	}
+
+	// 監聽 SIGTERM（docker stop / Railway deploy）和 SIGINT（Ctrl+C）
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// goroutine for server running state
+	// for receive application service ex: api/ws request
+	go func() {
+		slog.Info("server listening", "port", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server stopped unexpectedly", "error", err)
+			os.Exit(1)
+		}
+	}()
+	// main rountine suspend untill receive ctxDone,
+	<-ctx.Done()
+	slog.Info("shutting down server")
+
+	// 給 10 秒讓正在處理的 request 完成
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// server.Shutdown => graceful shutdown,
+	// 會關閉tcp連線，等現有連線處理完或是timeout
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("server stopped gracefully")
 }
