@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -105,6 +106,7 @@ func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 	this.clients[conn] = true
+	prom.WebsocketConnections.Inc()
 	/// 有辦法找到conn的uuid之類的嗎
 	this.logger.Info("new client connected", "total", len(this.clients))
 }
@@ -112,6 +114,7 @@ func (this *WebsocketHandler) addClient(conn *websocket.Conn) {
 func (this *WebsocketHandler) removeClient(conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
+	prom.WebsocketConnections.Dec()
 	delete(this.clients, conn)
 	this.logger.Info("client disconnected", "total", len(this.clients))
 }

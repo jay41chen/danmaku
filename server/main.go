@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
-	"github.com/jay41chen/danmaku/server/internal/middleware"
+	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/store"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -103,7 +103,7 @@ func startServer() {
 	}
 
 	slog.Info("server listening", "port", port)
-	if err := http.ListenAndServe(":"+port, middleware.PrometheusMetrics(http.DefaultServeMux)); err != nil {
+	if err := http.ListenAndServe(":"+port, prom.HttpMetrics(http.DefaultServeMux)); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
