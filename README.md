@@ -13,6 +13,7 @@
 - **Reverse Proxy**: Nginx 1.27
 - **Infrastructure**: Docker Compose
 - **Observability (local dev)**: Promtail → Loki → Grafana, Prometheus → Grafana
+- **Reliability**: Panic recovery middleware, graceful shutdown (SIGTERM/SIGINT)
 
 ## Architecture
 

@@ -20,12 +20,15 @@
 - [x] WebSocket 透過 nginx 轉發（upgrade headers）
 - [x] 跨 instance WebSocket 廣播驗證
 
-## W3 — Structured Logging + Metrics + Error Handling
+## W3 — Structured Logging + Metrics + Error Handling ✅
 
 - [x] Structured logging（slog，JSON format）
 - [x] Log aggregation（Promtail → Loki → Grafana） ← local dev only
 - [x] Metrics（Prometheus + Grafana） ← local dev only
-- [ ] Production error handling 強化
+- [x] Production error handling 強化
+  - [x] Sanitize error responses（不洩漏內部錯誤訊息）
+  - [x] Panic recovery middleware
+  - [x] Graceful shutdown（SIGTERM/SIGINT + 10s timeout）
 
 ## W4 — Auth + Migration + Room + Middleware
 
