@@ -30,6 +30,14 @@
   - [x] Panic recovery middleware
   - [x] Graceful shutdown（SIGTERM/SIGINT + 10s timeout）
 
+## Pre-W4 — 重構
+
+- [x] 移除 ApplicationStore，改用 function params DI（Go 慣例）
+- [x] WebSocket race condition 修復（upgrade 先、lock 內 check + add）
+- [x] SetReadLimit 防止過大訊息
+- [x] API method validation（405 Method Not Allowed）
+- [x] Redis Subscribe exponential backoff retry
+
 ## W4 — Auth + Migration + Room + Middleware
 
 - [ ] HTTP middleware pattern（request logging + request ID）
