@@ -5,12 +5,13 @@ import (
 	"strconv"
 	"time"
 
+	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	promlib "github.com/prometheus/client_golang/prometheus"
 )
 
 func HttpMetrics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		recorder := &statusRecorder{ResponseWriter: w, statusCode: 200}
+		recorder := middleware.NewStatusCodeRecorder(w)
 		start := time.Now()
 
 		next.ServeHTTP(recorder, r)
@@ -20,7 +21,7 @@ func HttpMetrics(next http.Handler) http.Handler {
 		HttpRequestCount.With(promlib.Labels{
 			"method":      r.Method,
 			"path":        r.URL.Path,
-			"status_code": strconv.Itoa(recorder.statusCode),
+			"status_code": strconv.Itoa(recorder.StatusCode()),
 		}).Inc()
 		HttpRequestDuration.With(promlib.Labels{
 			"method": r.Method,
