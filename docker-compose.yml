@@ -1,3 +1,11 @@
+# 定義 named volume（跟 services 同一層），實際名稱會是 danmaku_<key>
+# 不用 anonymous volume：docker compose down 後它會跟 container 脫鉤，下次 up 會換成新的空 volume
+volumes:
+    pgdata:
+    grafanadata:
+    promdata:
+    lokidata:
+
 services:
     postgres:
         image: postgres:17
@@ -8,7 +16,10 @@ services:
             POSTGRES_USER: danmaku
             POSTGRES_PASSWORD: danmaku
             POSTGRES_DB: danmaku
-    redis:
+        volumes:
+            - pgdata:/var/lib/postgresql/data
+    
+    redis: # 刻意不掛 volume：目前只用 Pub/Sub，沒有需要保存的資料
         image: redis:7
         container_name: danmaku-redis
         ports:
@@ -51,6 +62,8 @@ services:
     loki:
         image: grafana/loki:3.0.0
         container_name: danmaku-loki
+        volumes:
+            - lokidata:/loki
         ports:
             - 5391:3100
     
@@ -74,6 +87,8 @@ services:
             - loki
         ports:
             - 5392:3000
+        volumes:
+            - grafanadata:/var/lib/grafana
 
     prometheus:
         image: prom/prometheus:v3.15.0
@@ -81,6 +96,7 @@ services:
         volumes:
             - ./config/prometheus-config.yml:/etc/prometheus/prometheus.yml:ro
             - /var/run/docker.sock:/var/run/docker.sock:ro
+            - promdata:/prometheus
         group_add:
             - "0"
         ports:
