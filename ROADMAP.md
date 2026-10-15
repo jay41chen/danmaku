@@ -52,10 +52,14 @@
 - [ ] Pagination
 - [ ] API versioning
 - [ ] 統一 error response 格式
+- [ ] 評估引入 OpenTelemetry（W4 結束後決定）
+  - metrics 改走 vendor-neutral API，backend 可替換
+  - 評估 tracing 的 trace ID 是否取代 W4 的 request ID
 
 ## W6 — CI/CD + 進階穩定性
 
 - [ ] CI/CD（GitHub Actions）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
+- [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
 - [ ] Alerts
 - [ ] Chaos testing
