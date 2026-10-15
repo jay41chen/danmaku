@@ -55,7 +55,7 @@ func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	msgs, err := this.db.QueryMessage(r.Context(), 50)
 	if err != nil {
-		this.logger.Error("query messages failed", "error", err)
+		this.logger.ErrorContext(r.Context(), "query messages failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -100,7 +100,7 @@ func (this *APIHandler) CheckServerHealth(w http.ResponseWriter, r *http.Request
 			errorMsg["redis"] = "error"
 		}
 		w.WriteHeader(http.StatusInternalServerError)
-		this.logger.Error("health check failed", "dbError", dbError, "redisError", redisError)
+		this.logger.ErrorContext(r.Context(), "health check failed", "dbError", dbError, "redisError", redisError)
 		json.NewEncoder(w).Encode(errorMsg)
 		return
 	}

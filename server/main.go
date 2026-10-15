@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
+	logging "github.com/jay41chen/danmaku/server/internal/logging"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/store"
@@ -40,7 +41,9 @@ func registerPrometheus() {
 
 func initApp() {
 	// init slog
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	jsonHandler := slog.NewJSONHandler(os.Stdout, nil)
+	contextHandler := logging.NewContextHandler(jsonHandler)
+	slog.SetDefault(slog.New(contextHandler))
 }
 
 func initDatabase() *store.DBStore {
@@ -91,10 +94,15 @@ func startServer() {
 		Handler: middleware.Chain(
 			http.DefaultServeMux, //  Go 內建的全域 router
 			middleware.RequestID,
-			middleware.Logging(slog.With("logging")),
+			middleware.Logging(slog.Default()),
 			prom.HttpMetrics,
 			middleware.RecoverPanic,
 		),
+		// net/http 執行期間自己的錯誤（外層 panic、重複 WriteHeader、TLS/accept 失敗）走這裡，
+		// middleware 攔不到。不設的話會經由 slog.SetDefault 以 INFO 輸出，這裡改成 ERROR
+		ErrorLog: slog.NewLogLogger(
+			slog.Default().With("component", "http_server").Handler(),
+			slog.LevelError),
 	}
 
 	// 監聽 SIGTERM（docker stop / Railway deploy）和 SIGINT（Ctrl+C）

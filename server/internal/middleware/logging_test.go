@@ -30,6 +30,9 @@ func TestLogging(t *testing.T) {
 	if !strings.Contains(result, `"level":"WARN"`) {
 		t.Errorf("log missing level WARN, got: %s", result)
 	}
+	if !strings.Contains(result, `"component":"http"`) {
+		t.Errorf("log missing component, got: %s", result)
+	}
 }
 
 func TestIgnoreMetrics(t *testing.T) {

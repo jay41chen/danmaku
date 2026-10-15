@@ -64,7 +64,7 @@ func (this *RedisStore) Subscribe(ctx context.Context, handler func(string)) err
 			handler(msg.Payload)
 		}
 		subscription.Close()
-		this.logger.Warn("redis subscription lost", "retryIn", delayTime)
+		this.logger.WarnContext(ctx, "redis subscription lost", "retryIn", delayTime)
 		time.Sleep(delayTime)
 		// backoff retry
 		delayTime *= 2

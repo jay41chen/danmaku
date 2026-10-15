@@ -18,6 +18,15 @@ const (
 	rateLimit       = 5
 )
 
+// 這個檔案裡的 3 種 context：
+//
+//	StartBroadcast        → context.Background()  process 生命週期，跟任何 request 無關
+//	HandleWebsocket       → r.Context()           這條 WS 連線的生命週期，帶 request_id
+//	  └ listenConnection / removeClient → 沿用上層 ctx
+//	    └ processRemoteMessage → WithTimeout(ctx)  繼承 request_id，再加上單則訊息的 timeout
+//
+// ctx 負責兩件事：1. 帶資料（request_id）2. 控制生命週期（取消、deadline）
+// Background() 兩者都沒有：log 不會有 request_id，DB/Redis 卡住時也會永遠等下去
 type WebsocketHandler struct {
 	redis   store.RedisStoreInterface
 	db      store.DBStoreInterface
@@ -44,29 +53,32 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
 	// 瀏覽器先發一個 HTTP request 說「我想升級成 WebSocket」，
 	// server 同意後才切換協定。
+	//
+	// r.Context() 的生命週期：Hijack 之後 net/http 不再監看這條連線，
+	// 所以 client 斷線時 ctx 不會被取消，要等這個 function return 才會取消
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		this.logger.Error("ws upgrade failed", "error", err)
+		this.logger.ErrorContext(r.Context(), "ws upgrade failed", "error", err)
 		return
 	}
 	defer connection.Close()
 
 	this.mutex.Lock()
 	if len(this.clients) >= maxClients {
-		this.logger.Warn("too many connections")
+		this.logger.WarnContext(r.Context(), "too many connections")
 		this.mutex.Unlock()
 		return
 	}
 	this.addClientLocked(connection)
-	// 有辦法找到conn的uuid之類的嗎
-	this.logger.Info("new client connected", "total", len(this.clients))
+	// request_id 在 upgrade 時產生，同一條連線的所有 log 共用，等同 connection ID
+	this.logger.InfoContext(r.Context(), "new client connected", "total", len(this.clients))
 	this.mutex.Unlock()
 	// 連線成功，設定每次發送的上限
 	connection.SetReadLimit(maxMessageBytes)
-	this.listenConnection(connection)
+	this.listenConnection(r.Context(), connection)
 }
 
-func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
+func (this *WebsocketHandler) listenConnection(ctx context.Context, connection *websocket.Conn) {
 	var msgCount int
 	windowStart := time.Now()
 
@@ -74,10 +86,10 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 		_, msg, err := connection.ReadMessage()
 		if err != nil {
 			// connection遇到錯誤, 把該connection移除
-			this.removeClient(connection)
+			this.removeClient(ctx, connection)
 			break
 		}
-		this.logger.Debug("info received", "msg", string(msg))
+		this.logger.DebugContext(ctx, "info received", "content", string(msg))
 		// 加上一秒內5則的rate limit
 		now := time.Now()
 		if now.Sub(windowStart) > time.Second {
@@ -86,34 +98,39 @@ func (this *WebsocketHandler) listenConnection(connection *websocket.Conn) {
 		}
 		msgCount++
 		if msgCount > rateLimit {
-			this.logger.Warn("too many msgs sent", "limit", rateLimit)
+			this.logger.WarnContext(ctx, "too many msgs sent", "limit", rateLimit)
 			continue
 		}
 
-		this.processRemoteMessage(string(msg))
+		this.processRemoteMessage(ctx, string(msg))
 	}
 
 }
 
-func (this *WebsocketHandler) removeClient(conn *websocket.Conn) {
+func (this *WebsocketHandler) removeClient(ctx context.Context, conn *websocket.Conn) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 	this.removeClientLocked(conn)
-	this.logger.Info("client disconnected", "total", len(this.clients))
+	this.logger.InfoContext(ctx, "client disconnected", "total", len(this.clients))
 }
 
-func (this *WebsocketHandler) processRemoteMessage(msg string) {
-	ctx := context.Background()
+// 同步呼叫，執行期間上層 ctx 不會被取消，所以 DB 不會寫到一半被中斷。
+// 如果之後改成丟給別的 goroutine 非同步處理，上層 ctx 可能中途被取消，
+// 要改用 context.WithoutCancel(ctx)：保留 request_id，切斷取消
+func (this *WebsocketHandler) processRemoteMessage(ctx context.Context, msg string) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	// 檢查是否可以寫入DB
 	if err := this.db.SaveMessage(ctx, msg); err != nil {
-		this.logger.Error("save message to db failed", "error", err)
+		this.logger.ErrorContext(ctx, "save message to db failed", "error", err)
 	}
 	// 檢查是否可以發到redis
 	if err := this.redis.Publish(ctx, msg); err != nil {
-		this.logger.Error("publish to redis failed", "error", err)
+		this.logger.ErrorContext(ctx, "publish to redis failed", "error", err)
 	}
 }
 
+// 用 Background() 是對的：Redis subscribe 是 server 層級的長期任務，不屬於任何 request
 func (this *WebsocketHandler) StartBroadcast() {
 	this.redis.Subscribe(context.Background(), func(msg string) {
 		this.mutex.Lock()
