@@ -13,6 +13,8 @@
 - **Reverse Proxy**: Nginx 1.27
 - **Infrastructure**: Docker Compose
 - **Observability (local dev)**: Promtail → Loki → Grafana, Prometheus → Grafana
+- **Middleware**: Request ID → Request logging → Metrics → Panic recovery（`net/http` + 自製 chain）
+- **Logging**: slog JSON，透過 context 自動帶 `request_id`
 - **Reliability**: Panic recovery middleware, graceful shutdown (SIGTERM/SIGINT)
 
 ## Architecture
@@ -44,6 +46,7 @@ docker compose up --build
 | Service | URL |
 |---|---|
 | Nginx 入口 | `http://localhost:5390` |
+| Server-1 / Server-2（直連，方便對 log） | `http://localhost:5388` / `http://localhost:5389` |
 | Grafana | `http://localhost:5392`（admin / admin） |
 | Prometheus | `http://localhost:5393` |
 
@@ -92,6 +95,15 @@ npm run dev
 ```
 
 5. 開啟 http://localhost:5173/danmaku/
+
+## Request ID & Log 追蹤
+
+每個 request 都有 request ID：client 帶合法的 `X-Request-ID`（`[A-Za-z0-9_-]{1,64}`）就沿用，否則由 server 產生，並回傳在 response header。同一個 request 的所有 log 都帶相同的 `request_id`；WebSocket 連線沿用 upgrade request 的 ID，所以整條連線的 log 可以用同一個 ID 串起來。
+
+```bash
+curl -si -H 'X-Request-ID: test-123' localhost:5388/healthcheck   # response header 會帶 X-Request-ID
+docker logs danmaku-server-1 2>&1 | grep '"request_id":"test-123"'
+```
 
 ## Local Dev vs Production
 

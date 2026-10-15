@@ -2,7 +2,7 @@
 
 ## W1 — 基礎彈幕系統 ✅
 
-- [x] Go HTTP server（gorilla/mux）
+- [x] Go HTTP server（net/http）
 - [x] WebSocket 即時廣播（gorilla/websocket）
 - [x] PostgreSQL 訊息持久化（pgx）
 - [x] Redis Pub/Sub 跨 instance 廣播
@@ -41,6 +41,13 @@
 ## W4 — Auth + Migration + Room + Middleware
 
 - [ ] HTTP middleware pattern（request logging + request ID）
+  - [x] Middleware chain + Request ID（`X-Request-ID`，沿用合法的 client header，否則自動產生）
+  - [x] Request logging（依 status 決定 level，略過 `/metrics`）
+  - [x] ContextHandler：handler 的 log 透過 ctx 自動帶 request_id（WS 同一條連線共用同一個 ID）
+  - [x] `http.Server.ErrorLog` 接 slog（ERROR level）
+  - [ ] CORS middleware（取代 handler 內的 `setCors`，含 preflight）
+  - [ ] Panic recovery 修正（變數改名、`ErrorContext`、`http.ErrAbortHandler` re-panic）
+  - [ ] Nginx 傳遞 `X-Request-ID`
 - [ ] Database migration tool（golang-migrate）
 - [ ] Authentication（JWT middleware）
 - [ ] Authorization（RBAC）
@@ -62,4 +69,5 @@
 - [ ] Redis List replay（搭配前端 auto-reconnect）
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
 - [ ] Alerts
+- [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
 - [ ] Chaos testing
