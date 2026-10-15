@@ -87,8 +87,13 @@ func startServer() {
 
 	// 建立SERVER
 	server := http.Server{
-		Addr:    ":" + port,
-		Handler: middleware.RecoverPanic(prom.HttpMetrics(http.DefaultServeMux)),
+		Addr: ":" + port,
+		Handler: middleware.Chain(
+			http.DefaultServeMux, //  Go 內建的全域 router
+			middleware.RequestID,
+			prom.HttpMetrics,
+			middleware.RecoverPanic,
+		),
 	}
 
 	// 監聽 SIGTERM（docker stop / Railway deploy）和 SIGINT（Ctrl+C）
