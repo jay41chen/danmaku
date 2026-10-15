@@ -91,6 +91,7 @@ func startServer() {
 		Handler: middleware.Chain(
 			http.DefaultServeMux, //  Go 內建的全域 router
 			middleware.RequestID,
+			middleware.Logging(slog.With("logging")),
 			prom.HttpMetrics,
 			middleware.RecoverPanic,
 		),
