@@ -33,7 +33,11 @@ func (r *StatusCodeRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if !ok {
 		return nil, nil, errors.New("underlying ResponseWriter does not support hijacking")
 	}
-	return hijacker.Hijack()
+	conn, rw, err := hijacker.Hijack()
+	if err == nil {
+		r.statusCode = http.StatusSwitchingProtocols
+	}
+	return conn, rw, err
 }
 
 func (r *StatusCodeRecorder) Unwrap() http.ResponseWriter {
