@@ -56,7 +56,18 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	//
 	// r.Context() 的生命週期：Hijack 之後 net/http 不再監看這條連線，
 	// 所以 client 斷線時 ctx 不會被取消，要等這個 function return 才會取消
-	connection, err := upgrader.Upgrade(w, r, nil)
+	//
+	// 第三個參數一定要傳 w.Header()（不是 nil，也不是 r.Header）：
+	//
+	//	一般 handler  middleware: w.Header().Set(...) → handler: w.Write(...)
+	//	              → net/http 自動把 w.Header() 一起送出 ✅
+	//	WebSocket     middleware: w.Header().Set(...) → gorilla: Hijack() 後自己組 101 直接寫進 TCP
+	//	              → 繞過 net/http，只送出這裡傳入的 header，w.Header() 不會自動送出 ❌
+	//
+	// 所以 middleware 設定的 header（X-Request-ID、CORS）要明確傳進去。
+	// 傳 r.Header 是錯的：那是 client 送來的 request header，而且瀏覽器帶的
+	// Sec-WebSocket-Extensions 會讓 gorilla 直接回 500
+	connection, err := upgrader.Upgrade(w, r, w.Header())
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "ws upgrade failed", "error", err)
 		return
