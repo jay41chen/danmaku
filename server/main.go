@@ -88,6 +88,12 @@ func startServer() {
 		port = "8080"
 	}
 
+	origins, err := middleware.ParseOrigins(os.Getenv("CORS_ORIGINS"))
+	if err != nil {
+		slog.Error("cors setting not valid", "error", err)
+		os.Exit(1)
+	}
+
 	// 建立SERVER
 	server := http.Server{
 		Addr: ":" + port,
@@ -97,6 +103,7 @@ func startServer() {
 			middleware.Logging(slog.Default()),
 			prom.HttpMetrics,
 			middleware.RecoverPanic,
+			middleware.CORS(origins...),
 		),
 		// net/http 執行期間自己的錯誤（外層 panic、重複 WriteHeader、TLS/accept 失敗）走這裡，
 		// middleware 攔不到。不設的話會經由 slog.SetDefault 以 INFO 輸出，這裡改成 ERROR

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os"
 	"slices"
 	"sync"
 	"time"
@@ -28,14 +27,6 @@ func NewAPIHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *
 	}
 }
 
-func setCors(w http.ResponseWriter) {
-	origin := os.Getenv("CORS_ORIGIN")
-	if origin == "" {
-		origin = "*"
-	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-}
-
 func setContentType(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 }
@@ -50,7 +41,6 @@ func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setCors(w)
 	setContentType(w)
 
 	msgs, err := this.db.QueryMessage(r.Context(), 50)
