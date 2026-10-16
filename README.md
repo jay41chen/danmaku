@@ -105,6 +105,14 @@ curl -si -H 'X-Request-ID: test-123' localhost:5388/healthcheck   # response hea
 docker logs danmaku-server-1 2>&1 | grep '"request_id":"test-123"'
 ```
 
+經過 nginx（`localhost:5390`）時由 nginx 先決定 ID（規則相同，沒帶或不合法就用 nginx 的 `$request_id`），再透過 `X-Request-ID` 傳給 server，所以 nginx access log 和 server log 的 ID 一致：
+
+```bash
+curl -si -H 'X-Request-ID: test-456' localhost:5390/healthcheck
+docker logs danmaku-nginx 2>&1 | grep 'request_id=test-456'          # 也會顯示轉發到哪台 upstream
+docker compose logs server-1 server-2 | grep '"request_id":"test-456"'
+```
+
 ## CORS
 
 CORS middleware 依 `CORS_ORIGINS` 決定哪些網站的前端可以讀取 API response（只影響瀏覽器，curl / mobile app 不受影響）：

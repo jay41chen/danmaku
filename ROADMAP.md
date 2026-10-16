@@ -40,7 +40,7 @@
 
 ## W4 — Auth + Migration + Room + Middleware
 
-- [ ] HTTP middleware pattern（request logging + request ID）
+- [x] HTTP middleware pattern（request logging + request ID）
   - [x] Middleware chain + Request ID（`X-Request-ID`，沿用合法的 client header，否則自動產生）
   - [x] Request logging（依 status 決定 level，略過 `/metrics`）
   - [x] ContextHandler：handler 的 log 透過 ctx 自動帶 request_id（WS 同一條連線共用同一個 ID）
@@ -48,7 +48,7 @@
   - [x] CORS middleware（取代 handler 內的 `setCors`）：allowlist + `Vary: Origin`、preflight 回 204、`CORS_ORIGINS` 設定錯誤時 fail fast
   - [x] Panic recovery 修正（變數改名、`ErrorContext`、`http.ErrAbortHandler` re-panic）
   - [x] StatusCodeRecorder 修正：記錄 client 實際收到的 status（只記第一次 `WriteHeader`、`Write` 隱含 200）
-  - [ ] Nginx 傳遞 `X-Request-ID`
+  - [x] Nginx 傳遞 `X-Request-ID`（沿用合法的 client header，否則用 `$request_id`；access log 也帶 request_id）
 - [ ] Database migration tool（golang-migrate）
 - [ ] Authentication（JWT middleware）
 - [ ] Authorization（RBAC）
