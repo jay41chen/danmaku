@@ -13,7 +13,7 @@
 - **Reverse Proxy**: Nginx 1.27
 - **Infrastructure**: Docker Compose
 - **Observability (local dev)**: Promtail → Loki → Grafana, Prometheus → Grafana
-- **Middleware**: Request ID → Request logging → Metrics → Panic recovery（`net/http` + 自製 chain）
+- **Middleware**: Request ID → Request logging → Metrics → Panic recovery → CORS（`net/http` + 自製 chain）
 - **Logging**: slog JSON，透過 context 自動帶 `request_id`
 - **Reliability**: Panic recovery middleware, graceful shutdown (SIGTERM/SIGINT)
 
@@ -105,6 +105,22 @@ curl -si -H 'X-Request-ID: test-123' localhost:5388/healthcheck   # response hea
 docker logs danmaku-server-1 2>&1 | grep '"request_id":"test-123"'
 ```
 
+## CORS
+
+CORS middleware 依 `CORS_ORIGINS` 決定哪些網站的前端可以讀取 API response（只影響瀏覽器，curl / mobile app 不受影響）：
+
+- `*`（預設）：所有網站都允許
+- allowlist：Origin 在清單內才回寫 `Access-Control-Allow-Origin`，並加上 `Vary: Origin`
+- Preflight（`OPTIONS` + `Access-Control-Request-Method`）由 middleware 直接回 `204`，不進 handler
+- 設定格式錯誤（含 path、缺 scheme、`*` 與其他 origin 混用）時 server 啟動失敗，log 會指出是哪一項
+
+GitHub Pages 前端的 origin 是 `https://jay41chen.github.io`（不含 `/danmaku/` 路徑）。
+
+```bash
+curl -si -X OPTIONS localhost:5388/messages \
+  -H 'Origin: https://a.com' -H 'Access-Control-Request-Method: POST'   # 204 + Access-Control-Allow-* headers
+```
+
 ## Local Dev vs Production
 
 | | Local (Docker Compose) | Production (Railway) |
@@ -126,6 +142,6 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 | `REDIS_URL` | Redis 連線地址 | `localhost:2907` |
 | `DATABASE_URL` | PostgreSQL 連線字串 | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
 | `PORT` | Server 監聽 port | `8080` |
-| `CORS_ORIGIN` | 允許的 CORS origin | `*` |
+| `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；不可與 `*` 混用 | `*` |
 | `VITE_API_URL` | 前端 API 位址 | `http://localhost:8080` |
 | `VITE_WS_URL` | 前端 WebSocket 位址 | `ws://localhost:8080/ws` |
