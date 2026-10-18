@@ -53,7 +53,9 @@ func (r *StatusCodeRecorder) Write(b []byte) (int, error) {
 }
 
 // HTTP status 只有第一次 WriteHeader 生效，所以只記第一次。
-// 但每次都要轉發給內層
+// 但每次都要轉發給內層：net/http 收到重複呼叫會印 "superfluous response.WriteHeader call"，
+// 在這裡吞掉就看不到這個 bug 警告（違反「只觀察、不改變行為」）。
+// Hijack 之後再呼叫，net/http 印的則是 "response.WriteHeader on hijacked connection"
 func (r *StatusCodeRecorder) WriteHeader(statusCode int) {
 	if !r.wroteHeader {
 		r.statusCode = statusCode
@@ -64,6 +66,10 @@ func (r *StatusCodeRecorder) WriteHeader(statusCode int) {
 
 // WebSocket upgrade 需要 Hijack 取得底層 TCP 連線
 // 所以需要override這個method，否則upgrade的request會failed
+//
+// Hijack 成功後 gorilla 已經自己送出 101，等同 header 已送出。
+// WS 連線期間 handler 不會 return，這時 panic 會讓 RecoverPanic 呼叫 WriteHeader(500)，
+// 所以要標記 wroteHeader，否則 log / metrics 會把 101 誤記成 500
 func (r *StatusCodeRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hijacker, ok := r.ResponseWriter.(http.Hijacker)
 	if !ok {
@@ -72,10 +78,14 @@ func (r *StatusCodeRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	conn, rw, err := hijacker.Hijack()
 	if err == nil {
 		r.statusCode = http.StatusSwitchingProtocols
+		r.wroteHeader = true
 	}
 	return conn, rw, err
 }
 
+// 給 http.ResponseController 用（Go 1.20+）：它會一層層 Unwrap 找到內層的 Flush / SetWriteDeadline。
+// recorder 本身沒有實作 http.Flusher，所以 w.(http.Flusher) 的 type assertion 會失敗；
+// 之後的 SSE 要用 http.NewResponseController(w).Flush()，不要用 type assertion
 func (r *StatusCodeRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
