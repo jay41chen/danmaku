@@ -48,15 +48,24 @@
   - [x] CORS middleware（取代 handler 內的 `setCors`）：allowlist + `Vary: Origin`、preflight 回 204、`CORS_ORIGINS` 設定錯誤時 fail fast
   - [x] Panic recovery 修正（變數改名、`ErrorContext`、`http.ErrAbortHandler` re-panic）
   - [x] StatusCodeRecorder 修正：記錄 client 實際收到的 status（只記第一次 `WriteHeader`、`Write` 隱含 200）
-  - [x] Nginx 傳遞 `X-Request-ID`（沿用合法的 client header，否則用 `$request_id`；access log 也帶 request_id）
+  - [x] Nginx 傳遞 `X-Request-ID`（原樣轉發，驗證只在 server；沒帶才補 `$request_id`；access log 記 server 回傳的 ID）
+  - [x] Review 修正
+    - [x] StatusCodeRecorder：Hijack 後維持 101，WS 連線期間的 panic 不會被誤記成 500
+    - [x] WS connection gauge：broadcast 寫入失敗與讀取失敗都會 remove，只減一次
+    - [x] CORS origin 必須是 canonical 寫法（大寫、預設 port、空 port、query / fragment / userinfo 啟動失敗）
+    - [x] Broadcast 加 10s write deadline，避免單一卡住的 client 無限期佔住 lock
+    - [x] 補 test：Chain 順序、RequestID middleware、RecoverPanic（含 `ErrAbortHandler`）
 - [ ] Database migration tool（golang-migrate）
 - [ ] Authentication（JWT middleware）
+  - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
 - [ ] Authorization（RBAC）
 - [ ] Room 概念（房間 + 房主）
 
 ## W5 — API 設計強化
 
 - [ ] Rate limiting（middleware）
+- [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
+- [ ] Metrics path cardinality：`path` label 直接用 `r.URL.Path`，被亂掃 URL 時每個 path 都會產生新的時間序列；改用 route pattern（如 Go 1.23+ 的 `r.Pattern`，mux 路由後才有值）或把未知路徑歸成 `other`
 - [ ] Pagination
 - [ ] API versioning
 - [ ] 統一 error response 格式
@@ -69,6 +78,8 @@
 - [ ] CI/CD（GitHub Actions）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
+  - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
+  - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
 - [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
 - [ ] Chaos testing

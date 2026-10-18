@@ -105,7 +105,7 @@ curl -si -H 'X-Request-ID: test-123' localhost:5388/healthcheck   # response hea
 docker logs danmaku-server-1 2>&1 | grep '"request_id":"test-123"'
 ```
 
-經過 nginx（`localhost:5390`）時由 nginx 先決定 ID（規則相同，沒帶或不合法就用 nginx 的 `$request_id`），再透過 `X-Request-ID` 傳給 server，所以 nginx access log 和 server log 的 ID 一致：
+經過 nginx（`localhost:5390`）時，nginx 不驗證 ID（規則只寫在 server，避免兩邊不同步）：client 有帶就原樣轉給 server，沒帶才補上 nginx 的 `$request_id`。access log 記的是 server 回傳的 `X-Request-ID`，也就是 server 驗證後最後採用的值，所以 nginx 和 server 的 log 一定一致：
 
 ```bash
 curl -si -H 'X-Request-ID: test-456' localhost:5390/healthcheck
@@ -119,8 +119,9 @@ CORS middleware 依 `CORS_ORIGINS` 決定哪些網站的前端可以讀取 API r
 
 - `*`（預設）：所有網站都允許
 - allowlist：Origin 在清單內才回寫 `Access-Control-Allow-Origin`，並加上 `Vary: Origin`
-- Preflight（`OPTIONS` + `Access-Control-Request-Method`）由 middleware 直接回 `204`，不進 handler
+- Preflight（`OPTIONS` + `Origin` + `Access-Control-Request-Method`）由 middleware 直接回 `204`，不進 handler
 - 設定格式錯誤（含 path、缺 scheme、`*` 與其他 origin 混用）時 server 啟動失敗，log 會指出是哪一項
+- 比對是字串完全相等，所以 origin 必須跟瀏覽器送的寫法一樣（全小寫、不寫預設 port `:443` / `:80`、沒有 query / fragment / 帳號），否則啟動失敗並提示正確寫法
 
 GitHub Pages 前端的 origin 是 `https://jay41chen.github.io`（不含 `/danmaku/` 路徑）。
 
@@ -150,6 +151,6 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 | `REDIS_URL` | Redis 連線地址 | `localhost:2907` |
 | `DATABASE_URL` | PostgreSQL 連線字串 | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
 | `PORT` | Server 監聽 port | `8080` |
-| `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；不可與 `*` 混用 | `*` |
+| `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；全小寫、不寫預設 port；不可與 `*` 混用 | `*` |
 | `VITE_API_URL` | 前端 API 位址 | `http://localhost:8080` |
 | `VITE_WS_URL` | 前端 WebSocket 位址 | `ws://localhost:8080/ws` |
