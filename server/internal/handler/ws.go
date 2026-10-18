@@ -16,6 +16,7 @@ const (
 	maxClients      = 100
 	maxMessageBytes = 500
 	rateLimit       = 5
+	writeWait       = 10 * time.Second
 )
 
 // 這個檔案裡的 3 種 context：
@@ -146,11 +147,19 @@ func (this *WebsocketHandler) StartBroadcast() {
 	this.redis.Subscribe(context.Background(), func(msg string) {
 		this.mutex.Lock()
 		for client := range this.clients {
+			maxWaitingTime := time.Now().Add(writeWait)
+			if err := client.SetWriteDeadline(maxWaitingTime); err != nil {
+				// 為了避免有機率影響到其他用戶，移除該client
+				client.Close()
+				this.removeClientLocked(client)
+				continue
+			}
 			if err := client.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 				/// for loop check other client is alive, if not
 				/// remove it from client list due to write failed
 				client.Close()
 				this.removeClientLocked(client)
+				continue
 			}
 		}
 		this.mutex.Unlock()
