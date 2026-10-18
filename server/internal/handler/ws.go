@@ -148,7 +148,7 @@ func (this *WebsocketHandler) StartBroadcast() {
 		for client := range this.clients {
 			if err := client.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 				/// for loop check other client is alive, if not
-				/// remove it from client list
+				/// remove it from client list due to write failed
 				client.Close()
 				this.removeClientLocked(client)
 			}
@@ -162,6 +162,11 @@ func (this *WebsocketHandler) addClientLocked(conn *websocket.Conn) {
 	prom.WebsocketConnections.Inc()
 }
 func (this *WebsocketHandler) removeClientLocked(conn *websocket.Conn) {
+	_, ok := this.clients[conn]
+	if !ok {
+		// already removed, might be remove from other goroutine
+		return
+	}
 	prom.WebsocketConnections.Dec()
 	delete(this.clients, conn)
 }
