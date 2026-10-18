@@ -34,7 +34,7 @@ const (
 // 瀏覽器的兩種 request：
 //
 //	Simple       一般 GET              直接送，看 response 有沒有 Allow-Origin 決定給不給 JS 讀
-//	Preflight    POST + Authorization  先送 OPTIONS + Access-Control-Request-Method 詢問，
+//	Preflight    POST + Authorization  先送 OPTIONS + Origin + Access-Control-Request-Method 詢問，
 //	             （非 simple 的都是）  server 回 204 + 允許清單，瀏覽器同意後才送真正的 request
 //	無 Origin    curl / 同源 request   不是跨域，不用處理
 //
@@ -99,6 +99,8 @@ func isPreflight(r *http.Request) bool {
 //	"https://a.com, https://b.com,"  → ["https://a.com", "https://b.com"]（去空白、忽略空項目）
 //	"jay41chen.github.io"            → error：缺 scheme
 //	"https://a.com/danmaku/"         → error：不能有 path（Origin 只有 scheme + host + port）
+//	"https://A.com"                  → error：要全小寫（瀏覽器送的 Origin 是 canonical，比對是字串完全相等）
+//	"https://a.com:443"              → error：不能寫預設 port
 //	"https://a.com,*"                → error："*" 必須是唯一項目
 //	" , "                            → error：有設定但沒有任何 origin
 func ParseOrigins(raw string) ([]string, error) {
@@ -131,6 +133,9 @@ func ParseOrigins(raw string) ([]string, error) {
 }
 
 func validateOrigin(str string) error {
+	if strings.ToLower(str) != str {
+		return fmt.Errorf("origin %q: shouldn't have uppercase url", str)
+	}
 	u, err := url.Parse(str)
 	if err != nil {
 		// 直接無法parse出url
@@ -140,8 +145,25 @@ func validateOrigin(str string) error {
 		// scheme跟host parse不出來
 		return fmt.Errorf("origin %q: missing scheme or host", str)
 	}
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		// 預設的port就不用特別寫了
+		return fmt.Errorf("origin %q: browsers omit default port %s", str, u.Port())
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		// ex: abc.com:
+		return fmt.Errorf("origin %q: empty port", str)
+	}
 	if u.Path != "" {
 		return fmt.Errorf("origin %q: must not contain a path (got %q)", str, u.Path)
+	}
+	if u.Fragment != "" || u.RawQuery != "" || u.User != nil {
+		// 不應該有fragment/query/user
+		return fmt.Errorf("origin %q: cannot have query, fragment, or user", str)
+	}
+	if want := u.Scheme + "://" + u.Host; str != want {
+		// 只用 scheme + host 組回去，跟原字串一樣才放行
+		// （擋 "a.com?" 這種欄位是空的但多了符號的寫法）
+		return fmt.Errorf("origin %q: not canonical, use %q", str, want)
 	}
 	return nil
 }

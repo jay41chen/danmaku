@@ -170,3 +170,43 @@ func TestParseOrigins(t *testing.T) {
 		})
 	}
 }
+
+// 瀏覽器送的 Origin 一定是 canonical（全小寫、省略預設 port、沒有 query / fragment / userinfo），
+// CORS 用字串完全比對，設定不是 canonical 就永遠對不到，所以要在啟動時擋下
+func TestParseOriginsNonCanonical(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{"uppercase scheme and host", "HTTPS://A.COM", nil, true},
+		// scheme 已是小寫時，whitelist 組出的 want 跟原字串相同，只有大寫檢查擋得到
+		{"uppercase host only", "https://A.COM", nil, true},
+		{"https default port", "https://a.com:443", nil, true},
+		{"http default port", "http://a.com:80", nil, true},
+		{"with query", "https://a.com?x=1", nil, true},
+		{"with fragment", "https://a.com#top", nil, true},
+		{"with userinfo", "https://user@a.com", nil, true},
+
+		// 欄位是空的但字串多了符號：逐欄檢查會漏，要靠跟 scheme://host 完全比對
+		{"empty query", "https://a.com?", nil, true},
+		{"empty fragment", "https://a.com#", nil, true},
+		{"empty port", "https://a.com:", nil, true},
+
+		// 非預設 port 瀏覽器會保留，必須照樣通過（確認檢查沒有擋過頭）
+		{"non-default port", "https://a.com:8443", []string{"https://a.com:8443"}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseOrigins(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ParseOrigins(%q) error = %v, wantErr %v", tc.raw, err, tc.wantErr)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ParseOrigins(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
