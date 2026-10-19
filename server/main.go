@@ -51,12 +51,18 @@ func initDatabase() *store.DBStore {
 	if dbURL == "" {
 		dbURL = "postgres://danmaku:danmaku@localhost:3192/danmaku"
 	}
+	// 這邊隱含了semantic上的順序，先準備好schema再建立DB
+	if err := store.RunMigration(dbURL); err != nil {
+		slog.Error("db migration failed", "error", err)
+		os.Exit(1)
+	}
 	dbStore, err := store.NewDBStore(context.Background(), dbURL)
 	if err != nil {
 		// fatal will terminate the execution!!
 		slog.Error("db init failed", "error", err)
 		os.Exit(1)
 	}
+
 	return dbStore
 }
 
