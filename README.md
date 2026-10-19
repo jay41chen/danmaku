@@ -16,6 +16,7 @@
 - **Middleware**: Request ID → Request logging → Metrics → Panic recovery → CORS（`net/http` + 自製 chain）
 - **Logging**: slog JSON，透過 context 自動帶 `request_id`
 - **Reliability**: Panic recovery middleware, graceful shutdown (SIGTERM/SIGINT)
+- **Schema Migration**: golang-migrate，server 啟動時自動套用，SQL embed 進 binary
 
 ## Architecture
 
@@ -65,28 +66,14 @@ docker run -d --name danmaku-db -p 3192:5432 -e POSTGRES_USER=danmaku -e POSTGRE
 docker run -d --name danmaku-redis -p 2907:6379 redis:7
 ```
 
-2. 建立資料表（server 不會自動 migrate）：
-
-```bash
-docker exec -it danmaku-db psql -U danmaku
-```
-
-```sql
-CREATE TABLE messages (
-    id SERIAL PRIMARY KEY,
-    content TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT now()
-);
-```
-
-3. 啟動 Go server：
+2. 啟動 Go server（啟動時會自動建立 / 更新資料表，見 [Database Migration](#database-migration)）：
 
 ```bash
 cd server
 go run .
 ```
 
-4. 啟動前端：
+3. 啟動前端：
 
 ```bash
 cd client
@@ -94,7 +81,7 @@ npm install
 npm run dev
 ```
 
-5. 開啟 http://localhost:5173/danmaku/
+4. 開啟 http://localhost:5173/danmaku/
 
 ## Request ID & Log 追蹤
 
@@ -128,6 +115,53 @@ GitHub Pages 前端的 origin 是 `https://jay41chen.github.io`（不含 `/danma
 ```bash
 curl -si -X OPTIONS localhost:5388/messages \
   -H 'Origin: https://a.com' -H 'Access-Control-Request-Method: POST'   # 204 + Access-Control-Allow-* headers
+```
+
+## Database Migration
+
+Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。server 啟動時，在建立 DB 連線池之前先執行 `m.Up()`，把還沒跑過的 migration 依序套用；已經是最新版本時直接略過。
+
+- SQL 檔在 `server/migrations/`，compile 時 embed 進 binary，部署只需要執行檔
+- 檔名格式 `{version}_{title}.{up|down}.sql`：`up` 套用變更，`down` 撤銷變更
+- DB 目前的版本記在 `schema_migrations` 表（`version`、`dirty`）
+
+| Version | 內容 |
+|---|---|
+| `000001_create_messages` | 導入 migration 前手動建的 schema（baseline）。用 `IF NOT EXISTS`，已有資料表的 DB 只會記成 version 1 |
+| `000002_messages_created_at_timestamptz` | `created_at` 改為 `TIMESTAMPTZ NOT NULL`（舊值當成 UTC） |
+| `000003_messages_id_identity` | `id` 從 `SERIAL` 改為 `BIGINT GENERATED ALWAYS AS IDENTITY`，編號接續原本的最大值 |
+
+### 新增 migration
+
+1. 在 `server/migrations/` 建立下一號的 `.up.sql` 和 `.down.sql`
+2. 整份 SQL 用 `BEGIN;` / `COMMIT;` 包起來，失敗時整個 rollback
+3. 重新 build / 重啟 server 即套用（SQL 是 embed 的，只改 SQL 不重新 build 不會生效）
+
+注意：
+
+- **已經套用（部署）過的 migration 不能修改**：DB 記錄該版本已執行，改了也不會重跑。要修正請新增下一號
+- **不要留空的 migration 檔**：空檔一樣會被執行並記錄版本，之後補上的內容永遠不會跑
+- 寫完先在臨時 DB 測 up → down → up，並確認結果（例如下一筆的 `id`），不要只看有沒有報錯
+
+### 查詢版本 / 手動退版
+
+目前沒有引入 migrate CLI，down 用 psql 手動執行（以 local DB 為例）：
+
+```bash
+# 查目前版本
+docker exec -i danmaku-db psql -U danmaku -c "SELECT * FROM schema_migrations"
+
+# 退回一版：執行該版的 down，再把版本改成前一版
+docker exec -i danmaku-db psql -U danmaku -v ON_ERROR_STOP=1 < server/migrations/000003_messages_id_identity.down.sql
+docker exec -i danmaku-db psql -U danmaku -c "UPDATE schema_migrations SET version = 2"
+```
+
+`000001` 的 down 會 `DROP TABLE`，刪除所有訊息，只在本機重建 DB 時使用。
+
+如果 migration 執行到一半失敗，`dirty` 會變成 `true`，之後每次啟動都會報錯。先確認 DB 實際停在哪個狀態並手動修好，再把版本設成「確實已完成」的那一版：
+
+```sql
+UPDATE schema_migrations SET version = <已完成的版本>, dirty = false;
 ```
 
 ## Local Dev vs Production
