@@ -38,7 +38,7 @@
 - [x] API method validation（405 Method Not Allowed）
 - [x] Redis Subscribe exponential backoff retry
 
-## W4 — Auth + Migration + Room + Middleware
+## W4a — Middleware + Migration + Auth
 
 - [x] HTTP middleware pattern（request logging + request ID）
   - [x] Middleware chain + Request ID（`X-Request-ID`，沿用合法的 client header，否則自動產生）
@@ -58,8 +58,13 @@
 - [ ] Database migration tool（golang-migrate）
 - [ ] Authentication（JWT middleware）
   - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
-- [ ] Authorization（RBAC）
+
+## W4b — Room + Authorization
+
+> Room 排在 RBAC 前面：有「房主」之後，權限規則才具體（房主刪訊息、踢人）
+
 - [ ] Room 概念（房間 + 房主）
+- [ ] Authorization（RBAC）
 
 ## W5 — API 設計強化
 
@@ -71,7 +76,7 @@
 - [ ] 統一 error response 格式
 - [ ] 評估引入 OpenTelemetry（W4 結束後決定）
   - metrics 改走 vendor-neutral API，backend 可替換
-  - 評估 tracing 的 trace ID 是否取代 W4 的 request ID
+  - 評估 tracing 的 trace ID 是否取代 W4a 的 request ID
 
 ## W6 — CI/CD + 進階穩定性
 
