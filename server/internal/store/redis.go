@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -30,7 +31,9 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 
 	option, err := redis.ParseURL(address)
 	if err != nil {
-		option = &redis.Options{Addr: address}
+		// 不 fallback 成 Options{Addr: address}：URL 寫錯時整串（含密碼）會變成連線位址，被印進 log
+		// ParseURL 自己的錯誤訊息也會帶出 URL，所以回固定訊息
+		return nil, errors.New("invalid redis url: want redis:// or rediss://[[user]:password@]host[:port][/db-number], special characters in password must be percent-encoded")
 	}
 
 	client := redis.NewClient(option)

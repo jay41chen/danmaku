@@ -69,7 +69,7 @@ func initDatabase() *store.DBStore {
 func initRedis() *store.RedisStore {
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
-		redisURL = "localhost:2907"
+		redisURL = "redis://localhost:2907"
 	}
 	redisStore, err := store.NewRedisStore(context.Background(), redisURL)
 	if err != nil {

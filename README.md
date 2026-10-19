@@ -182,8 +182,8 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 
 | Variable | Description | Local Default |
 |---|---|---|
-| `REDIS_URL` | Redis 連線地址 | `localhost:2907` |
-| `DATABASE_URL` | PostgreSQL 連線字串 | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
+| `REDIS_URL` | Redis 連線 URL（`redis://` 或 `rediss://`）；密碼有特殊字元時要 percent-encode（如 `@` → `%40`） | `redis://localhost:2907` |
+| `DATABASE_URL` | PostgreSQL 連線字串（URL 或 `host=... user=...` 格式）；URL 的密碼有特殊字元時要 percent-encode（如 `@` → `%40`、`#` → `%23`） | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
 | `PORT` | Server 監聽 port | `8080` |
 | `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；全小寫、不寫預設 port；不可與 `*` 混用 | `*` |
 | `VITE_API_URL` | 前端 API 位址 | `http://localhost:8080` |
