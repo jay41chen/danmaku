@@ -7,12 +7,14 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
 	ErrUsernameTaken = errors.New("username already taken")
+	ErrUserNotFound  = errors.New("user not found")
 )
 
 type DBStoreInterface interface {
@@ -21,6 +23,7 @@ type DBStoreInterface interface {
 	CheckHealth(ctx context.Context) error
 
 	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
+	GetUser(ctx context.Context, username string) (model.User, error)
 }
 
 type DBStore struct {
@@ -114,4 +117,21 @@ func (this *DBStore) CreateUser(ctx context.Context, username string, passwordHa
 		return 0, err
 	}
 	return id, nil
+}
+
+func (this *DBStore) GetUser(ctx context.Context, username string) (model.User, error) {
+	var user model.User
+	err := this.dbPool.QueryRow(ctx,
+		`
+			SELECT id, username, password_hash, created_at
+			FROM users
+			WHERE lower(username) = lower($1)
+		`, username).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return user, ErrUserNotFound
+		}
+		return user, err
+	}
+	return user, nil
 }

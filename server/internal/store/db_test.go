@@ -49,6 +49,46 @@ func TestCreateUser(t *testing.T) {
 	}
 }
 
+func TestGetUser(t *testing.T) {
+	// 存大寫、用小寫查：一次驗「比對不分大小寫」和「回傳保留原本大小寫」
+	t.Run("lookup is case-insensitive and returns stored row", func(t *testing.T) {
+		s := newTestDBStore(t)
+		// 先塞另一個 user：表裡只有 Jay 的話，WHERE 寫錯（例如永遠回第一筆）也會剛好拿到 Jay
+		if _, err := s.CreateUser(t.Context(), "alice", "alice-hash"); err != nil {
+			t.Fatalf("setup CreateUser(alice) error = %v", err)
+		}
+		id, err := s.CreateUser(t.Context(), "Jay", "fake-hash")
+		if err != nil {
+			t.Fatalf("setup CreateUser(Jay) error = %v", err)
+		}
+
+		u, err := s.GetUser(t.Context(), "jay")
+
+		if err != nil {
+			t.Fatalf("GetUser(jay) error = %v, want nil", err)
+		}
+		if u.ID != id {
+			t.Errorf("GetUser(jay) ID = %d, want %d", u.ID, id)
+		}
+		if u.Username != "Jay" {
+			t.Errorf("GetUser(jay) Username = %q, want %q", u.Username, "Jay")
+		}
+		if u.PasswordHash != "fake-hash" {
+			t.Errorf("GetUser(jay) PasswordHash = %q, want %q", u.PasswordHash, "fake-hash")
+		}
+	})
+
+	t.Run("unknown username returns ErrUserNotFound", func(t *testing.T) {
+		s := newTestDBStore(t)
+
+		_, err := s.GetUser(t.Context(), "nobody")
+
+		if !errors.Is(err, ErrUserNotFound) {
+			t.Errorf("GetUser(nobody) error = %v, want ErrUserNotFound", err)
+		}
+	})
+}
+
 func newTestDBStore(t *testing.T) *DBStore {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
