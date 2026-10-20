@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"slices"
 )
@@ -21,4 +22,23 @@ func checkMethodValidation(r *http.Request, allowMethods []string) bool {
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	return json.NewDecoder(r.Body).Decode(dst)
+}
+
+// clientIP 回傳用來做限流的 client IP
+// trustedHeaderKey 是要信任的 header 名稱（例如 "X-Real-IP"）：
+//   - 只有在前面有我們自己的 proxy 會「覆蓋」這個 header 時才能設定，否則 client 可以偽造
+//   - 空字串代表不信任任何 header，只用 TCP 連線對端的位址
+func clientIP(r *http.Request, trustedHeaderKey string) string {
+	if trustedHeaderKey != "" {
+		// 先以parse header的值為主
+		if ip := net.ParseIP(r.Header.Get(trustedHeaderKey)); ip != nil {
+			return ip.String()
+		}
+	}
+	// 沒設定要信任的 header，或 header 沒帶 / 不是合法 IP：改用 TCP 連線對端的位址
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
