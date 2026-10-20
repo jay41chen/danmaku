@@ -91,7 +91,7 @@ func TestGetUser(t *testing.T) {
 }
 
 func TestQueryMessage(t *testing.T) {
-	// 三個 case 形狀一樣：存哪些訊息、limit 多少、預期拿回哪些內容（舊→新）
+	// 三個 case 形狀一樣：存哪些訊息、limit 多少、預期拿回哪些內容（新→舊）
 	cases := []struct {
 		name  string
 		saved []string
@@ -99,9 +99,9 @@ func TestQueryMessage(t *testing.T) {
 		want  []string
 	}{
 		{name: "empty table", limit: 50, want: []string{}},
-		{name: "fewer than limit", saved: []string{"a", "b", "c"}, limit: 50, want: []string{"a", "b", "c"}},
-		// 最新的 3 則，順序仍是舊→新
-		{name: "more than limit", saved: []string{"a", "b", "c", "d", "e"}, limit: 3, want: []string{"c", "d", "e"}},
+		{name: "fewer than limit", saved: []string{"a", "b", "c"}, limit: 50, want: []string{"c", "b", "a"}},
+		// 最新的 3 則，新→舊
+		{name: "more than limit", saved: []string{"a", "b", "c", "d", "e"}, limit: 3, want: []string{"e", "d", "c"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

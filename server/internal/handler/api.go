@@ -50,6 +50,8 @@ func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// DB query出來的是新到舊
+	slices.Reverse(msgs)
 	json.NewEncoder(w).Encode(msgs)
 }
 

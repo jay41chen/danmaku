@@ -59,13 +59,9 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 	rows, err := this.dbPool.Query(ctx,
 		`
 			SELECT content, created_at
-			FROM (
-				SELECT id, content, created_at
-				FROM messages
-				ORDER BY id DESC
-				LIMIT $1
-			) sub
-			 ORDER BY id ASC
+			FROM messages
+			ORDER BY id DESC
+			LIMIT $1
 		`, limit)
 	if err != nil {
 		return nil, err
