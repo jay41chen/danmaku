@@ -2,17 +2,25 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var (
+	ErrUsernameTaken = errors.New("username already taken")
 )
 
 type DBStoreInterface interface {
 	SaveMessage(ctx context.Context, content string) error
 	QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
 	CheckHealth(ctx context.Context) error
+
+	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
 }
 
 type DBStore struct {
@@ -70,4 +78,40 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 		msgs = append(msgs, msg)
 	}
 	return msgs, nil
+}
+
+func (this *DBStore) CreateUser(ctx context.Context, username string, passwordHash string) (int64, error) {
+	var id int64
+	// 用 Exec 還是 Query的取捨：=> 是否需要 DB 回傳資料列。
+	err := this.dbPool.QueryRow(ctx,
+		`
+			INSERT INTO users(username, password_hash)
+			VALUES($1, $2)
+			RETURNING id
+		`, username, passwordHash,
+	).Scan(&id)
+
+	if err != nil {
+		var pgErr *pgconn.PgError
+		// ┌───────────────────────────┬───────────────────────────────┬─────────────────────────────┐
+		// │           規則             │             例子              │      違反時的 SQLSTATE      │
+		// ├───────────────────────────┼───────────────────────────────┼─────────────────────────────┤
+		// │ NOT NULL                  │ username TEXT NOT NULL        │ 23502                       │
+		// ├───────────────────────────┼───────────────────────────────┼─────────────────────────────┤
+		// │ UNIQUE（含 unique index）  │ users_username_lower_key      │ 23505                       │
+		// ├───────────────────────────┼───────────────────────────────┼─────────────────────────────┤
+		// │ PRIMARY KEY               │ id ... PRIMARY KEY            │ 23505（PK 也是一種 unique） │
+		// ├───────────────────────────┼───────────────────────────────┼─────────────────────────────┤
+		// │ FOREIGN KEY               │ user_id REFERENCES users(id)  │ 23503                       │
+		// ├───────────────────────────┼───────────────────────────────┼─────────────────────────────┤
+		// │ CHECK                     │ CHECK (length(username) >= 3) │ 23514                       │
+		// └───────────────────────────┴───────────────────────────────┴─────────────────────────────┘
+		//
+		// 所以要透過`code`和`constraint name`同時比對才能確定正確的錯誤
+		if errors.As(err, &pgErr) && (pgErr.Code == "23505" && pgErr.ConstraintName == "users_username_lower_key") {
+			return 0, ErrUsernameTaken
+		}
+		return 0, err
+	}
+	return id, nil
 }
