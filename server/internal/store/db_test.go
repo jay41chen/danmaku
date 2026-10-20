@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -89,6 +90,50 @@ func TestGetUser(t *testing.T) {
 	})
 }
 
+func TestQueryMessage(t *testing.T) {
+	// 三個 case 形狀一樣：存哪些訊息、limit 多少、預期拿回哪些內容（舊→新）
+	cases := []struct {
+		name  string
+		saved []string
+		limit int
+		want  []string
+	}{
+		{name: "empty table", limit: 50, want: []string{}},
+		{name: "fewer than limit", saved: []string{"a", "b", "c"}, limit: 50, want: []string{"a", "b", "c"}},
+		// 最新的 3 則，順序仍是舊→新
+		{name: "more than limit", saved: []string{"a", "b", "c", "d", "e"}, limit: 3, want: []string{"c", "d", "e"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestDBStore(t)
+			// 照順序存：id 由 DB 遞增，所以先存的就是比較舊的
+			for _, content := range tc.saved {
+				if err := s.SaveMessage(t.Context(), content); err != nil {
+					t.Fatalf("setup SaveMessage(%q) error = %v", content, err)
+				}
+			}
+
+			msgs, err := s.QueryMessage(t.Context(), tc.limit)
+
+			if err != nil {
+				t.Fatalf("QueryMessage(%d) error = %v, want nil", tc.limit, err)
+			}
+			// nil slice 經 json.Encode 會變 null，client 預期的是 []
+			// slices.Equal 不分 nil 跟空 slice，所以要另外檢查
+			if msgs == nil {
+				t.Errorf("QueryMessage(%d) = nil, want non-nil slice", tc.limit)
+			}
+			got := make([]string, 0, len(msgs))
+			for _, m := range msgs {
+				got = append(got, m.Content)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("QueryMessage(%d) contents = %q, want %q", tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
 func newTestDBStore(t *testing.T) *DBStore {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
@@ -107,8 +152,8 @@ func newTestDBStore(t *testing.T) *DBStore {
 	t.Cleanup(s.dbPool.Close)
 
 	// 每個測試從空表開始，彼此不互相影響
-	if _, err := s.dbPool.Exec(ctx, "TRUNCATE users"); err != nil {
-		t.Fatalf("truncate users: %v", err)
+	if _, err := s.dbPool.Exec(ctx, "TRUNCATE users, messages"); err != nil {
+		t.Fatalf("truncate tables: %v", err)
 	}
 	return s
 }
