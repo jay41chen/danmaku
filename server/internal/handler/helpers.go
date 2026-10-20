@@ -6,7 +6,7 @@ import (
 	"slices"
 )
 
-// handler package 共用的 HTTP helper（APIHandler、AuthHandler 都會用）
+// handler package 共用的 HTTP helper（各個 Handler 都會用）
 
 func setContentType(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")

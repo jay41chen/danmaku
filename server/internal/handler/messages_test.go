@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,41 +9,11 @@ import (
 	"testing"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
-
-type fakeDBStore struct {
-	store.DBStoreInterface // 沒填 → nil；其他 4 個方法「有」，但被呼叫會 nil panic
-	msgs                   []model.Message
-	err                    error
-
-	// CreateUser 用
-	createID    int64
-	createErr   error
-	gotUsername string // spy：handler 傳進來的參數
-	gotHash     string
-
-	// GetUser 用
-	user   model.User
-	getErr error
-}
-
-func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
-	return f.msgs, f.err
-}
-
-func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
-	f.gotUsername, f.gotHash = username, passwordHash
-	return f.createID, f.createErr
-}
-
-func (f *fakeDBStore) GetUser(ctx context.Context, username string) (model.User, error) {
-	return f.user, f.getErr
-}
 
 func TestHandleMessages(t *testing.T) {
 	t.Run("db error returns 500", func(t *testing.T) {
-		h := NewAPIHandler(&fakeDBStore{err: errors.New("db down")}, nil) // redis 用不到，傳 nil
+		h := NewMessageHandler(&fakeDBStore{err: errors.New("db down")})
 		req := httptest.NewRequest(http.MethodGet, "/messages", nil)
 		rec := httptest.NewRecorder()
 
@@ -61,8 +30,7 @@ func TestHandleMessages(t *testing.T) {
 		// copy一份input並翻轉，這是我們期待的結果
 		expect := slices.Clone(input)
 		slices.Reverse(expect)
-		h := NewAPIHandler(&fakeDBStore{msgs: input},
-			nil) // redis 用不到，傳 nil
+		h := NewMessageHandler(&fakeDBStore{msgs: input})
 		req := httptest.NewRequest(http.MethodGet, "/messages", nil)
 		rec := httptest.NewRecorder()
 

@@ -5,50 +5,29 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
-type APIHandler struct {
+type HealthHandler struct {
 	db     store.DBStoreInterface
 	redis  store.RedisStoreInterface
 	logger *slog.Logger
 }
 
 // constructor
-func NewAPIHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *APIHandler {
-	return &APIHandler{
+func NewHealthHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *HealthHandler {
+	return &HealthHandler{
 		db:     db,
 		redis:  redis,
-		logger: slog.Default().With("component", "api"),
+		logger: slog.Default().With("component", "health"),
 	}
-}
-
-func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
-	if !checkMethodValidation(r, []string{http.MethodGet}) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	setContentType(w)
-
-	msgs, err := this.db.QueryMessage(r.Context(), 50)
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "query messages failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// DB query出來的是新到舊
-	slices.Reverse(msgs)
-	json.NewEncoder(w).Encode(msgs)
 }
 
 // check server is alive
-func (this *APIHandler) CheckServerHealth(w http.ResponseWriter, r *http.Request) {
+func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	if !checkMethodValidation(r, []string{http.MethodGet, http.MethodHead}) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

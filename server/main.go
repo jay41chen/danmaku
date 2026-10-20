@@ -24,8 +24,9 @@ func main() {
 	db := initDatabase()
 	redis := initRedis()
 
-	apiHandler := handler.NewAPIHandler(db, redis)
-	registerAPIRoute(apiHandler)
+	messageHandler := handler.NewMessageHandler(db)
+	healthHandler := handler.NewHealthHandler(db, redis)
+	registerAPIRoute(messageHandler, healthHandler)
 
 	authHandler := handler.NewAuthHandler(db)
 	registerAuthRoute(authHandler)
@@ -82,9 +83,9 @@ func initRedis() *store.RedisStore {
 	return redisStore
 }
 
-func registerAPIRoute(apiHandler *handler.APIHandler) {
-	http.HandleFunc("/messages", apiHandler.HandleMessages)
-	http.HandleFunc("/healthcheck", apiHandler.CheckServerHealth)
+func registerAPIRoute(messageHandler *handler.MessageHandler, healthHandler *handler.HealthHandler) {
+	http.HandleFunc("/messages", messageHandler.HandleMessages)
+	http.HandleFunc("/healthcheck", healthHandler.HandleHealthCheck)
 }
 
 func registerAuthRoute(authHandler *handler.AuthHandler) {
