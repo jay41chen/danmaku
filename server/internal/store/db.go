@@ -80,6 +80,13 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 		}
 		msgs = append(msgs, msg)
 	}
+
+	// rows.Next() 讀完跟讀到一半出錯（例如連線斷掉）都回 false，迴圈分不出來
+	// pgx 把中途的錯誤存在 rows 裡，只能在迴圈結束後用 rows.Err() 問；放在迴圈前一定是 nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return msgs, nil
 }
 
