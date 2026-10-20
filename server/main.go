@@ -27,6 +27,9 @@ func main() {
 	apiHandler := handler.NewAPIHandler(db, redis)
 	registerAPIRoute(apiHandler)
 
+	authHandler := handler.NewAuthHandler(db)
+	registerAuthRoute(authHandler)
+
 	wsHandler := handler.NewWebsocketHandler(redis, db)
 	registerWSRoute(wsHandler)
 	go wsHandler.StartBroadcast()
@@ -82,6 +85,10 @@ func initRedis() *store.RedisStore {
 func registerAPIRoute(apiHandler *handler.APIHandler) {
 	http.HandleFunc("/messages", apiHandler.HandleMessages)
 	http.HandleFunc("/healthcheck", apiHandler.CheckServerHealth)
+}
+
+func registerAuthRoute(authHandler *handler.AuthHandler) {
+	http.HandleFunc("/register", authHandler.HandleRegister)
 }
 
 func registerWSRoute(wsHandler *handler.WebsocketHandler) {

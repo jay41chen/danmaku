@@ -27,14 +27,6 @@ func NewAPIHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *
 	}
 }
 
-func setContentType(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-}
-
-func checkMethodValidation(r *http.Request, allowMethods []string) bool {
-	return slices.Contains(allowMethods, r.Method)
-}
-
 func (this *APIHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	if !checkMethodValidation(r, []string{http.MethodGet}) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

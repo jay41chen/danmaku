@@ -17,10 +17,21 @@ type fakeDBStore struct {
 	store.DBStoreInterface // 沒填 → nil；其他 4 個方法「有」，但被呼叫會 nil panic
 	msgs                   []model.Message
 	err                    error
+
+	// CreateUser 用
+	createID    int64
+	createErr   error
+	gotUsername string // spy：handler 傳進來的參數
+	gotHash     string
 }
 
 func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
 	return f.msgs, f.err
+}
+
+func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
+	f.gotUsername, f.gotHash = username, passwordHash
+	return f.createID, f.createErr
 }
 
 func TestHandleMessages(t *testing.T) {
