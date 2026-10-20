@@ -23,6 +23,10 @@ type fakeDBStore struct {
 	createErr   error
 	gotUsername string // spy：handler 傳進來的參數
 	gotHash     string
+
+	// GetUser 用
+	user   model.User
+	getErr error
 }
 
 func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
@@ -32,6 +36,10 @@ func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Mess
 func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
 	f.gotUsername, f.gotHash = username, passwordHash
 	return f.createID, f.createErr
+}
+
+func (f *fakeDBStore) GetUser(ctx context.Context, username string) (model.User, error) {
+	return f.user, f.getErr
 }
 
 func TestHandleMessages(t *testing.T) {

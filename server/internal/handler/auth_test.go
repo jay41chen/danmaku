@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -79,6 +80,77 @@ func TestHandleRegister(t *testing.T) {
 		ok, err := auth.CheckPassword(fake.gotHash, "kq7vz2mx")
 		if err != nil || !ok {
 			t.Errorf("CheckPassword(gotHash, password) = %v, %v, want true, nil", ok, err)
+		}
+	})
+}
+
+func TestHandleLogin(t *testing.T) {
+	const password = "kq7vz2mx"
+	// fake 裡要放真的 bcrypt hash，handler 才能用 CheckPassword 比對
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	// DB 存的是 "Jay"，login 用 "jay"：成功時要回 DB 存的大小寫
+	stored := model.User{ID: 7, Username: "Jay", PasswordHash: hash}
+	body := func(username, password string) string {
+		return `{"username":"` + username + `","password":"` + password + `"}`
+	}
+
+	cases := []struct {
+		name       string
+		method     string
+		body       string
+		user       model.User
+		getErr     error
+		wantStatus int
+		wantBody   string
+	}{
+		{"GET not allowed", http.MethodGet, "", stored, nil, http.StatusMethodNotAllowed, ""},
+		{"broken json", http.MethodPost, `{"username":"jay",}`, stored, nil, http.StatusBadRequest, ""},
+		// 這兩個 case 要回一模一樣的 status 和訊息，不能讓人分辨帳號存不存在
+		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, store.ErrUserNotFound, http.StatusUnauthorized, msgInvalidCredentials},
+		{"wrong password", http.MethodPost, body("jay", "wrong-password"), stored, nil, http.StatusUnauthorized, msgInvalidCredentials},
+		{"db error", http.MethodPost, body("jay", password), model.User{}, errors.New("db down"), http.StatusInternalServerError, ""},
+		// DB 裡的 hash 壞掉是系統錯誤，不是密碼錯
+		{"corrupt hash", http.MethodPost, body("jay", password), model.User{ID: 7, Username: "Jay", PasswordHash: "not-a-hash"}, nil, http.StatusInternalServerError, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeDBStore{user: tc.user, getErr: tc.getErr}
+			h := NewAuthHandler(fake)
+			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+
+			h.HandleLogin(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			// http.Error 會在訊息後面補一個換行
+			if tc.wantBody != "" && strings.TrimSpace(rec.Body.String()) != tc.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+
+	t.Run("success returns 200 with stored username", func(t *testing.T) {
+		fake := &fakeDBStore{user: stored}
+		h := NewAuthHandler(fake)
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", password)))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var got userResponse
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if want := (userResponse{ID: 7, Username: "Jay"}); got != want {
+			t.Errorf("response = %+v, want %+v", got, want)
 		}
 	})
 }

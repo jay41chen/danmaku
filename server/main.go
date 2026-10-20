@@ -89,6 +89,7 @@ func registerAPIRoute(apiHandler *handler.APIHandler) {
 
 func registerAuthRoute(authHandler *handler.AuthHandler) {
 	http.HandleFunc("/register", authHandler.HandleRegister)
+	http.HandleFunc("/login", authHandler.HandleLogin)
 }
 
 func registerWSRoute(wsHandler *handler.WebsocketHandler) {

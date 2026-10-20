@@ -10,6 +10,14 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
+const (
+	msgInvalidCredentials = "invalid username or password"
+)
+
+var (
+	dummyHash, _ = auth.HashPassword("timing-equalizer")
+)
+
 type AuthHandler struct {
 	db     store.DBStoreInterface
 	logger *slog.Logger
@@ -87,4 +95,50 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 	setContentType(w)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(userResponse{ID: id, Username: req.Username})
+}
+
+func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	if !checkMethodValidation(r, []string{http.MethodPost}) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req credentials
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// 查詢user在不在
+	user, err := this.db.GetUser(r.Context(), req.Username)
+	if errors.Is(err, store.ErrUserNotFound) {
+		// 結果不重要，目的是花跟「密碼錯」一樣的時間
+		// 借以避免讓攻擊者知道錯誤
+		_, _ = auth.CheckPassword(dummyHash, req.Password)
+		http.Error(w, msgInvalidCredentials, http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "get user failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// 有user，檢查密碼是不是正確的
+	success, err := auth.CheckPassword(user.PasswordHash, req.Password)
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "check password failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if !success {
+		http.Error(w, msgInvalidCredentials, http.StatusUnauthorized)
+		return
+	}
+
+	setContentType(w)
+	w.WriteHeader(http.StatusOK)
+	// 理論上要發JWT，但還沒做到，先這樣
+	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
+	json.NewEncoder(w).Encode(userResponse{ID: user.ID, Username: user.Username})
 }
