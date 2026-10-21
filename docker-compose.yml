@@ -19,7 +19,7 @@ services:
         volumes:
             - pgdata:/var/lib/postgresql/data
     
-    redis: # 刻意不掛 volume：目前只用 Pub/Sub，沒有需要保存的資料
+    redis: # 刻意不掛 volume：Pub/Sub 和限流計數都不需要保存，重啟後清空沒關係
         image: redis:7
         container_name: danmaku-redis
         ports:
@@ -34,6 +34,8 @@ services:
             # 走內網，所以port用5432
             DATABASE_URL: postgres://danmaku:danmaku@postgres:5432/danmaku
             REDIS_URL: redis://redis:6379
+            # nginx 會用 $remote_addr 覆蓋 X-Real-IP（見 config/nginx.conf），限流用它當 client IP
+            CLIENT_IP_HEADER: X-Real-IP
         ports:
             - 5388:8080
     server-2:
@@ -46,6 +48,8 @@ services:
             # 走內網，所以port用5432
             DATABASE_URL: postgres://danmaku:danmaku@postgres:5432/danmaku
             REDIS_URL: redis://redis:6379
+            # nginx 會用 $remote_addr 覆蓋 X-Real-IP（見 config/nginx.conf），限流用它當 client IP
+            CLIENT_IP_HEADER: X-Real-IP
         ports:
             - 5389:8080
     nginx:

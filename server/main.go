@@ -28,7 +28,8 @@ func main() {
 	healthHandler := handler.NewHealthHandler(db, redis)
 	registerAPIRoute(messageHandler, healthHandler)
 
-	authHandler := handler.NewAuthHandler(db)
+	// RedisStore 同時實作 Pub/Sub 和 RateLimiterInterface，同一條連線共用
+	authHandler := handler.NewAuthHandler(db, redis, initClientIPHeader())
 	registerAuthRoute(authHandler)
 
 	wsHandler := handler.NewWebsocketHandler(redis, db)
@@ -81,6 +82,20 @@ func initRedis() *store.RedisStore {
 		os.Exit(1)
 	}
 	return redisStore
+}
+
+// 限流要用的 client IP 從哪裡讀。只能設成「最前面那層 trusted proxy 會覆蓋」的 header，
+// 否則 client 可以自己偽造（docker-compose：nginx；Railway：edge proxy，兩邊都是 X-Real-IP）
+func initClientIPHeader() string {
+	header := os.Getenv("CLIENT_IP_HEADER")
+	if header == "" {
+		// 不 fail fast：本機直接 go run（前面沒有 proxy）時 RemoteAddr 就是對的
+		// 但在 proxy 後面忘了設，RemoteAddr 會是 proxy 的 IP，所有人共用同一個限流計數
+		slog.Warn("CLIENT_IP_HEADER not set, rate limiting uses RemoteAddr; behind a proxy all clients share one limit")
+		return ""
+	}
+	slog.Info("client ip from header", "header", header)
+	return header
 }
 
 func registerAPIRoute(messageHandler *handler.MessageHandler, healthHandler *handler.HealthHandler) {

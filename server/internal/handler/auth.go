@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/store"
@@ -18,15 +20,26 @@ var (
 	dummyHash, _ = auth.HashPassword("timing-equalizer")
 )
 
+// 限流規則（機制在 ratelimit.go）
+var (
+	loginIPRule       = rateRule{"login:ip", 20, time.Minute}            // 一台機器狂試很多帳號
+	loginUsernameRule = rateRule{"login:username", 10, 15 * time.Minute} // 很多 IP 一起猜同一個帳號
+	registerIPRule    = rateRule{"register:ip", 5, time.Hour}            // 一台機器狂註冊垃圾帳號
+)
+
 type AuthHandler struct {
-	db     store.DBStoreInterface
-	logger *slog.Logger
+	db               store.DBStoreInterface
+	logger           *slog.Logger
+	limiter          store.RateLimiterInterface
+	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 clientIP）
 }
 
-func NewAuthHandler(db store.DBStoreInterface) *AuthHandler {
+func NewAuthHandler(db store.DBStoreInterface, limiter store.RateLimiterInterface, trustedHeaderKey string) *AuthHandler {
 	return &AuthHandler{
-		db:     db,
-		logger: slog.Default().With("component", "auth"),
+		db:               db,
+		logger:           slog.Default().With("component", "auth"),
+		limiter:          limiter,
+		trustedHeaderKey: trustedHeaderKey,
 	}
 }
 
@@ -51,6 +64,11 @@ type userResponse struct {
 func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	if !checkMethodValidation(r, []string{http.MethodPost}) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 做ip的429 check（在 bcrypt 之前擋，不讓攻擊者讓 server 做白工）
+	if !this.allow(w, r, registerIPRule, clientIP(r, this.trustedHeaderKey)) {
 		return
 	}
 
@@ -103,9 +121,23 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 做ip的429 check
+	// ip 存起來：登入成功時要用同一個 key 退還
+	ip := clientIP(r, this.trustedHeaderKey)
+	if !this.allow(w, r, loginIPRule, ip) {
+		return
+	}
+
 	var req credentials
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// 做username的429 check
+	// 轉小寫：GetUser 不分大小寫，key 也要統一，不然換大小寫（Jay / JAY）就能多猜
+	username := strings.ToLower(req.Username)
+	if !this.allow(w, r, loginUsernameRule, username) {
 		return
 	}
 
@@ -134,6 +166,19 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if !success {
 		http.Error(w, msgInvalidCredentials, http.StatusUnauthorized)
 		return
+	}
+
+	// 成功登入，reset 這個帳號的計數（使用者自己打錯幾次不該被鎖）
+	// 失敗只記 log：限流的附屬功能壞掉，不該讓登入失敗
+	if err := this.limiter.Reset(r.Context(), loginUsernameRule.key(username)); err != nil {
+		this.logger.WarnContext(r.Context(), "rate limit reset failed",
+			"rule", loginUsernameRule.name, "error", err)
+	}
+	// IP 只退還這一次（-1），等於只數失敗：共用出口 IP 的人（公司 NAT）正常登入不會互相擋到
+	// 不 reset IP：否則攻擊者用自己的帳號登入一次，就能把 IP 計數歸零
+	if err := this.limiter.Refund(r.Context(), loginIPRule.key(ip)); err != nil {
+		this.logger.WarnContext(r.Context(), "rate limit refund failed",
+			"rule", loginIPRule.name, "error", err)
 	}
 
 	setContentType(w)

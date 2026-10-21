@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/model"
@@ -37,7 +39,7 @@ func TestHandleRegister(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{createErr: tc.createErr}
-			h := NewAuthHandler(fake)
+			h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
 			req := httptest.NewRequest(tc.method, "/register", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -52,7 +54,7 @@ func TestHandleRegister(t *testing.T) {
 	// 成功的 case 要多驗 response body 和存進去的 hash，形狀不同，單獨寫
 	t.Run("success returns 201 and stores hash", func(t *testing.T) {
 		fake := &fakeDBStore{createID: 7}
-		h := NewAuthHandler(fake)
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -118,7 +120,7 @@ func TestHandleLogin(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{user: tc.user, getErr: tc.getErr}
-			h := NewAuthHandler(fake)
+			h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
 			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -136,7 +138,7 @@ func TestHandleLogin(t *testing.T) {
 
 	t.Run("success returns 200 with stored username", func(t *testing.T) {
 		fake := &fakeDBStore{user: stored}
-		h := NewAuthHandler(fake)
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", password)))
 		rec := httptest.NewRecorder()
 
@@ -151,6 +153,135 @@ func TestHandleLogin(t *testing.T) {
 		}
 		if want := (userResponse{ID: 7, Username: "Jay"}); got != want {
 			t.Errorf("response = %+v, want %+v", got, want)
+		}
+	})
+}
+
+func TestHandleLoginRateLimit(t *testing.T) {
+	const password = "kq7vz2mx"
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	stored := model.User{ID: 7, Username: "Jay", PasswordHash: hash}
+	// httptest.NewRequest 預設的 RemoteAddr 是 192.0.2.1:1234
+	const (
+		ipKey       = "rl:login:ip:192.0.2.1"
+		usernameKey = "rl:login:username:jay"
+	)
+	// 用大寫登入：帳號的 key 要轉小寫，換大小寫才不能多猜
+	body := `{"username":"JAY","password":"` + password + `"}`
+
+	cases := []struct {
+		name           string
+		method         string
+		body           string
+		limiter        *fakeRateLimiter
+		wantStatus     int
+		wantRetryAfter string   // 空字串 = 不檢查
+		wantAllowKeys  []string // 依序問過 limiter 的 key
+		wantResetKeys  []string
+		wantRefundKeys []string
+	}{
+		// method 錯的不算次數
+		{"GET not counted", http.MethodGet, "", &fakeRateLimiter{}, http.StatusMethodNotAllowed, "", nil, nil, nil},
+		// IP 被擋：還沒 decode 就回 429，不會再問帳號
+		{"ip blocked", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 30 * time.Second}, http.StatusTooManyRequests, "30", []string{ipKey}, nil, nil},
+		{"username blocked", http.MethodPost, body, &fakeRateLimiter{blockKey: usernameKey, retryAfter: 30 * time.Second}, http.StatusTooManyRequests, "30", []string{ipKey, usernameKey}, nil, nil},
+		// 秒數無條件進位：30.4 秒回 31（回 30 的話 client 會早到、又被擋一次）
+		{"retry after rounds up", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 30400 * time.Millisecond}, http.StatusTooManyRequests, "31", []string{ipKey}, nil, nil},
+		// 剩 0 秒也至少回 1，不能叫 client 現在就再試
+		{"retry after at least 1", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 0}, http.StatusTooManyRequests, "1", []string{ipKey}, nil, nil},
+		// fail open：limiter 壞掉時照常登入
+		{"limiter error fails open", http.MethodPost, body, &fakeRateLimiter{err: errors.New("redis down")}, http.StatusOK, "", []string{ipKey, usernameKey}, []string{usernameKey}, []string{ipKey}},
+		// 成功：帳號 reset、IP 只退還一次（reset IP 的話，攻擊者用自己的帳號登入一次就能把 IP 計數歸零）
+		{"success resets username and refunds ip", http.MethodPost, body, &fakeRateLimiter{}, http.StatusOK, "", []string{ipKey, usernameKey}, []string{usernameKey}, []string{ipKey}},
+		// 失敗的不退：IP 規則等於只數失敗
+		{"wrong password no reset or refund", http.MethodPost, `{"username":"JAY","password":"wrong-password"}`, &fakeRateLimiter{}, http.StatusUnauthorized, "", []string{ipKey, usernameKey}, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewAuthHandler(&fakeDBStore{user: stored}, tc.limiter, "")
+			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+
+			h.HandleLogin(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			// 用 Result().Header：它是 WriteHeader 當下送出去的 header；rec.Header() 之後再 Set 也看得到，會漏掉「太晚設」的 bug
+			if got := rec.Result().Header.Get("Retry-After"); tc.wantRetryAfter != "" && got != tc.wantRetryAfter {
+				t.Errorf("Retry-After = %q, want %q", got, tc.wantRetryAfter)
+			}
+			if !slices.Equal(tc.limiter.allowKeys, tc.wantAllowKeys) {
+				t.Errorf("Allow keys = %q, want %q", tc.limiter.allowKeys, tc.wantAllowKeys)
+			}
+			if !slices.Equal(tc.limiter.resetKeys, tc.wantResetKeys) {
+				t.Errorf("Reset keys = %q, want %q", tc.limiter.resetKeys, tc.wantResetKeys)
+			}
+			if !slices.Equal(tc.limiter.refundKeys, tc.wantRefundKeys) {
+				t.Errorf("Refund keys = %q, want %q", tc.limiter.refundKeys, tc.wantRefundKeys)
+			}
+		})
+	}
+
+	// 有設定要信任的 header 時，IP 的 key 要用 header 的值（確認 trustedHeaderKey 有接到 clientIP）
+	t.Run("ip from trusted header", func(t *testing.T) {
+		limiter := &fakeRateLimiter{}
+		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "X-Real-IP")
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+		req.Header.Set("X-Real-IP", "1.2.3.4")
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if len(limiter.allowKeys) == 0 || limiter.allowKeys[0] != "rl:login:ip:1.2.3.4" {
+			t.Errorf("Allow keys = %q, want first %q", limiter.allowKeys, "rl:login:ip:1.2.3.4")
+		}
+	})
+}
+
+func TestHandleRegisterRateLimit(t *testing.T) {
+	const (
+		validBody = `{"username":"jay","password":"kq7vz2mx"}`
+		ipKey     = "rl:register:ip:192.0.2.1"
+	)
+
+	t.Run("ip blocked", func(t *testing.T) {
+		fake := &fakeDBStore{createID: 7}
+		limiter := &fakeRateLimiter{blockKey: ipKey, retryAfter: time.Hour}
+		h := NewAuthHandler(fake, limiter, "")
+		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+
+		h.HandleRegister(rec, req)
+
+		if rec.Code != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+		}
+		if got := rec.Result().Header.Get("Retry-After"); got != "3600" {
+			t.Errorf("Retry-After = %q, want %q", got, "3600")
+		}
+		// 被擋就不能走到建帳號
+		if fake.gotUsername != "" {
+			t.Errorf("CreateUser called with %q, want not called", fake.gotUsername)
+		}
+	})
+
+	t.Run("limiter error fails open", func(t *testing.T) {
+		limiter := &fakeRateLimiter{err: errors.New("redis down")}
+		h := NewAuthHandler(&fakeDBStore{createID: 7}, limiter, "")
+		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+
+		h.HandleRegister(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+		if !slices.Equal(limiter.allowKeys, []string{ipKey}) {
+			t.Errorf("Allow keys = %q, want %q", limiter.allowKeys, []string{ipKey})
 		}
 	})
 }

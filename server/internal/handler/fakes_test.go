@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
@@ -35,4 +36,38 @@ func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash str
 
 func (f *fakeDBStore) GetUser(ctx context.Context, username string) (model.User, error) {
 	return f.user, f.getErr
+}
+
+// handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數
+var _ store.RateLimiterInterface = (*fakeRateLimiter)(nil) // compile 時檢查 fake 有實作 interface
+
+type fakeRateLimiter struct {
+	blockKey   string        // 收到這個 key 就回 allowed=false
+	retryAfter time.Duration // 被擋時回傳的等待時間
+	err        error         // 不是 nil 就直接回傳這個錯（模擬 Redis 掛了）
+
+	allowKeys  []string // spy：Allow 收到過的 key
+	resetKeys  []string // spy：Reset 收到過的 key
+	refundKeys []string // spy：Refund 收到過的 key
+}
+
+func (f *fakeRateLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
+	f.allowKeys = append(f.allowKeys, key) // spy：記下被問過的 key
+	if f.err != nil {
+		return false, 0, f.err // 模擬 Redis 掛了；有 err 時呼叫端不看前兩個值
+	}
+	if key == f.blockKey {
+		return false, f.retryAfter, nil
+	}
+	return true, 0, nil
+}
+
+func (f *fakeRateLimiter) Reset(ctx context.Context, key string) error {
+	f.resetKeys = append(f.resetKeys, key) // spy：只記錄，不真的清什麼
+	return nil
+}
+
+func (f *fakeRateLimiter) Refund(ctx context.Context, key string) error {
+	f.refundKeys = append(f.refundKeys, key) // spy：只記錄，不真的退
+	return nil
 }
