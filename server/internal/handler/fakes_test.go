@@ -2,8 +2,11 @@ package handler
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
@@ -70,4 +73,20 @@ func (f *fakeRateLimiter) Reset(ctx context.Context, key string) error {
 func (f *fakeRateLimiter) Refund(ctx context.Context, key string) error {
 	f.refundKeys = append(f.refundKeys, key) // spy：只記錄，不真的退
 	return nil
+}
+
+// handler test 共用的 token issuer：簽 / 驗都是純計算、沒有 I/O，直接用真的，不用 fake
+var testTokens = func() *auth.TokenIssuer {
+	issuer, err := auth.NewTokenIssuer(strings.Repeat("k", 32), time.Hour)
+	if err != nil {
+		panic(err)
+	}
+	return issuer
+}()
+
+// 一定簽失敗的 issuer：真的 HS256 不會失敗，只能用 fake 走到這條路
+type failingTokenIssuer struct{}
+
+func (failingTokenIssuer) IssueAccessToken(userID int64) (string, time.Duration, error) {
+	return "", 0, errors.New("sign failed")
 }

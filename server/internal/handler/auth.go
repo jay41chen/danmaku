@@ -32,14 +32,22 @@ type AuthHandler struct {
 	logger           *slog.Logger
 	limiter          store.RateLimiterInterface
 	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 clientIP）
+	tokens           tokenIssuer
 }
 
-func NewAuthHandler(db store.DBStoreInterface, limiter store.RateLimiterInterface, trustedHeaderKey string) *AuthHandler {
+// handler 只需要「能簽 access token」：定義在使用方，*auth.TokenIssuer 不用宣告就自動符合
+// test 可以換成一定會失敗的 fake，驗證簽失敗時不會 Reset / Refund
+type tokenIssuer interface {
+	IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error)
+}
+
+func NewAuthHandler(db store.DBStoreInterface, limiter store.RateLimiterInterface, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
 	return &AuthHandler{
 		db:               db,
 		logger:           slog.Default().With("component", "auth"),
 		limiter:          limiter,
 		trustedHeaderKey: trustedHeaderKey,
+		tokens:           tokens,
 	}
 }
 
@@ -53,6 +61,15 @@ type credentials struct {
 type userResponse struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
+}
+
+// login 成功的 response：欄位命名照 OAuth 2.0（RFC 6749 §5.1）
+// expires_in 是相對秒數：client 不用解 JWT、也不受手機時鐘誤差影響
+type loginResponse struct {
+	AccessToken string       `json:"access_token"`
+	TokenType   string       `json:"token_type"`
+	ExpiresIn   int          `json:"expires_in"`
+	User        userResponse `json:"user"`
 }
 
 // flow:
@@ -168,6 +185,14 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
+	accessToken, expiresIn, err := this.tokens.IssueAccessToken(user.ID)
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "issue access token failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	// 成功登入，reset 這個帳號的計數（使用者自己打錯幾次不該被鎖）
 	// 失敗只記 log：限流的附屬功能壞掉，不該讓登入失敗
 	if err := this.limiter.Reset(r.Context(), loginUsernameRule.key(username)); err != nil {
@@ -183,7 +208,11 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	setContentType(w)
 	w.WriteHeader(http.StatusOK)
-	// 理論上要發JWT，但還沒做到，先這樣
 	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
-	json.NewEncoder(w).Encode(userResponse{ID: user.ID, Username: user.Username})
+	json.NewEncoder(w).Encode(loginResponse{
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresIn:   int(expiresIn.Seconds()),
+		User:        userResponse{ID: user.ID, Username: user.Username},
+	})
 }

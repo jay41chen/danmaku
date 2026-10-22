@@ -39,7 +39,7 @@ func TestHandleRegister(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{createErr: tc.createErr}
-			h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
+			h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/register", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -54,7 +54,7 @@ func TestHandleRegister(t *testing.T) {
 	// 成功的 case 要多驗 response body 和存進去的 hash，形狀不同，單獨寫
 	t.Run("success returns 201 and stores hash", func(t *testing.T) {
 		fake := &fakeDBStore{createID: 7}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -120,7 +120,7 @@ func TestHandleLogin(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{user: tc.user, getErr: tc.getErr}
-			h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
+			h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -136,9 +136,9 @@ func TestHandleLogin(t *testing.T) {
 		})
 	}
 
-	t.Run("success returns 200 with stored username", func(t *testing.T) {
+	t.Run("success returns 200 with access token and stored username", func(t *testing.T) {
 		fake := &fakeDBStore{user: stored}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "")
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", password)))
 		rec := httptest.NewRecorder()
 
@@ -147,12 +147,19 @@ func TestHandleLogin(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusOK, rec.Body.String())
 		}
-		var got userResponse
+		var got loginResponse
 		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if want := (userResponse{ID: 7, Username: "Jay"}); got != want {
-			t.Errorf("response = %+v, want %+v", got, want)
+		if want := (userResponse{ID: 7, Username: "Jay"}); got.User != want {
+			t.Errorf("user = %+v, want %+v", got.User, want)
+		}
+		if got.TokenType != "Bearer" || got.ExpiresIn != 3600 {
+			t.Errorf("token_type = %q, expires_in = %d, want Bearer, 3600", got.TokenType, got.ExpiresIn)
+		}
+		// token 要能驗過，而且代表的是 DB 裡那個 user（不是 request 帶來的 username）
+		if userID, err := testTokens.ParseAccessToken(got.AccessToken); err != nil || userID != 7 {
+			t.Errorf("ParseAccessToken(access_token) = (%d, %v), want (7, nil)", userID, err)
 		}
 	})
 }
@@ -201,7 +208,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewAuthHandler(&fakeDBStore{user: stored}, tc.limiter, "")
+			h := NewAuthHandler(&fakeDBStore{user: stored}, tc.limiter, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -226,10 +233,27 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		})
 	}
 
+	// 簽 token 失敗 = server 的錯：回 500，而且不算登入成功（不 Reset 帳號、不退還 IP）
+	t.Run("token issue failure returns 500 without reset or refund", func(t *testing.T) {
+		limiter := &fakeRateLimiter{}
+		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "", failingTokenIssuer{})
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+		if len(limiter.resetKeys) != 0 || len(limiter.refundKeys) != 0 {
+			t.Errorf("Reset keys = %q, Refund keys = %q, want both empty", limiter.resetKeys, limiter.refundKeys)
+		}
+	})
+
 	// 有設定要信任的 header 時，IP 的 key 要用 header 的值（確認 trustedHeaderKey 有接到 clientIP）
 	t.Run("ip from trusted header", func(t *testing.T) {
 		limiter := &fakeRateLimiter{}
-		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "X-Real-IP")
+		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "X-Real-IP", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
 		req.Header.Set("X-Real-IP", "1.2.3.4")
 		rec := httptest.NewRecorder()
@@ -251,7 +275,7 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 	t.Run("ip blocked", func(t *testing.T) {
 		fake := &fakeDBStore{createID: 7}
 		limiter := &fakeRateLimiter{blockKey: ipKey, retryAfter: time.Hour}
-		h := NewAuthHandler(fake, limiter, "")
+		h := NewAuthHandler(fake, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -271,7 +295,7 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 
 	t.Run("limiter error fails open", func(t *testing.T) {
 		limiter := &fakeRateLimiter{err: errors.New("redis down")}
-		h := NewAuthHandler(&fakeDBStore{createID: 7}, limiter, "")
+		h := NewAuthHandler(&fakeDBStore{createID: 7}, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 

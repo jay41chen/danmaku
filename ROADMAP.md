@@ -65,6 +65,14 @@
 
 - [ ] Room 概念（房間 + 房主）
 - [ ] Authorization（RBAC）
+  - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
+  - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
+- [ ] Ban（封鎖使用者，含 shadow ban）
+  - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
+  - 每台 server 在**記憶體**維護 ban set（人數極少），每個 request 查記憶體即可，不查 DB / Redis
+  - 同步：ban / unban 時用 Redis Pub/Sub 廣播。Pub/Sub 是 at-most-once（subscription 斷線、部署中都會掉）→ DB 是 source of truth：啟動時、subscription 重連時、每 60 秒從 DB 全量重新載入
+  - 三層保險：Pub/Sub（秒級）→ 定期同步（≤ 60 秒）→ refresh token 已撤銷，access token 過期後換不到新的（≤ access token 效期）
+  - WS：連線建立時才驗 token，之後的訊息不經過 middleware → 收到 ban 時要主動關掉該 user 的連線，或在每則訊息檢查 ban set
 
 ## W5 — API 設計強化
 
@@ -101,5 +109,6 @@
   - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
+- [ ] Migration 成功時 log 目前的 schema version（`m.Version()`）：現在成功時完全沒有 log，只能從 `server listening` 間接推斷，要確認版本得去開 DB
 - [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
 - [ ] Chaos testing

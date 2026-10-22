@@ -2,10 +2,16 @@ package auth
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 
 	_ "embed" // 底線 import：沒有直接用到 embed 這個 package，但 go:embed 需要它
+)
+
+const (
+	// HS256 secret 的最短長度（256 bits）。config 啟動時檢查、NewTokenIssuer 也檢查，共用這個數字
+	MinSecretLength = 32
 )
 
 var (
@@ -42,6 +48,13 @@ func ValidatePassword(password string) error {
 	}
 	if _, inList := commonPasswords[strings.ToLower(password)]; inList {
 		return errors.New("password is too common")
+	}
+	return nil
+}
+
+func ValidateJWTSecretLength(jwtSecret string) error {
+	if l := len(jwtSecret); l < MinSecretLength {
+		return fmt.Errorf("jwt secret needs at least %d bytes, got %d", MinSecretLength, l)
 	}
 	return nil
 }

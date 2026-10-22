@@ -65,3 +65,37 @@ func TestValidatePassword(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateJWTSecretLength(t *testing.T) {
+	cases := []struct {
+		name    string
+		secret  string
+		wantErr bool
+	}{
+		{"empty", "", true},
+		// 邊界：31 擋、32 過
+		{"31 bytes", strings.Repeat("k", MinSecretLength-1), true},
+		{"32 bytes", strings.Repeat("k", MinSecretLength), false},
+		{"longer is fine", strings.Repeat("k", 64), false},
+		// 11 個字但 33 byte：長度以 byte 計（HMAC key 吃的是 byte）
+		{"non-ASCII 33 bytes", strings.Repeat("密", 11), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateJWTSecretLength(tc.secret)
+
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ValidateJWTSecretLength(len %d) error = %v, wantErr %v", len(tc.secret), err, tc.wantErr)
+			}
+		})
+	}
+
+	// 錯誤會被印進 log：只能帶長度，不能帶 secret 本身
+	t.Run("error does not leak secret", func(t *testing.T) {
+		err := ValidateJWTSecretLength("short-s3kr1t")
+
+		if err == nil || strings.Contains(err.Error(), "s3kr1t") {
+			t.Errorf("error = %v, want error without the secret", err)
+		}
+	})
+}

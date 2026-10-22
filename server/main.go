@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/config"
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	logging "github.com/jay41chen/danmaku/server/internal/logging"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
@@ -18,25 +20,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const accessTokenTTL = time.Hour
+
 func main() {
 	initApp()
+	// 設定：只讀 env + 檢查，沒有副作用；設錯就在這裡停，不會先連 DB、跑 migration
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	logClientIPHeader(cfg.ClientIPHeader)
+	tokens := initTokenIssuer(cfg.JWTSecret)
+
 	registerPrometheus()
-	db := initDatabase()
-	redis := initRedis()
+	db := initDatabase(cfg.DatabaseURL)
+	redis := initRedis(cfg.RedisURL)
 
 	messageHandler := handler.NewMessageHandler(db)
 	healthHandler := handler.NewHealthHandler(db, redis)
 	registerAPIRoute(messageHandler, healthHandler)
 
 	// RedisStore 同時實作 Pub/Sub 和 RateLimiterInterface，同一條連線共用
-	authHandler := handler.NewAuthHandler(db, redis, initClientIPHeader())
+	authHandler := handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens)
 	registerAuthRoute(authHandler)
 
 	wsHandler := handler.NewWebsocketHandler(redis, db)
 	registerWSRoute(wsHandler)
 	go wsHandler.StartBroadcast()
 
-	startServer()
+	startServer(cfg.Port, cfg.CORSOrigins)
 }
 
 func registerPrometheus() {
@@ -51,11 +64,7 @@ func initApp() {
 	slog.SetDefault(slog.New(contextHandler))
 }
 
-func initDatabase() *store.DBStore {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://danmaku:danmaku@localhost:3192/danmaku"
-	}
+func initDatabase(dbURL string) *store.DBStore {
 	// 這邊隱含了semantic上的順序，先準備好schema再建立DB
 	if err := store.RunMigration(dbURL); err != nil {
 		slog.Error("db migration failed", "error", err)
@@ -71,11 +80,7 @@ func initDatabase() *store.DBStore {
 	return dbStore
 }
 
-func initRedis() *store.RedisStore {
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		redisURL = "redis://localhost:2907"
-	}
+func initRedis(redisURL string) *store.RedisStore {
 	redisStore, err := store.NewRedisStore(context.Background(), redisURL)
 	if err != nil {
 		slog.Error("redis init failed", "error", err)
@@ -86,16 +91,27 @@ func initRedis() *store.RedisStore {
 
 // 限流要用的 client IP 從哪裡讀。只能設成「最前面那層 trusted proxy 會覆蓋」的 header，
 // 否則 client 可以自己偽造（docker-compose：nginx；Railway：edge proxy，兩邊都是 X-Real-IP）
-func initClientIPHeader() string {
-	header := os.Getenv("CLIENT_IP_HEADER")
+// 沒設不算設定錯誤（config 不擋），只在啟動時提醒
+func logClientIPHeader(header string) {
 	if header == "" {
 		// 不 fail fast：本機直接 go run（前面沒有 proxy）時 RemoteAddr 就是對的
 		// 但在 proxy 後面忘了設，RemoteAddr 會是 proxy 的 IP，所有人共用同一個限流計數
 		slog.Warn("CLIENT_IP_HEADER not set, rate limiting uses RemoteAddr; behind a proxy all clients share one limit")
-		return ""
+		return
 	}
 	slog.Info("client ip from header", "header", header)
-	return header
+}
+
+// JWT_SECRET 沒有安全的預設值（寫死 = 進 git 誰都能簽；隨機 = 兩台 server 互不認、每次部署全部登出）
+// → config.Load 已經 fail fast 檢查過長度；這裡的 error 理論上不會發生，保留是因為 NewTokenIssuer 自己也守不變式
+func initTokenIssuer(secret string) *auth.TokenIssuer {
+	tokens, err := auth.NewTokenIssuer(secret, accessTokenTTL)
+	if err != nil {
+		// error 只帶長度，不帶 secret 本身
+		slog.Error("token issuer init failed", "error", err)
+		os.Exit(1)
+	}
+	return tokens
 }
 
 func registerAPIRoute(messageHandler *handler.MessageHandler, healthHandler *handler.HealthHandler) {
@@ -112,17 +128,8 @@ func registerWSRoute(wsHandler *handler.WebsocketHandler) {
 	http.HandleFunc("/ws", wsHandler.HandleWebsocket)
 }
 
-func startServer() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	origins, err := middleware.ParseOrigins(os.Getenv("CORS_ORIGINS"))
-	if err != nil {
-		slog.Error("cors setting not valid", "error", err)
-		os.Exit(1)
-	}
+// origins 已經由 config.Load 用 middleware.ParseOrigins 解析、檢查過
+func startServer(port string, origins []string) {
 
 	// 建立SERVER
 	server := http.Server{

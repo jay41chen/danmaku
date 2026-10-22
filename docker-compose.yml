@@ -36,6 +36,8 @@ services:
             REDIS_URL: redis://redis:6379
             # nginx 會用 $remote_addr 覆蓋 X-Real-IP（見 config/nginx.conf），限流用它當 client IP
             CLIENT_IP_HEADER: X-Real-IP
+            # 本機專用（跟上面 danmaku:danmaku 同一類），Railway 要另外設一把隨機的；至少 32 bytes
+            JWT_SECRET: local-dev-only-jwt-secret-0123456789
         ports:
             - 5388:8080
     server-2:
@@ -50,6 +52,8 @@ services:
             REDIS_URL: redis://redis:6379
             # nginx 會用 $remote_addr 覆蓋 X-Real-IP（見 config/nginx.conf），限流用它當 client IP
             CLIENT_IP_HEADER: X-Real-IP
+            # 本機專用（跟上面 danmaku:danmaku 同一類），Railway 要另外設一把隨機的；至少 32 bytes
+            JWT_SECRET: local-dev-only-jwt-secret-0123456789
         ports:
             - 5389:8080
     nginx:
