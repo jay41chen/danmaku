@@ -25,6 +25,13 @@ var (
 	loginIPRule       = rateRule{"login:ip", 20, time.Minute}            // 一台機器狂試很多帳號
 	loginUsernameRule = rateRule{"login:username", 10, 15 * time.Minute} // 很多 IP 一起猜同一個帳號
 	registerIPRule    = rateRule{"register:ip", 5, time.Hour}            // 一台機器狂註冊垃圾帳號
+	refreshIPRule     = rateRule{"refresh:ip", 10, time.Minute}          // 一台機器狂猜 refresh token
+)
+
+const (
+	refreshTokenTTL = 7 * 24 * time.Hour
+	// 只蓋「回應掉了、client 自動重送」的最壞情況：timeout 5 秒 × 重試 3 次（Step 10）
+	refreshTokenGrace = 15 * time.Second
 )
 
 type AuthHandler struct {
@@ -63,13 +70,26 @@ type userResponse struct {
 	Username string `json:"username"`
 }
 
-// login 成功的 response：欄位命名照 OAuth 2.0（RFC 6749 §5.1）
-// expires_in 是相對秒數：client 不用解 JWT、也不受手機時鐘誤差影響
+// login / refresh 成功都回這組：欄位命名照 OAuth 2.0（RFC 6749 §5.1）
+// expires_in 是 access token 的相對秒數：client 不用解 JWT、也不受手機時鐘誤差影響
+// refresh_token 是明文，只在這裡出現一次：DB 只存 hash，log 也不能印
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// embedding：JSON 會攤平成同一層（{"access_token":..., "user":{...}}），不是包一層 tokenResponse
 type loginResponse struct {
-	AccessToken string       `json:"access_token"`
-	TokenType   string       `json:"token_type"`
-	ExpiresIn   int          `json:"expires_in"`
-	User        userResponse `json:"user"`
+	tokenResponse
+	User userResponse `json:"user"`
+}
+
+// /refresh、/logout 的 request body
+// 先放 JSON body；要不要改成 HttpOnly cookie 在 Step 10 決定
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
 }
 
 // flow:
@@ -186,9 +206,8 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
-	accessToken, expiresIn, err := this.tokens.IssueAccessToken(user.ID)
+	tokens, err := this.issueTokens(r, user.ID)
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "issue access token failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -210,9 +229,109 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
 	json.NewEncoder(w).Encode(loginResponse{
-		AccessToken: accessToken,
-		TokenType:   "Bearer",
-		ExpiresIn:   int(expiresIn.Seconds()),
-		User:        userResponse{ID: user.ID, Username: user.Username},
+		tokenResponse: tokens,
+		User:          userResponse{ID: user.ID, Username: user.Username},
 	})
+}
+
+// login 用：簽 access token + 存一個新的 refresh token
+// 失敗時已經記了 log，呼叫端只要回 500
+func (this *AuthHandler) issueTokens(r *http.Request, userID int64) (tokenResponse, error) {
+	plain, hash := auth.NewRefreshToken()
+	if err := this.db.CreateRefreshToken(r.Context(), userID, hash, refreshTokenTTL); err != nil {
+		this.logger.ErrorContext(r.Context(), "create refresh token failed", "error", err)
+		return tokenResponse{}, err
+	}
+	return this.withAccessToken(r, userID, plain)
+}
+
+// 簽 access token，跟已經存好的 refresh token 明文組成 response
+func (this *AuthHandler) withAccessToken(r *http.Request, userID int64, refreshToken string) (tokenResponse, error) {
+	accessToken, expiresIn, err := this.tokens.IssueAccessToken(userID)
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "issue access token failed", "error", err)
+		return tokenResponse{}, err
+	}
+	return tokenResponse{
+		AccessToken:  accessToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    int(expiresIn.Seconds()),
+		RefreshToken: refreshToken,
+	}, nil
+}
+
+// 用 refresh token 換一組新的（rotation：舊的作廢，回傳新的 refresh token）
+func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
+	if !checkMethodValidation(r, []string{http.MethodPost}) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := clientIP(r, this.trustedHeaderKey)
+	if !this.allow(w, r, refreshIPRule, ip) {
+		return
+	}
+
+	var req refreshRequest
+	if err := decodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	newPlain, newHash := auth.NewRefreshToken()
+	userID, err := this.db.RotateRefreshToken(r.Context(),
+		auth.HashRefreshToken(req.RefreshToken), newHash, refreshTokenTTL, refreshTokenGrace)
+	// invalid 和 duplicate use 對 client 都是 401（重新登入），不讓對方知道「這個 token 曾經有效」
+	if errors.Is(err, store.ErrRefreshTokenInvalid) {
+		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+	var dupUse *store.RefreshTokenDuplicateUseError
+	if errors.As(err, &dupUse) {
+		// 資安事件：記 Warn 方便追查是哪個帳號被盜、從哪來；不記 token 本身
+		// IP 用 clientIP：RemoteAddr 在 nginx 後面只會是 nginx 的 IP
+		this.logger.WarnContext(r.Context(), "refresh token duplicate use detected, revoked all tokens of user",
+			"user_id", dupUse.UserID, "client_ip", ip)
+		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "rotate refresh token failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
+	tokens, err := this.withAccessToken(r, userID, newPlain)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	setContentType(w)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(tokens)
+}
+
+// 只作廢這一個 refresh token（這台裝置登出）
+// 查不到 / 已經作廢都回 204：logout 是 idempotent，也不透露 token 存不存在
+// access token 不處理：它是 stateless 的，最多再活到 exp（1 小時），client 自己丟掉
+func (this *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
+	if !checkMethodValidation(r, []string{http.MethodPost}) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req refreshRequest
+	if err := decodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	if err := this.db.RevokeRefreshToken(r.Context(), auth.HashRefreshToken(req.RefreshToken)); err != nil {
+		// DB 壞了要回 500：回 204 的話 client 以為登出了，token 其實還有效
+		this.logger.ErrorContext(r.Context(), "revoke refresh token failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

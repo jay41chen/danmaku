@@ -26,6 +26,16 @@ type fakeDBStore struct {
 	// GetUser 用
 	user   model.User
 	getErr error
+
+	// refresh token 用
+	createTokenErr error
+	gotTokenUserID int64 // spy：CreateRefreshToken 收到的 user id
+	gotTokenHash   string
+	rotateUserID   int64
+	rotateErr      error
+	gotOldHash     string // spy：RotateRefreshToken 收到的舊 hash
+	revokeErr      error
+	gotRevokeHash  string // spy：RevokeRefreshToken 收到的 hash
 }
 
 func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
@@ -39,6 +49,21 @@ func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash str
 
 func (f *fakeDBStore) GetUser(ctx context.Context, username string) (model.User, error) {
 	return f.user, f.getErr
+}
+
+func (f *fakeDBStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+	f.gotTokenUserID, f.gotTokenHash = userID, tokenHash
+	return f.createTokenErr
+}
+
+func (f *fakeDBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error) {
+	f.gotOldHash = oldHash
+	return f.rotateUserID, f.rotateErr
+}
+
+func (f *fakeDBStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	f.gotRevokeHash = tokenHash
+	return f.revokeErr
 }
 
 // handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數

@@ -161,6 +161,33 @@ func TestHandleLogin(t *testing.T) {
 		if userID, err := testTokens.ParseAccessToken(got.AccessToken); err != nil || userID != 7 {
 			t.Errorf("ParseAccessToken(access_token) = (%d, %v), want (7, nil)", userID, err)
 		}
+		// 回給 client 的是明文、存進 DB 的是它的 hash，而且是存給 DB 裡那個 user
+		if got.RefreshToken == "" {
+			t.Fatalf("refresh_token is empty")
+		}
+		if fake.gotTokenHash != auth.HashRefreshToken(got.RefreshToken) {
+			t.Errorf("stored hash = %q, want HashRefreshToken(refresh_token)", fake.gotTokenHash)
+		}
+		if fake.gotTokenUserID != 7 {
+			t.Errorf("CreateRefreshToken userID = %d, want 7", fake.gotTokenUserID)
+		}
+	})
+
+	// 存 refresh token 失敗 = server 的錯：跟簽 access token 失敗一樣，不算登入成功
+	t.Run("refresh token store failure returns 500 without reset or refund", func(t *testing.T) {
+		limiter := &fakeRateLimiter{}
+		h := NewAuthHandler(&fakeDBStore{user: stored, createTokenErr: errors.New("db down")}, limiter, "", testTokens)
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", password)))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+		if len(limiter.resetKeys) != 0 || len(limiter.refundKeys) != 0 {
+			t.Errorf("Reset keys = %q, Refund keys = %q, want both empty", limiter.resetKeys, limiter.refundKeys)
+		}
 	})
 }
 
@@ -308,4 +335,118 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 			t.Errorf("Allow keys = %q, want %q", limiter.allowKeys, []string{ipKey})
 		}
 	})
+}
+
+func TestHandleRefresh(t *testing.T) {
+	const validBody = `{"refresh_token":"old-plain"}`
+
+	cases := []struct {
+		name       string
+		method     string
+		body       string
+		rotateErr  error
+		wantStatus int
+	}{
+		{"GET not allowed", http.MethodGet, "", nil, http.StatusMethodNotAllowed},
+		{"broken json", http.MethodPost, `{"refresh_token":`, nil, http.StatusBadRequest},
+		{"missing token", http.MethodPost, `{}`, nil, http.StatusBadRequest},
+		{"invalid token", http.MethodPost, validBody, store.ErrRefreshTokenInvalid, http.StatusUnauthorized},
+		// duplicate use 對 client 也是 401：不透露「這個 token 曾經有效」
+		{"duplicate use token", http.MethodPost, validBody, &store.RefreshTokenDuplicateUseError{UserID: 7}, http.StatusUnauthorized},
+		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewAuthHandler(&fakeDBStore{rotateUserID: 7, rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
+			req := httptest.NewRequest(tc.method, "/refresh", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+
+			h.HandleRefresh(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("success returns new tokens and rotates by hash", func(t *testing.T) {
+		fake := &fakeDBStore{rotateUserID: 7}
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+
+		h.HandleRefresh(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		// store 收到的是 hash，不是明文
+		if fake.gotOldHash != auth.HashRefreshToken("old-plain") {
+			t.Errorf("Rotate oldHash = %q, want HashRefreshToken(old-plain)", fake.gotOldHash)
+		}
+		var got tokenResponse
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if got.RefreshToken == "" || got.RefreshToken == "old-plain" {
+			t.Errorf("refresh_token = %q, want a new token", got.RefreshToken)
+		}
+		if userID, err := testTokens.ParseAccessToken(got.AccessToken); err != nil || userID != 7 {
+			t.Errorf("ParseAccessToken(access_token) = (%d, %v), want (7, nil)", userID, err)
+		}
+	})
+
+	t.Run("ip blocked", func(t *testing.T) {
+		fake := &fakeDBStore{rotateUserID: 7}
+		limiter := &fakeRateLimiter{blockKey: "rl:refresh:ip:192.0.2.1", retryAfter: time.Minute}
+		h := NewAuthHandler(fake, limiter, "", testTokens)
+		req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+
+		h.HandleRefresh(rec, req)
+
+		if rec.Code != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+		}
+		if fake.gotOldHash != "" {
+			t.Errorf("Rotate called after rate limited, want not called")
+		}
+	})
+}
+
+func TestHandleLogout(t *testing.T) {
+	const validBody = `{"refresh_token":"old-plain"}`
+
+	cases := []struct {
+		name       string
+		method     string
+		body       string
+		revokeErr  error
+		wantStatus int
+	}{
+		{"GET not allowed", http.MethodGet, "", nil, http.StatusMethodNotAllowed},
+		{"broken json", http.MethodPost, `{"refresh_token":`, nil, http.StatusBadRequest},
+		{"missing token", http.MethodPost, `{}`, nil, http.StatusBadRequest},
+		// store 對查不到 / 已作廢都回 nil，handler 一律 204
+		{"success", http.MethodPost, validBody, nil, http.StatusNoContent},
+		// DB 壞了不能回 204：client 會以為登出了
+		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeDBStore{revokeErr: tc.revokeErr}
+			h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+			req := httptest.NewRequest(tc.method, "/logout", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+
+			h.HandleLogout(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusNoContent && fake.gotRevokeHash != auth.HashRefreshToken("old-plain") {
+				t.Errorf("Revoke hash = %q, want HashRefreshToken(old-plain)", fake.gotRevokeHash)
+			}
+		})
+	}
 }

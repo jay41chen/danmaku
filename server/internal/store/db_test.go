@@ -152,7 +152,8 @@ func newTestDBStore(t *testing.T) *DBStore {
 	t.Cleanup(s.dbPool.Close)
 
 	// 每個測試從空表開始，彼此不互相影響
-	if _, err := s.dbPool.Exec(ctx, "TRUNCATE users, messages"); err != nil {
+	// refresh_tokens 有 foreign key 指向 users：只 TRUNCATE users 會被擋，要一起列出來
+	if _, err := s.dbPool.Exec(ctx, "TRUNCATE users, messages, refresh_tokens"); err != nil {
 		t.Fatalf("truncate tables: %v", err)
 	}
 	return s

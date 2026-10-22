@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 
@@ -24,6 +25,11 @@ type DBStoreInterface interface {
 
 	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
 	GetUser(ctx context.Context, username string) (model.User, error)
+
+	// 實作在 refresh_token.go
+	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
+	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 }
 
 type DBStore struct {

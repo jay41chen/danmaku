@@ -122,6 +122,8 @@ func registerAPIRoute(messageHandler *handler.MessageHandler, healthHandler *han
 func registerAuthRoute(authHandler *handler.AuthHandler) {
 	http.HandleFunc("/register", authHandler.HandleRegister)
 	http.HandleFunc("/login", authHandler.HandleLogin)
+	http.HandleFunc("/refresh", authHandler.HandleRefresh)
+	http.HandleFunc("/logout", authHandler.HandleLogout)
 }
 
 func registerWSRoute(wsHandler *handler.WebsocketHandler) {
