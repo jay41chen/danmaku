@@ -130,6 +130,11 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 | `000001_create_messages` | 導入 migration 前手動建的 schema（baseline）。用 `IF NOT EXISTS`，已有資料表的 DB 只會記成 version 1 |
 | `000002_messages_created_at_timestamptz` | `created_at` 改為 `TIMESTAMPTZ NOT NULL`（舊值當成 UTC） |
 | `000003_messages_id_identity` | `id` 從 `SERIAL` 改為 `BIGINT GENERATED ALWAYS AS IDENTITY`，編號接續原本的最大值 |
+| `000004_create_users` | `users` 表；`lower(username)` unique index（不分大小寫唯一） |
+| `000005_create_refresh_tokens` | `refresh_tokens` 表（存 SHA-256 hash、`expires_at`、`revoked_at`），`user_id` FK + index |
+| `000006_add_refresh_token_revoked_reason` | 加 `revoked_reason`，並 CHECK 它跟 `revoked_at` 要同時有值或同時是 NULL |
+| `000007_rename_revoked_reason_reuse` | `revoked_reason` 的值 `reuse` 改名為 `reuse_detected` |
+| `000008_rename_revoked_reason_duplicate_use` | `reuse_detected` 改名為 `duplicate_use_detected`（目前的值：`rotated` / `logout` / `duplicate_use_detected`） |
 
 ### 新增 migration
 

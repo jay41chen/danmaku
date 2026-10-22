@@ -57,7 +57,22 @@
     - [x] 補 test：Chain 順序、RequestID middleware、RecoverPanic（含 `ErrAbortHandler`）
 - [x] Database migration tool（golang-migrate）：SQL embed 進 binary、啟動時自動跑；DB URL 用 pgx 解析、Redis URL 錯誤時不洩漏密碼
 - [ ] Authentication（JWT middleware）
+  - [x] `/register`、`/login`（bcrypt、timing 防帳號列舉、rate limit）
+  - [x] Access token（JWT HS256，1 小時，`JWT_SECRET` fail fast）
+  - [x] Refresh token（opaque、存 SHA-256、7 天、rotation + duplicate use detection、15s grace）、`/refresh`、`/logout`
+  - [ ] Bearer middleware（Step 8）
+  - [ ] WS 驗證（Step 9）
+  - [ ] Client：存 token、401 自動 refresh（Step 10）
   - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
+  - Refresh token 延後的項目：
+    - 清理 job：作廢 / 過期的列保留到 `expires_at` 之後再定期 `DELETE`（量大時改成依日期 partition、整個 drop）
+    - 「登出所有裝置」endpoint：store 已有 `WHERE user_id` 撤銷全部的 SQL（duplicate use 用），要再決定要不要驗證密碼
+      - 到時候 `revoked_reason` 會變成 Go 的參數（例如 `revokeAll(userID, reason)`）→ 改成 typed string const。目前值只出現在 SQL 字串裡：寫入打錯有 CHECK 擋，讀取端（r2 的 `in_grace`）打錯 DB 不會報錯，只靠 store 測試擋
+    - client（Step 10）：refresh 要 single-flight；登出前要等進行中的 refresh 結束，否則登出後那個 refresh 會被當成 duplicate use、把所有裝置一起登出
+      - refresh 的重試總時間必須小於 server grace（15s）：照一般 API 的 5s timeout × 3 retry，第 3 次約在 15s 才到 → 被當成 duplicate use、所有裝置登出。改 client，不加大 grace（grace = 攻擊者拿舊 token 換新的不被抓的時間）
+      - 最外層加總 deadline，但要比 grace 小並留緩衝（例如 10s）：client 從「送出」起算、grace 從 server 的 `revoked_at` 起算，而且取消 request 不會讓已送出的封包消失
+      - deadline 到期後丟掉舊 token、跳登入頁：舊 token 可能已被 rotate，下次再拿它 refresh 會被當成 duplicate use，把所有裝置登出（猜錯的代價：只有這台要重新登入 vs 全部裝置）
+      - client deadline 與 server grace 各寫一個 const、註解互相指向；有 mobile app（舊版殘留）時才值得改成 remote config，原則是 server 為準、放寬 grace 安全、縮短要等舊 client 淘汰
 
 ## W4b — Room + Authorization
 
@@ -79,6 +94,7 @@
 - [ ] Rate limiting（middleware）
   - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
   - Limiter 呼叫加短 timeout（例如 `context.WithTimeout` 100ms）：Redis 網路黑洞時 go-redis 預設 dial timeout 5 秒，一次 login 呼叫 limiter 4 次，fail open 最慢要等約 20 秒
+  - 全域基本限制（每 IP 每秒 N 個 request，nginx `limit_req` 或 middleware）：目前只有個別 endpoint 的嚴格限制。依「被濫用的代價」決定而不是 HTTP method：`GET /messages?limit=10000` 一樣貴
 - [ ] Login CAPTCHA（reCAPTCHA / Turnstile 等，接外部服務前先討論選型）
   - 補限流擋不到的兩個洞：攻擊者分散到大量 IP（每個 IP 都低於上限、credential stuffing 每個帳號只試一次）；per-username 限流可被拿來故意鎖別人的帳號（DoS）
   - 失敗超過門檻時改成要求驗證，而不是直接 429：真人解完照樣登入，bot 每次嘗試都要付成本
