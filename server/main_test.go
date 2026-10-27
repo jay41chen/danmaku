@@ -36,7 +36,7 @@ func newTestMux() *http.ServeMux {
 		messages: handler.NewMessageHandler(nil, nil, nil),
 		health:   handler.NewHealthHandler(healthyDB{}, healthyRedis{}),
 		auth:     handler.NewAuthHandler(nil, nil, "", nil),
-		ws:       handler.NewWebsocketHandler(nil),
+		ws:       handler.NewWebsocketHandler(nil, nil, nil),
 	})
 	return mux
 }

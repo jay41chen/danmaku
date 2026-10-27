@@ -36,4 +36,14 @@ var (
 			Help: "Number of active WebSocket connections",
 		},
 	)
+	// label 只有 member / anonymous 兩個值，不放 user_id：每個 user 都會變成一條新的時間序列
+	// 數字只代表「這台 server」：member = 這台上不重複的登入 user 數，anonymous = 匿名連線數
+	// 跨 server 的不重複 member 數是 W6 的事
+	WebsocketViewers = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "websocket_viewers",
+			Help: "Number of WebSocket viewers on this server by auth state (member = distinct users, anonymous = connections)",
+		},
+		[]string{"auth"},
+	)
 )

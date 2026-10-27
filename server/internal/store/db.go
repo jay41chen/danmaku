@@ -27,6 +27,7 @@ type DBStoreInterface interface {
 
 	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
 	GetUser(ctx context.Context, username string) (model.User, error)
+	GetUserByID(ctx context.Context, id int64) (model.User, error)
 
 	// 實作在 refresh_token.go
 	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
@@ -159,6 +160,24 @@ func (this *DBStore) GetUser(ctx context.Context, username string) (model.User, 
 			FROM users
 			WHERE lower(username) = lower($1)
 		`, username).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return user, ErrUserNotFound
+		}
+		return user, err
+	}
+	return user, nil
+}
+
+// 用 id 查 user：WS auth 拿到 token 裡的 user id 後，確認這個 user 還在、並取得 username
+func (this *DBStore) GetUserByID(ctx context.Context, id int64) (model.User, error) {
+	var user model.User
+	err := this.dbPool.QueryRow(ctx,
+		`
+			SELECT id, username, password_hash, created_at
+			FROM users
+			WHERE id = $1
+		`, id).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return user, ErrUserNotFound

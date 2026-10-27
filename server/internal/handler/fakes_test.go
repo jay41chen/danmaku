@@ -34,6 +34,11 @@ type fakeDBStore struct {
 	user   model.User
 	getErr error
 
+	// GetUserByID 用
+	userByID    model.User
+	getByIDErr  error
+	gotByIDCall int64 // spy：GetUserByID 收到的 id
+
 	// refresh token 用
 	createTokenErr error
 	gotTokenUserID int64 // spy：CreateRefreshToken 收到的 user id
@@ -62,6 +67,11 @@ func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash str
 
 func (f *fakeDBStore) GetUser(ctx context.Context, username string) (model.User, error) {
 	return f.user, f.getErr
+}
+
+func (f *fakeDBStore) GetUserByID(ctx context.Context, id int64) (model.User, error) {
+	f.gotByIDCall = id
+	return f.userByID, f.getByIDErr
 }
 
 func (f *fakeDBStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {

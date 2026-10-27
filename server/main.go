@@ -37,7 +37,7 @@ func main() {
 	redis := initRedis(cfg.RedisURL)
 
 	// RedisStore 同時實作 Pub/Sub 和 RateLimiterInterface，同一條連線共用
-	wsHandler := handler.NewWebsocketHandler(redis)
+	wsHandler := handler.NewWebsocketHandler(redis, db, tokens)
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
 		messages: handler.NewMessageHandler(db, redis, redis),
@@ -150,7 +150,8 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	r.post("/messages", http.HandlerFunc(h.messages.HandleCreateMessage))
 
 	r.publicGet("/healthcheck", http.HandlerFunc(h.health.HandleHealthCheck))
-	// WS 連線本身不驗身分（目前沒有 WS 寫入）；之後要驗再改成 get
+	// 公開 route：任何人都能連（匿名）；連上後可以在連線內送 auth frame 升級成登入身分（選擇性）
+	// WS 不接受寫入（發訊息走 POST /messages），auth 失敗也不會斷線
 	r.publicGet("/ws", http.HandlerFunc(h.ws.HandleWebsocket))
 	// 如果要custom registry再換
 	r.publicGet("/metrics", promhttp.Handler())

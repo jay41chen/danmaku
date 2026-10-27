@@ -49,9 +49,16 @@ func (this *TokenIssuer) IssueAccessToken(userID int64) (token string, expiresIn
 }
 
 func (this *TokenIssuer) ParseAccessToken(token string) (int64, error) {
+	id, _, err := this.ParseAccessTokenClaims(token)
+	return id, err
+}
+
+// 除了 user id 也回傳 exp：WS 連線要靠 exp 決定什麼時候把身分降回訪客
+// exp 是 JWT 的秒精度（NumericDate），不是簽發當下的 time.Now()
+func (this *TokenIssuer) ParseAccessTokenClaims(token string) (userID int64, expiresAt time.Time, err error) {
 	var claims jwt.RegisteredClaims
 	// 傳address進去，套件解析後會把 payload 填進 `claims`
-	_, err := jwt.ParseWithClaims(token, &claims,
+	_, err = jwt.ParseWithClaims(token, &claims,
 		func(t *jwt.Token) (any, error) {
 			// keyFunc：要用哪把 key 驗證
 			return this.secret, nil
@@ -60,12 +67,12 @@ func (this *TokenIssuer) ParseAccessToken(token string) (int64, error) {
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return 0, time.Time{}, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 	// 檢查塞進來的id是否合法
 	id, err := strconv.ParseInt(claims.Subject, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return 0, time.Time{}, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
-	return id, nil
+	return id, claims.ExpiresAt.Time, nil
 }

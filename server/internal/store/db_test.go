@@ -90,6 +90,42 @@ func TestGetUser(t *testing.T) {
 	})
 }
 
+func TestGetUserByID(t *testing.T) {
+	t.Run("returns the stored row", func(t *testing.T) {
+		s := newTestDBStore(t)
+		// 先塞另一個 user：避免 WHERE 寫錯剛好拿到唯一一筆
+		if _, err := s.CreateUser(t.Context(), "alice", "alice-hash"); err != nil {
+			t.Fatalf("setup CreateUser(alice) error = %v", err)
+		}
+		id, err := s.CreateUser(t.Context(), "Jay", "fake-hash")
+		if err != nil {
+			t.Fatalf("setup CreateUser(Jay) error = %v", err)
+		}
+
+		u, err := s.GetUserByID(t.Context(), id)
+
+		if err != nil {
+			t.Fatalf("GetUserByID(%d) error = %v, want nil", id, err)
+		}
+		if u.ID != id {
+			t.Errorf("GetUserByID(%d) ID = %d, want %d", id, u.ID, id)
+		}
+		if u.Username != "Jay" {
+			t.Errorf("GetUserByID(%d) Username = %q, want %q", id, u.Username, "Jay")
+		}
+	})
+
+	t.Run("unknown id returns ErrUserNotFound", func(t *testing.T) {
+		s := newTestDBStore(t)
+
+		_, err := s.GetUserByID(t.Context(), 999999)
+
+		if !errors.Is(err, ErrUserNotFound) {
+			t.Errorf("GetUserByID(999999) error = %v, want ErrUserNotFound", err)
+		}
+	})
+}
+
 func TestQueryMessage(t *testing.T) {
 	// 三個 case 形狀一樣：存哪些訊息、limit 多少、預期拿回哪些內容（新→舊）
 	cases := []struct {

@@ -156,6 +156,40 @@ func TestParseAccessTokenRejects(t *testing.T) {
 	}
 }
 
+func TestParseAccessTokenClaims(t *testing.T) {
+	t.Run("returns user id and exp matching issued token", func(t *testing.T) {
+		issuer := newTestIssuer(t, testSecret, time.Hour)
+		token, ttl, err := issuer.IssueAccessToken(42)
+		if err != nil {
+			t.Fatalf("IssueAccessToken: %v", err)
+		}
+		want := time.Now().Add(ttl)
+
+		id, exp, err := issuer.ParseAccessTokenClaims(token)
+
+		if err != nil {
+			t.Fatalf("ParseAccessTokenClaims error = %v, want nil", err)
+		}
+		if id != 42 {
+			t.Errorf("id = %d, want 42", id)
+		}
+		// JWT exp 只有秒精度，允許 1 秒誤差
+		if diff := exp.Sub(want); diff > time.Second || diff < -time.Second {
+			t.Errorf("exp = %v, want %v (±1s)", exp, want)
+		}
+	})
+
+	t.Run("invalid token wraps ErrInvalidToken", func(t *testing.T) {
+		issuer := newTestIssuer(t, testSecret, time.Hour)
+
+		_, _, err := issuer.ParseAccessTokenClaims("garbage")
+
+		if !errors.Is(err, ErrInvalidToken) {
+			t.Errorf("error = %v, want ErrInvalidToken", err)
+		}
+	})
+}
+
 func newTestIssuer(t *testing.T, secret string, ttl time.Duration) *TokenIssuer {
 	t.Helper()
 	issuer, err := NewTokenIssuer(secret, ttl)
