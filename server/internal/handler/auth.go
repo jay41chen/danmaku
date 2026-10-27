@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -99,18 +100,13 @@ type refreshRequest struct {
 // 試著創造user
 // 回傳結果
 func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
-	if !checkMethodValidation(r, []string{http.MethodPost}) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// 做ip的429 check（在 bcrypt 之前擋，不讓攻擊者讓 server 做白工）
-	if !this.allow(w, r, registerIPRule, clientIP(r, this.trustedHeaderKey)) {
+	if !this.allow(w, r, registerIPRule, httpx.ClientIP(r, this.trustedHeaderKey)) {
 		return
 	}
 
 	var req credentials
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -147,26 +143,21 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// header 要在 WriteHeader 之前設，之後設會被忽略
-	setContentType(w)
+	httpx.SetContentType(w)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(userResponse{ID: id, Username: req.Username})
 }
 
 func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
-	if !checkMethodValidation(r, []string{http.MethodPost}) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// 做ip的429 check
 	// ip 存起來：登入成功時要用同一個 key 退還
-	ip := clientIP(r, this.trustedHeaderKey)
+	ip := httpx.ClientIP(r, this.trustedHeaderKey)
 	if !this.allow(w, r, loginIPRule, ip) {
 		return
 	}
 
 	var req credentials
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -225,7 +216,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			"rule", loginIPRule.name, "error", err)
 	}
 
-	setContentType(w)
+	httpx.SetContentType(w)
 	w.WriteHeader(http.StatusOK)
 	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
 	json.NewEncoder(w).Encode(loginResponse{
@@ -262,17 +253,13 @@ func (this *AuthHandler) withAccessToken(r *http.Request, userID int64, refreshT
 
 // 用 refresh token 換一組新的（rotation：舊的作廢，回傳新的 refresh token）
 func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
-	if !checkMethodValidation(r, []string{http.MethodPost}) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	ip := clientIP(r, this.trustedHeaderKey)
+	ip := httpx.ClientIP(r, this.trustedHeaderKey)
 	if !this.allow(w, r, refreshIPRule, ip) {
 		return
 	}
 
 	var req refreshRequest
-	if err := decodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
+	if err := httpx.DecodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -288,7 +275,7 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	var dupUse *store.RefreshTokenDuplicateUseError
 	if errors.As(err, &dupUse) {
 		// 資安事件：記 Warn 方便追查是哪個帳號被盜、從哪來；不記 token 本身
-		// IP 用 clientIP：RemoteAddr 在 nginx 後面只會是 nginx 的 IP
+		// IP 用 httpx.ClientIP：RemoteAddr 在 nginx 後面只會是 nginx 的 IP
 		this.logger.WarnContext(r.Context(), "refresh token duplicate use detected, revoked all tokens of user",
 			"user_id", dupUse.UserID, "client_ip", ip)
 		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
@@ -307,7 +294,7 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setContentType(w)
+	httpx.SetContentType(w)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(tokens)
 }
@@ -316,13 +303,8 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 // 查不到 / 已經作廢都回 204：logout 是 idempotent，也不透露 token 存不存在
 // access token 不處理：它是 stateless 的，最多再活到 exp（1 小時），client 自己丟掉
 func (this *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	if !checkMethodValidation(r, []string{http.MethodPost}) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var req refreshRequest
-	if err := decodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
+	if err := httpx.DecodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}

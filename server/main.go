@@ -33,28 +33,21 @@ func main() {
 	logClientIPHeader(cfg.ClientIPHeader)
 	tokens := initTokenIssuer(cfg.JWTSecret)
 
-	registerPrometheus()
 	db := initDatabase(cfg.DatabaseURL)
 	redis := initRedis(cfg.RedisURL)
 
-	messageHandler := handler.NewMessageHandler(db)
-	healthHandler := handler.NewHealthHandler(db, redis)
-	registerAPIRoute(messageHandler, healthHandler)
-
 	// RedisStore 同時實作 Pub/Sub 和 RateLimiterInterface，同一條連線共用
-	authHandler := handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens)
-	registerAuthRoute(authHandler)
-
-	wsHandler := handler.NewWebsocketHandler(redis, db)
-	registerWSRoute(wsHandler)
+	wsHandler := handler.NewWebsocketHandler(redis)
+	mux := http.NewServeMux()
+	registerRoutes(mux, tokens, appHandlers{
+		messages: handler.NewMessageHandler(db, redis, redis),
+		health:   handler.NewHealthHandler(db, redis),
+		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),
+		ws:       wsHandler,
+	})
 	go wsHandler.StartBroadcast()
 
-	startServer(cfg.Port, cfg.CORSOrigins)
-}
-
-func registerPrometheus() {
-	// 如果要custom registry再換
-	http.Handle("/metrics", promhttp.Handler())
+	startServer(mux, cfg.Port, cfg.CORSOrigins)
 }
 
 func initApp() {
@@ -114,30 +107,68 @@ func initTokenIssuer(secret string) *auth.TokenIssuer {
 	return tokens
 }
 
-func registerAPIRoute(messageHandler *handler.MessageHandler, healthHandler *handler.HealthHandler) {
-	http.HandleFunc("/messages", messageHandler.HandleMessages)
-	http.HandleFunc("/healthcheck", healthHandler.HandleHealthCheck)
+// 所有 route 用到的 handler，集中在一起，registerRoutes 才好在 test 裡換成假的依賴
+type appHandlers struct {
+	messages *handler.MessageHandler
+	health   *handler.HealthHandler
+	auth     *handler.AuthHandler
+	ws       *handler.WebsocketHandler
 }
 
-func registerAuthRoute(authHandler *handler.AuthHandler) {
-	http.HandleFunc("/register", authHandler.HandleRegister)
-	http.HandleFunc("/login", authHandler.HandleLogin)
-	http.HandleFunc("/refresh", authHandler.HandleRefresh)
-	http.HandleFunc("/logout", authHandler.HandleLogout)
+// route 註冊的唯一入口：每條 route 要嘛 get / post（要登入），要嘛 publicGet / publicPost（公開）
+// 預設 = 要登入（fail closed）：忘了想這件事時，結果是「多擋了人」而不是「多開了洞」
+// 公開要明寫 public，code review 看得到；如果預設是公開，少寫一個 middleware 在 diff 裡是看不出來的
+type routes struct {
+	mux  *http.ServeMux
+	auth func(http.Handler) http.Handler
 }
 
-func registerWSRoute(wsHandler *handler.WebsocketHandler) {
-	http.HandleFunc("/ws", wsHandler.HandleWebsocket)
+func (this *routes) get(path string, h http.Handler) { this.handle(http.MethodGet, path, this.auth(h)) }
+func (this *routes) post(path string, h http.Handler) {
+	this.handle(http.MethodPost, path, this.auth(h))
+}
+func (this *routes) publicGet(path string, h http.Handler) {
+	this.handle(http.MethodGet, path, h)
+}
+func (this *routes) publicPost(path string, h http.Handler) {
+	this.handle(http.MethodPost, path, h)
+}
+
+// Go 1.22 的 "METHOD /path" pattern：method 不符由 mux 自己回 405（附 Allow header），
+// handler 裡不用再各自檢查 method
+// 注意 "GET /x" 也會比對 HEAD（healthcheck 原本就是 GET + HEAD 都允許，行為不變）
+// CORS preflight（OPTIONS）不會走到這裡：CORS middleware 包在 mux 外面，會先回 204
+func (this *routes) handle(method, path string, h http.Handler) {
+	this.mux.Handle(method+" "+path, h)
+}
+
+func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h appHandlers) {
+	r := &routes{mux: mux, auth: middleware.RequireAuth(tokens)}
+
+	// 同一個 path 的 GET 是公開的、POST 要登入：讀歷史訊息不用登入，發訊息要
+	r.publicGet("/messages", http.HandlerFunc(h.messages.HandleGetMessages))
+	r.post("/messages", http.HandlerFunc(h.messages.HandleCreateMessage))
+
+	r.publicGet("/healthcheck", http.HandlerFunc(h.health.HandleHealthCheck))
+	// WS 連線本身不驗身分（目前沒有 WS 寫入）；之後要驗再改成 get
+	r.publicGet("/ws", http.HandlerFunc(h.ws.HandleWebsocket))
+	// 如果要custom registry再換
+	r.publicGet("/metrics", promhttp.Handler())
+
+	r.publicPost("/register", http.HandlerFunc(h.auth.HandleRegister))
+	r.publicPost("/login", http.HandlerFunc(h.auth.HandleLogin))
+	r.publicPost("/refresh", http.HandlerFunc(h.auth.HandleRefresh))
+	r.publicPost("/logout", http.HandlerFunc(h.auth.HandleLogout))
 }
 
 // origins 已經由 config.Load 用 middleware.ParseOrigins 解析、檢查過
-func startServer(port string, origins []string) {
+func startServer(mux *http.ServeMux, port string, origins []string) {
 
 	// 建立SERVER
 	server := http.Server{
 		Addr: ":" + port,
 		Handler: middleware.Chain(
-			http.DefaultServeMux, //  Go 內建的全域 router
+			mux,
 			middleware.RequestID,
 			middleware.Logging(slog.Default()),
 			prom.HttpMetrics,

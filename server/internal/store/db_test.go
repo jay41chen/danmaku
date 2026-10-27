@@ -106,10 +106,11 @@ func TestQueryMessage(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestDBStore(t)
+			// 用 raw SQL 存（不經 CreateMessage）：這個 test 只驗查詢，不該被 CreateMessage 的 SQL 影響
 			// 照順序存：id 由 DB 遞增，所以先存的就是比較舊的
 			for _, content := range tc.saved {
-				if err := s.SaveMessage(t.Context(), content); err != nil {
-					t.Fatalf("setup SaveMessage(%q) error = %v", content, err)
+				if _, err := s.dbPool.Exec(t.Context(), "INSERT INTO messages(content) VALUES ($1)", content); err != nil {
+					t.Fatalf("setup insert %q error = %v", content, err)
 				}
 			}
 
@@ -132,6 +133,119 @@ func TestQueryMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateMessage(t *testing.T) {
+	t.Run("returns full message with username", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "Jay")
+
+		msg, err := s.CreateMessage(t.Context(), userID, "哈哈")
+
+		if err != nil {
+			t.Fatalf("CreateMessage error = %v, want nil", err)
+		}
+		if msg.ID <= 0 {
+			t.Errorf("ID = %d, want > 0", msg.ID)
+		}
+		if msg.UserID == nil || *msg.UserID != userID {
+			t.Errorf("UserID = %v, want %d", msg.UserID, userID)
+		}
+		// 回傳 users 表存的大小寫，不是別處傳進來的
+		if msg.Username == nil || *msg.Username != "Jay" {
+			t.Errorf("Username = %v, want Jay", msg.Username)
+		}
+		if msg.Content != "哈哈" {
+			t.Errorf("Content = %q, want %q", msg.Content, "哈哈")
+		}
+		if msg.CreatedAt.IsZero() {
+			t.Error("CreatedAt is zero, want DB timestamp")
+		}
+	})
+
+	// user 已刪除但 access token 還有效：FK 違反要變成 sentinel，而且不能留下任何列
+	t.Run("nonexistent user returns ErrMessageUserNotFound and inserts nothing", func(t *testing.T) {
+		s := newTestDBStore(t)
+
+		_, err := s.CreateMessage(t.Context(), 999999, "hi")
+
+		if !errors.Is(err, ErrMessageUserNotFound) {
+			t.Fatalf("CreateMessage error = %v, want ErrMessageUserNotFound", err)
+		}
+		var count int
+		if err := s.dbPool.QueryRow(t.Context(), "SELECT count(*) FROM messages").Scan(&count); err != nil {
+			t.Fatalf("count messages: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("messages count = %d, want 0", count)
+		}
+	})
+}
+
+func TestQueryMessageUserColumns(t *testing.T) {
+	// LEFT JOIN 的重點：沒有發送者的舊資料不能被丟掉，Username / UserID 要是 nil
+	t.Run("rows without user come back with nil user fields", func(t *testing.T) {
+		s := newTestDBStore(t)
+		if _, err := s.dbPool.Exec(t.Context(), "INSERT INTO messages(content) VALUES ('old')"); err != nil {
+			t.Fatalf("setup insert: %v", err)
+		}
+
+		msgs, err := s.QueryMessage(t.Context(), 50)
+
+		if err != nil {
+			t.Fatalf("QueryMessage error = %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("len(msgs) = %d, want 1", len(msgs))
+		}
+		if msgs[0].UserID != nil || msgs[0].Username != nil {
+			t.Errorf("UserID = %v, Username = %v, want both nil", msgs[0].UserID, msgs[0].Username)
+		}
+	})
+
+	// 刪 user 後訊息要留著（ON DELETE SET NULL），並且仍查得到
+	t.Run("deleting user keeps message with NULL user_id", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		if _, err := s.dbPool.Exec(t.Context(),
+			"INSERT INTO messages(content, user_id) VALUES ('bye', $1)", userID); err != nil {
+			t.Fatalf("setup insert: %v", err)
+		}
+		if _, err := s.dbPool.Exec(t.Context(), "DELETE FROM users WHERE id = $1", userID); err != nil {
+			t.Fatalf("delete user: %v", err)
+		}
+
+		msgs, err := s.QueryMessage(t.Context(), 50)
+
+		if err != nil {
+			t.Fatalf("QueryMessage error = %v", err)
+		}
+		if len(msgs) != 1 || msgs[0].Content != "bye" {
+			t.Fatalf("msgs = %+v, want the one 'bye' message kept", msgs)
+		}
+		if msgs[0].UserID != nil || msgs[0].Username != nil {
+			t.Errorf("UserID = %v, Username = %v, want both nil", msgs[0].UserID, msgs[0].Username)
+		}
+	})
+
+	t.Run("rows with user carry username", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "Jay")
+		if _, err := s.dbPool.Exec(t.Context(),
+			"INSERT INTO messages(content, user_id) VALUES ('hi', $1)", userID); err != nil {
+			t.Fatalf("setup insert: %v", err)
+		}
+
+		msgs, err := s.QueryMessage(t.Context(), 50)
+
+		if err != nil {
+			t.Fatalf("QueryMessage error = %v", err)
+		}
+		if len(msgs) != 1 || msgs[0].Username == nil || *msgs[0].Username != "Jay" ||
+			msgs[0].UserID == nil || *msgs[0].UserID != userID {
+			t.Errorf("msgs = %+v, want user %d / Jay", msgs, userID)
+		}
+	})
 }
 
 func newTestDBStore(t *testing.T) *DBStore {

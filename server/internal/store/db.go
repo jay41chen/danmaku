@@ -16,10 +16,12 @@ import (
 var (
 	ErrUsernameTaken = errors.New("username already taken")
 	ErrUserNotFound  = errors.New("user not found")
+	// user 已被刪除，但他的 access token 還沒過期（stateless，撤不掉）
+	ErrMessageUserNotFound = errors.New("message user not found")
 )
 
 type DBStoreInterface interface {
-	SaveMessage(ctx context.Context, content string) error
+	CreateMessage(ctx context.Context, userID int64, content string) (model.Message, error)
 	QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
 	CheckHealth(ctx context.Context) error
 
@@ -51,22 +53,43 @@ func (this *DBStore) CheckHealth(ctx context.Context) error {
 	return this.dbPool.Ping(ctx)
 }
 
-func (this *DBStore) SaveMessage(ctx context.Context, content string) error {
-	_, err := this.dbPool.Exec(ctx,
+// 存訊息並回傳完整的 Message（含 id、username、created_at），handler 直接拿去廣播 / 回給 client
+func (this *DBStore) CreateMessage(ctx context.Context, userID int64, content string) (model.Message, error) {
+	var msg model.Message
+	// 一個 statement 同時 INSERT 和 JOIN users 取 username，不用兩次來回
+	err := this.dbPool.QueryRow(ctx,
+		// TODO(user): CTE — WITH m AS (INSERT ... RETURNING ...) SELECT ... JOIN users，欄位順序要對上 Scan：m.id, m.user_id, u.username, m.content, m.created_at
 		`
-			INSERT 
-			INTO messages (content) 
-			VALUES ($1)
-		`, content)
-	return err
+			WITH m AS (
+				INSERT INTO messages(user_id, content)
+				VALUES ($1, $2)
+				RETURNING id, user_id, content, created_at
+			)
+			SELECT m.id, m.user_id, u.username, m.content, m.created_at
+			FROM m
+			JOIN users u ON m.user_id = u.id
+		`, userID, content,
+	).Scan(&msg.ID, &msg.UserID, &msg.Username, &msg.Content, &msg.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		// 23503 = foreign_key_violation：user_id 指向的 user 不存在（已被刪除）
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return model.Message{}, ErrMessageUserNotFound
+		}
+		return model.Message{}, err
+	}
+	return msg, nil
 }
 
 func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
+	// LEFT JOIN：舊資料和發送者已被刪除的訊息 user_id 是 NULL，INNER JOIN 會把這些列整個丟掉
+	// 所以 Message.Username / UserID 是指標：NULL 掃不進 string / int64，只能掃進 *string / *int64
 	rows, err := this.dbPool.Query(ctx,
 		`
-			SELECT content, created_at
-			FROM messages
-			ORDER BY id DESC
+			SELECT m.id, m.user_id, u.username, m.content, m.created_at
+			FROM messages m
+			LEFT JOIN users u ON u.id = m.user_id
+			ORDER BY m.id DESC
 			LIMIT $1
 		`, limit)
 	if err != nil {
@@ -77,7 +100,7 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 	msgs := []model.Message{}
 	for rows.Next() {
 		var msg model.Message
-		if err := rows.Scan(&msg.Content, &msg.CreatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.UserID, &msg.Username, &msg.Content, &msg.CreatedAt); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, msg)

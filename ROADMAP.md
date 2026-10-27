@@ -60,9 +60,12 @@
   - [x] `/register`、`/login`（bcrypt、timing 防帳號列舉、rate limit）
   - [x] Access token（JWT HS256，1 小時，`JWT_SECRET` fail fast）
   - [x] Refresh token（opaque、存 SHA-256、7 天、rotation + duplicate use detection、15s grace）、`/refresh`、`/logout`
-  - [ ] Bearer middleware（Step 8）
-  - [ ] WS 驗證（Step 9）
+  - [x] `requireAuth` + route helper（`post` 預設要登入、`publicGet` 公開）、加回 `POST /messages`、廣播改 JSON；WS 寫入一律拒絕、回 error frame 不斷線（Step 8）
+  - [ ] WS 驗證：token 可選（帶了要驗、沒帶匿名，會員 / 非會員分開統計）（Step 9）
   - [ ] Client：存 token、401 自動 refresh（Step 10）
+    - 發彈幕改走 `POST /messages`；WS 訊息格式 `{type, payload}`（`message` / `error`，error 的 `code` 如 `ws_write_forbidden` 可接 popup）
+    - POST 回 201 + payload，WS 廣播也會再收到一次 → 用 `payload.id` 去重；依 `id` 插入而不是依到達順序 append（response / 廣播都可能晚到）
+    - `username: null` → client 顯示「已刪除的用戶」（i18n、防冒名）
   - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
   - Refresh token 延後的項目：
     - 清理 job：作廢 / 過期的列保留到 `expires_at` 之後再定期 `DELETE`（量大時改成依日期 partition、整個 drop）
@@ -82,6 +85,8 @@
 - [ ] Authorization（RBAC）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
   - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
+  - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /messages`，WS 寫入一律回 error）
+- [ ] 彈幕內容過濾：`POST /messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理
 - [ ] Ban（封鎖使用者，含 shadow ban）
   - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
   - 每台 server 在**記憶體**維護 ban set（人數極少），每個 request 查記憶體即可，不查 DB / Redis
@@ -121,6 +126,7 @@
 
 - [ ] CI/CD（GitHub Actions）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
+- [ ] 彈幕非同步保存（量大時）：目前 `POST /messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
   - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）

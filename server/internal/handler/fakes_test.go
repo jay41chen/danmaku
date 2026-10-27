@@ -17,6 +17,13 @@ type fakeDBStore struct {
 	msgs                   []model.Message
 	err                    error
 
+	// CreateMessage 用
+	createdMsg      model.Message
+	createMsgErr    error
+	gotMsgUserID    int64 // spy：CreateMessage 收到的 user id
+	gotMsgContent   string
+	createMsgCalled bool
+
 	// CreateUser 用
 	createID    int64
 	createErr   error
@@ -40,6 +47,12 @@ type fakeDBStore struct {
 
 func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
 	return f.msgs, f.err
+}
+
+func (f *fakeDBStore) CreateMessage(ctx context.Context, userID int64, content string) (model.Message, error) {
+	f.createMsgCalled = true
+	f.gotMsgUserID, f.gotMsgContent = userID, content
+	return f.createdMsg, f.createMsgErr
 }
 
 func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
@@ -70,9 +83,10 @@ func (f *fakeDBStore) RevokeRefreshToken(ctx context.Context, tokenHash string) 
 var _ store.RateLimiterInterface = (*fakeRateLimiter)(nil) // compile 時檢查 fake 有實作 interface
 
 type fakeRateLimiter struct {
-	blockKey   string        // 收到這個 key 就回 allowed=false
-	retryAfter time.Duration // 被擋時回傳的等待時間
-	err        error         // 不是 nil 就直接回傳這個錯（模擬 Redis 掛了）
+	blockKey   string                   // 收到這個 key 就回 allowed=false
+	retryAfter time.Duration            // 被擋時回傳的等待時間
+	blocks     map[string]time.Duration // 多個 key 同時被擋時用：key → 該 key 的等待時間
+	err        error                    // 不是 nil 就直接回傳這個錯（模擬 Redis 掛了）
 
 	allowKeys  []string // spy：Allow 收到過的 key
 	resetKeys  []string // spy：Reset 收到過的 key
@@ -86,6 +100,9 @@ func (f *fakeRateLimiter) Allow(ctx context.Context, key string, limit int, wind
 	}
 	if key == f.blockKey {
 		return false, f.retryAfter, nil
+	}
+	if d, ok := f.blocks[key]; ok {
+		return false, d, nil
 	}
 	return true, 0, nil
 }
@@ -115,3 +132,20 @@ type failingTokenIssuer struct{}
 func (failingTokenIssuer) IssueAccessToken(userID int64) (string, time.Duration, error) {
 	return "", 0, errors.New("sign failed")
 }
+
+// handler test 用的假 Redis：只記下 Publish 的內容，Subscribe 立刻返回
+var _ store.RedisStoreInterface = (*fakeRedis)(nil)
+
+type fakeRedis struct {
+	publishErr error
+	published  []string // spy：Publish 收到過的訊息
+}
+
+func (f *fakeRedis) Publish(ctx context.Context, msg string) error {
+	f.published = append(f.published, msg)
+	return f.publishErr
+}
+
+func (f *fakeRedis) Subscribe(ctx context.Context, handler func(string)) error { return nil }
+
+func (f *fakeRedis) CheckHealth(ctx context.Context) error { return nil }

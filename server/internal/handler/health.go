@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -28,12 +29,10 @@ func NewHealthHandler(db store.DBStoreInterface, redis store.RedisStoreInterface
 
 // check server is alive
 func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	if !checkMethodValidation(r, []string{http.MethodGet, http.MethodHead}) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+	// method 由 router 限定（main.go 的 publicGet）；Go 1.22 的 "GET /x" 也會比對 HEAD，
+	// 所以跟原本手寫的 GET + HEAD 行為一樣
 	/// no need check cors since its just a health check api
-	setContentType(w)
+	httpx.SetContentType(w)
 
 	/// setting timeout
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)

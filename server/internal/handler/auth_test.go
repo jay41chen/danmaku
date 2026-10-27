@@ -27,7 +27,6 @@ func TestHandleRegister(t *testing.T) {
 		createErr  error
 		wantStatus int
 	}{
-		{"GET not allowed", http.MethodGet, "", nil, http.StatusMethodNotAllowed},
 		{"broken json", http.MethodPost, `{"username":"jay",}`, store.ErrUsernameTaken, http.StatusBadRequest},
 		{"invalid username", http.MethodPost, `{"username":"a","password":"kq7vz2mx"}`, store.ErrUsernameTaken, http.StatusBadRequest},
 		{"too short password", http.MethodPost, `{"username":"jay","password":"jayjay"}`, store.ErrUsernameTaken, http.StatusBadRequest},
@@ -108,7 +107,6 @@ func TestHandleLogin(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{"GET not allowed", http.MethodGet, "", stored, nil, http.StatusMethodNotAllowed, ""},
 		{"broken json", http.MethodPost, `{"username":"jay",}`, stored, nil, http.StatusBadRequest, ""},
 		// 這兩個 case 要回一模一樣的 status 和訊息，不能讓人分辨帳號存不存在
 		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, store.ErrUserNotFound, http.StatusUnauthorized, msgInvalidCredentials},
@@ -217,8 +215,6 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		wantResetKeys  []string
 		wantRefundKeys []string
 	}{
-		// method 錯的不算次數
-		{"GET not counted", http.MethodGet, "", &fakeRateLimiter{}, http.StatusMethodNotAllowed, "", nil, nil, nil},
 		// IP 被擋：還沒 decode 就回 429，不會再問帳號
 		{"ip blocked", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 30 * time.Second}, http.StatusTooManyRequests, "30", []string{ipKey}, nil, nil},
 		{"username blocked", http.MethodPost, body, &fakeRateLimiter{blockKey: usernameKey, retryAfter: 30 * time.Second}, http.StatusTooManyRequests, "30", []string{ipKey, usernameKey}, nil, nil},
@@ -277,7 +273,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		}
 	})
 
-	// 有設定要信任的 header 時，IP 的 key 要用 header 的值（確認 trustedHeaderKey 有接到 clientIP）
+	// 有設定要信任的 header 時，IP 的 key 要用 header 的值（確認 trustedHeaderKey 有接到 httpx.ClientIP）
 	t.Run("ip from trusted header", func(t *testing.T) {
 		limiter := &fakeRateLimiter{}
 		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "X-Real-IP", testTokens)
@@ -347,7 +343,6 @@ func TestHandleRefresh(t *testing.T) {
 		rotateErr  error
 		wantStatus int
 	}{
-		{"GET not allowed", http.MethodGet, "", nil, http.StatusMethodNotAllowed},
 		{"broken json", http.MethodPost, `{"refresh_token":`, nil, http.StatusBadRequest},
 		{"missing token", http.MethodPost, `{}`, nil, http.StatusBadRequest},
 		{"invalid token", http.MethodPost, validBody, store.ErrRefreshTokenInvalid, http.StatusUnauthorized},
@@ -424,7 +419,6 @@ func TestHandleLogout(t *testing.T) {
 		revokeErr  error
 		wantStatus int
 	}{
-		{"GET not allowed", http.MethodGet, "", nil, http.StatusMethodNotAllowed},
 		{"broken json", http.MethodPost, `{"refresh_token":`, nil, http.StatusBadRequest},
 		{"missing token", http.MethodPost, `{}`, nil, http.StatusBadRequest},
 		// store 對查不到 / 已作廢都回 nil，handler 一律 204

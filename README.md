@@ -17,6 +17,7 @@
 - **Logging**: slog JSON，透過 context 自動帶 `request_id`
 - **Reliability**: Panic recovery middleware, graceful shutdown (SIGTERM/SIGINT)
 - **Schema Migration**: golang-migrate，server 啟動時自動套用，SQL embed 進 binary
+- **Auth**: JWT access token（HS256，1 小時）+ opaque refresh token（rotation + duplicate use detection）；route 預設要登入，公開的要明寫 `publicGet` / `publicPost`
 
 ## Architecture
 
@@ -83,6 +84,22 @@ npm run dev
 
 4. 開啟 http://localhost:5173/danmaku/
 
+## API
+
+| Method | Path | 要登入 | 說明 |
+|---|---|---|---|
+| `GET` | `/messages` | | 歷史訊息；發送者已刪除的訊息 `username` 是 `null` |
+| `POST` | `/messages` | ✓ | 發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。成功回 `201` + 訊息，並廣播給所有 WS 連線 |
+| `GET` | `/ws` | | WebSocket，接收即時廣播 |
+| `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
+| `POST` | `/refresh`、`/logout` | | 用 refresh token 換新的一組 / 作廢 |
+| `GET` | `/healthcheck`、`/metrics` | | 健康檢查、Prometheus metrics |
+
+- 要登入的 endpoint 帶 `Authorization: Bearer <access token>`。沒帶、token 無效或過期一律回同一個 `401`（`WWW-Authenticate: Bearer`），client 用 refresh token 換新的再重送
+- WS 訊息格式是 `{"type": ..., "payload": ...}`：
+  - `message`：新彈幕，payload 跟 `POST /messages` 的回應相同
+  - `error`：只送給那條連線，例如 client 直接從 WS 送訊息 → `{"code": "ws_write_forbidden", ...}`（連線不會斷，發彈幕要走 `POST /messages`）
+
 ## Request ID & Log 追蹤
 
 每個 request 都有 request ID：client 帶合法的 `X-Request-ID`（`[A-Za-z0-9_-]{1,64}`）就沿用，否則由 server 產生，並回傳在 response header。同一個 request 的所有 log 都帶相同的 `request_id`；WebSocket 連線沿用 upgrade request 的 ID，所以整條連線的 log 可以用同一個 ID 串起來。
@@ -135,6 +152,7 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 | `000006_add_refresh_token_revoked_reason` | 加 `revoked_reason`，並 CHECK 它跟 `revoked_at` 要同時有值或同時是 NULL |
 | `000007_rename_revoked_reason_reuse` | `revoked_reason` 的值 `reuse` 改名為 `reuse_detected` |
 | `000008_rename_revoked_reason_duplicate_use` | `reuse_detected` 改名為 `duplicate_use_detected`（目前的值：`rotated` / `logout` / `duplicate_use_detected`） |
+| `000009_messages_add_user_id` | `messages` 加 `user_id`（nullable FK → `users.id`，`ON DELETE SET NULL`，訊息保留）+ index |
 
 ### 新增 migration
 

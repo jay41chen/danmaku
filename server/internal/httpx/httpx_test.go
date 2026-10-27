@@ -1,4 +1,4 @@
-package handler
+package httpx
 
 import (
 	"net/http"
@@ -34,10 +34,10 @@ func TestClientIP(t *testing.T) {
 				req.Header.Set(k, v)
 			}
 
-			got := clientIP(req, tc.trustedHeaderKey)
+			got := ClientIP(req, tc.trustedHeaderKey)
 
 			if got != tc.want {
-				t.Errorf("clientIP() = %q, want %q", got, tc.want)
+				t.Errorf("ClientIP() = %q, want %q", got, tc.want)
 			}
 		})
 	}
