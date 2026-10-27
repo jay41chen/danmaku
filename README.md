@@ -158,6 +158,9 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 
 1. 在 `server/migrations/` 建立下一號的 `.up.sql` 和 `.down.sql`
 2. 整份 SQL 用 `BEGIN;` / `COMMIT;` 包起來，失敗時整個 rollback
+   - pgx driver 把整份檔案用一次 `Exec` 送出，Postgres 會自動當成一個 transaction（implicit transaction），所以 `000004`～`000009` 沒包也是 atomic；仍然明確寫出來，避免日後開 `x-multi-statement`（改成逐句送）或換 driver 時失去保護。已套用的不回頭補
+   - 例外：`CREATE INDEX CONCURRENTLY` 不能放在 transaction 裡，要單獨一份 migration、不包 `BEGIN` / `COMMIT`
+   - 不管有沒有 rollback，失敗後版本都會被標成 `dirty`，要手動處理（見下方「查詢版本 / 手動退版」）
 3. 重新 build / 重啟 server 即套用（SQL 是 embed 的，只改 SQL 不重新 build 不會生效）
 
 注意：

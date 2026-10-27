@@ -132,5 +132,6 @@
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
 - [ ] Migration 成功時 log 目前的 schema version（`m.Version()`）：現在成功時完全沒有 log，只能從 `server listening` 間接推斷，要確認版本得去開 DB
+- [ ] 大表加 index 改用 `CREATE INDEX CONCURRENTLY`：一般的 `CREATE INDEX`（如 000009 的 `messages_user_id_idx`）建立期間會擋住該表的寫入，表小時一瞬間，量大時彈幕會卡住。`CONCURRENTLY` 不能放在 transaction 裡 → 獨立一份 migration、不包 `BEGIN` / `COMMIT`；失敗會留下 `INVALID` 的 index，要先 `DROP INDEX` 再重跑
 - [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
 - [ ] Chaos testing
