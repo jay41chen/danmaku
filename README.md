@@ -90,7 +90,7 @@ npm run dev
 |---|---|---|---|
 | `GET` | `/messages` | | 歷史訊息；發送者已刪除的訊息 `username` 是 `null` |
 | `POST` | `/messages` | ✓ | 發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。成功回 `201` + 訊息，並廣播給所有 WS 連線 |
-| `GET` | `/ws` | | WebSocket，接收即時廣播 |
+| `GET` | `/ws` | | WebSocket，接收即時廣播。連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
 | `POST` | `/refresh`、`/logout` | | 用 refresh token 換新的一組 / 作廢 |
 | `GET` | `/healthcheck`、`/metrics` | | 健康檢查、Prometheus metrics |
@@ -98,7 +98,12 @@ npm run dev
 - 要登入的 endpoint 帶 `Authorization: Bearer <access token>`。沒帶、token 無效或過期一律回同一個 `401`（`WWW-Authenticate: Bearer`），client 用 refresh token 換新的再重送
 - WS 訊息格式是 `{"type": ..., "payload": ...}`：
   - `message`：新彈幕，payload 跟 `POST /messages` 的回應相同
-  - `error`：只送給那條連線，例如 client 直接從 WS 送訊息 → `{"code": "ws_write_forbidden", ...}`（連線不會斷，發彈幕要走 `POST /messages`）
+  - `error`：只送給那條連線，連線不會斷，`code` 有：
+    - `ws_write_forbidden`：client 從 WS 送訊息（發彈幕要走 `POST /messages`）
+    - `ws_auth_failed`：auth 失敗（token 無效、user 不存在），連線退回匿名
+    - `ws_auth_expired`：token 到期，連線退回匿名
+  - `auth_ok`：auth 成功，payload `{"user": {"id", "username"}, "expires_in": 秒數}`
+- WS 登入：client 送 `{"type": "auth", "payload": {"token": "<access token>"}}`。快到期時在同一條連線再送一次新的 token 續期；送別人的 token 會直接換身分
 
 ## Request ID & Log 追蹤
 

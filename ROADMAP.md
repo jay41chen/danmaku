@@ -61,7 +61,7 @@
   - [x] Access token（JWT HS256，1 小時，`JWT_SECRET` fail fast）
   - [x] Refresh token（opaque、存 SHA-256、7 天、rotation + duplicate use detection、15s grace）、`/refresh`、`/logout`
   - [x] `requireAuth` + route helper（`post` 預設要登入、`publicGet` 公開）、加回 `POST /messages`、廣播改 JSON；WS 寫入一律拒絕、回 error frame 不斷線（Step 8）
-  - [ ] WS 驗證：token 可選（帶了要驗、沒帶匿名，會員 / 非會員分開統計）（Step 9）
+  - [x] WS 驗證：token 可選，連線內送 auth frame（失敗 / 過期退回匿名、不斷線；過期 timer 拿鎖後重查 exp）；會員 / 非會員分開統計（`websocket_viewers`，只算單台 server；跨 server 去重見 W6）（Step 9）
   - [ ] Client：存 token、401 自動 refresh（Step 10）
     - 發彈幕改走 `POST /messages`；WS 訊息格式 `{type, payload}`（`message` / `error`，error 的 `code` 如 `ws_write_forbidden` 可接 popup）
     - POST 回 201 + payload，WS 廣播也會再收到一次 → 用 `payload.id` 去重；依 `id` 插入而不是依到達順序 append（response / 廣播都可能晚到）
@@ -128,6 +128,8 @@
 - [ ] Redis List replay（搭配前端 auto-reconnect）
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
+  - 每條連線改成自己的寫入 goroutine 後，WS 連線的身分（user、exp、timer）改用每條連線各自的 mutex：Step 9 先用全站那把鎖，因為寫 frame 本來就要拿全站鎖，拆身分鎖省不到東西；要拆時上鎖順序固定「全站 → 單條連線」
+- [ ] 跨 server 的「不同會員數」：Step 9 的 gauge 只有單台 server 的數字，同一個 user 連到 server-1、server-2 加總會算 2。要共用的地方（Redis）合併，server 被 kill -9 時沒機會清 → 靠 TTL + heartbeat（活著的 server 定期續命，死掉的自然過期），不能靠 server 自己起的 timer。待討論：TTL / heartbeat 間隔（server 死掉後數字錯多久 vs Redis 寫入量）、資料結構、誰來加總、要不要改成獨立的 health checker service（它本身也要被監控，Redis TTL 等於免費的 checker）；要「每個直播間」統計的話等 W4b Room
   - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
