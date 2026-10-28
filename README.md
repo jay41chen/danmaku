@@ -92,6 +92,7 @@ npm run dev
 | `POST` | `/messages` | ✓ | 發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。成功回 `201` + 訊息，並廣播給所有 WS 連線 |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
+| `GET` | `/me` | ✓ | 目前登入的 user `{"id", "username"}`；F5 後 client 用它取得身分。`Cache-Control: no-store` |
 | `POST` | `/refresh`、`/logout` | | 用 refresh token 換新的一組 / 作廢 |
 | `GET` | `/healthcheck`、`/metrics` | | 健康檢查、Prometheus metrics |
 

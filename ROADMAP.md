@@ -66,6 +66,9 @@
     - 發彈幕改走 `POST /messages`；WS 訊息格式 `{type, payload}`（`message` / `error`，error 的 `code` 如 `ws_write_forbidden` 可接 popup）
     - POST 回 201 + payload，WS 廣播也會再收到一次 → 用 `payload.id` 去重；依 `id` 插入而不是依到達順序 append（response / 廣播都可能晚到）
     - `username: null` → client 顯示「已刪除的用戶」（i18n、防冒名）
+    - Token 存放（Step 10 定案）：access token 只放 memory；refresh token 放 `localStorage`（F5 / 重開頁面時打 `/refresh` 換新的）。防 XSS 靠源頭：彈幕一律純文字渲染（禁用 `dangerouslySetInnerHTML`）+ `index.html` 的 CSP meta；損害由 rotation + duplicate use 限制
+    - 新增 `GET /me`（要登入）：F5 後取得目前 user
+  - [ ] Refresh token 改 HttpOnly cookie：前端 `github.io`、後端 `railway.app` 是 cross-site → third-party cookie，Safari 預設擋。等有自訂網域（同 site）再改，同時處理 CSRF（`SameSite`）、CORS `Allow-Credentials`、WS `CheckOrigin`
   - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
   - Refresh token 延後的項目：
     - 清理 job：作廢 / 過期的列保留到 `expires_at` 之後再定期 `DELETE`（量大時改成依日期 partition、整個 drop）
