@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,6 +318,29 @@ func TestWebsocketNonAuthFramesForbidden(t *testing.T) {
 	}
 }
 
+func TestWebsocketKeepaliveConstants(t *testing.T) {
+	// 下限避免太頻繁，上限要留餘裕小於 nginx proxy_read_timeout 60s；client connection.ts 的 HEARTBEAT 常數要跟著改
+	if wsPingPeriod < 25*time.Second || wsPingPeriod > 55*time.Second {
+		t.Errorf("wsPingPeriod = %v, want within [25s, 55s]", wsPingPeriod)
+	}
+	if wsPongWait < 2*wsPingPeriod {
+		t.Errorf("wsPongWait = %v, want >= 2 * wsPingPeriod (%v)", wsPongWait, wsPingPeriod)
+	}
+}
+
+func TestWebsocketAppPing(t *testing.T) {
+	_, url := newAuthTestServer(t)
+	conn := dialWS(t, url)
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f := readFrame(t, conn, 2*time.Second)
+	if f.Type != wsTypePong {
+		t.Fatalf("frame type = %q (%s), want %q", f.Type, f.Payload, wsTypePong)
+	}
+}
+
 // 需要 TODO(user) 完成才會過（timer）
 func TestWebsocketAuthExpired(t *testing.T) {
 	_, url := newAuthTestServer(t)
@@ -408,4 +432,115 @@ func TestWebsocketMemberRefcount(t *testing.T) {
 
 	conn2.Close()
 	waitGauge(t, memberGauge(), 0)
+}
+
+// ---- keepalive（ping / pong / read deadline）----
+
+// 跟 newAuthTestServer 一樣，但可以注入 ping 間隔和 pong 等待時間
+// 必須在 httptest.NewServer 之前設定：server 啟動後再改欄位，會跟 handler goroutine 讀欄位產生 data race（-race 會抓到）
+func newKeepaliveTestServer(t *testing.T, pingPeriod, pongWait time.Duration) (*WebsocketHandler, string) {
+	t.Helper()
+	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
+	h := NewWebsocketHandler(&fakeRedis{}, db, fakeClaimsParser{})
+	h.pingPeriod = pingPeriod
+	h.pongWait = pongWait
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
+	t.Cleanup(srv.Close)
+	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+func clientCount(h *WebsocketHandler) int {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	return len(h.clients)
+}
+
+// 輪詢等 clients 數量變成預期值：連線的建立 / 移除在 server 端的 goroutine 做
+func waitForClientCount(t *testing.T, h *WebsocketHandler, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		got := clientCount(h)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("clients = %d, want %d (waited %v)", got, want, timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 背景一直讀：gorilla 的 ping / pong handler 只有在 ReadMessage 時才會被呼叫
+// conn 被 t.Cleanup 關掉後 ReadMessage 會回錯誤，goroutine 就結束
+func drainInBackground(conn *websocket.Conn) {
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func TestWebsocketServerSendsPing(t *testing.T) {
+	_, url := newKeepaliveTestServer(t, 50*time.Millisecond, time.Second)
+	conn := dialWS(t, url)
+
+	var pings atomic.Int32
+	// 自訂 ping handler 會取代 gorilla 預設的自動回 pong，所以要自己回
+	conn.SetPingHandler(func(appData string) error {
+		pings.Add(1)
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+	drainInBackground(conn)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for pings.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("pings = %d, want >= 2 within 500ms", pings.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWebsocketDeadClientRemoved(t *testing.T) {
+	// ping 設 1h：不會有 protocol ping，只有初始 read deadline 能踢掉它
+	h, url := newKeepaliveTestServer(t, time.Hour, 150*time.Millisecond)
+	dialWS(t, url) // 連上之後什麼都不做（不讀、不寫）
+
+	waitForClientCount(t, h, 1, time.Second)
+	waitForClientCount(t, h, 0, time.Second)
+}
+
+func TestWebsocketPongExtendsDeadline(t *testing.T) {
+	h, url := newKeepaliveTestServer(t, 50*time.Millisecond, 150*time.Millisecond)
+	conn := dialWS(t, url)
+	drainInBackground(conn) // 預設 ping handler 會自動回 pong
+
+	waitForClientCount(t, h, 1, time.Second)
+	time.Sleep(500 * time.Millisecond) // > 3 倍 pongWait：沒有 pong 延長 deadline 早就被踢了
+	if got := clientCount(h); got != 1 {
+		t.Fatalf("clients = %d, want 1 (pong should extend the read deadline)", got)
+	}
+}
+
+func TestWebsocketMessageExtendsDeadline(t *testing.T) {
+	// ping 設 1h → 沒有 protocol pong，能活著只可能是「收到訊息就延長 deadline」
+	h, url := newKeepaliveTestServer(t, time.Hour, 150*time.Millisecond)
+	conn := dialWS(t, url)
+	drainInBackground(conn) // 讀掉 server 回的 pong envelope
+
+	waitForClientCount(t, h, 1, time.Second)
+	// 50ms 一則 = 20 則/秒，超過每條連線 5 則/秒的限流；
+	// 但 listenConnection 是在限流判斷之前就延長 deadline，被丟掉的 frame 一樣算「活著」
+	for range 10 {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := clientCount(h); got != 1 {
+		t.Fatalf("clients = %d, want 1 (incoming messages should extend the read deadline)", got)
+	}
 }

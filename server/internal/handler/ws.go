@@ -29,6 +29,14 @@ const (
 	wsTypeError     = "error"
 	wsTypeAuth      = "auth"    // client → server：連線內登入 / 續期
 	wsTypeAuthOK    = "auth_ok" // server → client：登入 / 續期成功
+	wsTypePing      = "ping"    // client → server：應用層心跳
+	wsTypePong      = "pong"    // server → client：回應心跳
+
+	// server 送 protocol ping 的間隔；必須小於 nginx proxy_read_timeout（60s）
+	// client connection.ts 的心跳間隔要跟這個一致，範圍檢查在 ws_test.go
+	wsPingPeriod = 25 * time.Second
+	// read deadline：連續 3 次 ping 都沒有回應才判定連線死掉
+	wsPongWait = 3 * wsPingPeriod
 
 	wsCodeWriteForbidden = "ws_write_forbidden"
 	wsMsgWriteForbidden  = "請透過 POST /messages 發送"
@@ -108,6 +116,9 @@ type WebsocketHandler struct {
 	members map[int64]int // user id → 這個 user 在這台 server 上的連線數（同一個人多分頁只算一個 viewer）
 	mutex   sync.Mutex
 	logger  *slog.Logger
+	// 預設是 wsPingPeriod / wsPongWait；欄位化只是為了讓 test 注入短時間
+	pingPeriod time.Duration
+	pongWait   time.Duration
 }
 
 var upgrader = websocket.Upgrader{
@@ -123,9 +134,21 @@ func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterf
 		clients: make(map[*websocket.Conn]*wsClient),
 		members: make(map[int64]int),
 		logger:  slog.Default().With("component", "websocket"),
+
+		pingPeriod: wsPingPeriod,
+		pongWait:   wsPongWait,
 	}
 }
 
+// 一條連線的生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
+//
+//	各種原因 → ReadMessage 失敗 → removeClient → HandleWebsocket return
+//	                                              ├ defer close(done) → pingLoop 結束
+//	                                              └ defer connection.Close()
+//
+// 其他 goroutine（pingLoop）發現連線壞了只 Close() 叫醒讀取迴圈，不自己 removeClient
+// 例外：StartBroadcast 持有全域鎖、會立刻 removeClientLocked（重複呼叫是安全的）
+// 在 listenConnection 之前 return 會跳過 removeClient → clients 裡留一筆，不要這樣寫
 func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
 	// 瀏覽器先發一個 HTTP request 說「我想升級成 WebSocket」，
@@ -156,7 +179,63 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	}
 	// 連線成功，設定每次發送的上限
 	connection.SetReadLimit(maxMessageBytes)
+	// 加上pingpong的keepalive mechanism
+	if err := this.addPongReadDeadline(connection); err != nil {
+		// 不 return：addPongReadDeadline 失敗時已經 Close，讓下面的 listenConnection 讀取失敗後去 removeClient
+		// 在這裡 return 會跳過 removeClient，clients 裡會留一筆
+		this.logger.WarnContext(r.Context(), "set read deadline failed", "error", err)
+	}
+
+	// 掛上pong handler
+	connection.SetPongHandler(func(appData string) error {
+		err := this.addPongReadDeadline(connection)
+		return err
+	})
+	// 加上ping loop
+	done := make(chan struct{})
+	defer close(done)
+	go this.pingLoop(r.Context(), connection, done)
+
 	this.listenConnection(r.Context(), connection)
+}
+
+func (this *WebsocketHandler) pingLoop(ctx context.Context, connection *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(this.pingPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			// 直接結束goroutine，
+			// 因為done是在HandleWebsocket中被defer close的
+			// 也就是說會進到這狀況，大家都知道connection已經死了
+			// 所以不需要再次handle
+			return
+		case <-ticker.C:
+			// 送ping
+			deadline := time.Now().Add(writeWait)
+			if err := connection.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+				// 送ping的時候遇到錯誤，代表該connection遇到問題
+				// 也可能是等 gorilla 內部寫入鎖逾時（StartBroadcast 正卡在寫這條慢 client，最多 writeWait）：一律視為連線不健康、關掉
+				this.logger.WarnContext(ctx, "write ping failed", "error", err)
+				// 特別注意，因為pingLoop跟listenConnection在不同go routine
+				// 所以這邊要特別指定close，不然listenConnection要等到timeout
+				// 才會繼續走
+				connection.Close()
+				return
+			}
+		}
+
+	}
+}
+
+func (this *WebsocketHandler) addPongReadDeadline(conn *websocket.Conn) error {
+	t := time.Now().Add(this.pongWait)
+	err := conn.SetReadDeadline(t)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	return nil
 }
 
 // 回傳 false = 連線數已滿，沒加進去（HandleWebsocket 要直接 return）
@@ -185,9 +264,15 @@ func (this *WebsocketHandler) listenConnection(ctx context.Context, connection *
 			this.removeClient(ctx, connection)
 			break
 		}
+		// 新增：收到任何訊息都代表 client 還活著
+		if err := this.addPongReadDeadline(connection); err != nil {
+			this.logger.WarnContext(ctx, "set read deadline failed", "error", err)
+		}
 		// auth frame 裡有 access token，不能進 log；誰送的看身分變化的 INFO log
 		this.logger.DebugContext(ctx, "info received", "bytes", len(msg))
-		// 加上一秒內5則的rate limit
+		// WS 收到的 frame（auth / ping / 其他）每條連線每秒最多 rateLimit 個，超過的直接丟掉（不驗、不查、不回）
+		// 跟 POST /messages 的限流無關：WS 連線不用登入就能連，任何人都能送 frame 逼 server 做事
+		// （每個 frame 都要拿全域鎖回應；用自己合法 token 狂送 auth 還會每次查 DB）
 		now := time.Now()
 		if now.Sub(windowStart) > time.Second {
 			msgCount = 0
@@ -213,6 +298,7 @@ func (this *WebsocketHandler) removeClient(ctx context.Context, conn *websocket.
 
 // 收到 client 一個 frame 後的分派：
 //   - type = "auth" → handleAuth（連線內登入 / 續期，失敗只降回訪客，不斷線）
+//   - type = "ping" → 回 pong（應用層心跳，payload 忽略；一樣算進每條連線的 5 則/秒限流）
 //   - 其他（含不是合法 JSON）→ 回 ws_write_forbidden
 //
 // WS 不能寫入：發訊息要走 POST /messages（那裡才驗得了身分、存得進 DB 並帶 user_id）
@@ -226,13 +312,24 @@ func (this *WebsocketHandler) processRemoteMessage(ctx context.Context, connecti
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal(msg, &in); err != nil || in.Type != wsTypeAuth {
+	if err := json.Unmarshal(msg, &in); err != nil {
 		this.mutex.Lock()
 		defer this.mutex.Unlock()
 		this.writeErrorLocked(ctx, connection, wsCodeWriteForbidden, wsMsgWriteForbidden)
 		return
 	}
-	this.handleAuth(ctx, connection, in.Payload)
+	switch in.Type {
+	case wsTypeAuth:
+		this.handleAuth(ctx, connection, in.Payload)
+	case wsTypePing:
+		this.mutex.Lock()
+		defer this.mutex.Unlock()
+		this.writeEnvelopeLocked(ctx, connection, wsEnvelope{Type: wsTypePong, Payload: nil})
+	default:
+		this.mutex.Lock()
+		defer this.mutex.Unlock()
+		this.writeErrorLocked(ctx, connection, wsCodeWriteForbidden, wsMsgWriteForbidden)
+	}
 }
 
 // 處理 auth frame。token 解析和 DB 查詢都在鎖外做（DB 可能慢，不能擋住廣播和其他連線），
@@ -418,8 +515,9 @@ func (this *WebsocketHandler) writeEnvelopeLocked(ctx context.Context, conn *web
 	}
 }
 
-// 用 Background() 是對的：Redis subscribe 是 server 層級的長期任務，不屬於任何 request
 func (this *WebsocketHandler) StartBroadcast() {
+	// Redis subscribe 是 server 層級的長期任務，不屬於任何 request
+	// 所以要用context.Background()
 	this.redis.Subscribe(context.Background(), func(msg string) {
 		this.mutex.Lock()
 		defer this.mutex.Unlock()
