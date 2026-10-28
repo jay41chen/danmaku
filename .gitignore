@@ -12,3 +12,6 @@ server/tmp/
 # OS
 .DS_Store
 server/server
+
+# Personal notes
+docs/go-notes.md
