@@ -13,12 +13,14 @@ const (
 	headerAllowOrigin   = "Access-Control-Allow-Origin"
 	headerRequestMethod = "Access-Control-Request-Method"
 
-	headerAllowMethods = "Access-Control-Allow-Methods"
-	corsAllowMethods   = "GET, POST, OPTIONS"
-	headerAllowHeaders = "Access-Control-Allow-Headers"
-	corsAllowHeaders   = "Content-Type, Authorization"
-	headerMaxAge       = "Access-Control-Max-Age"
-	corsMaxAge         = "600"
+	headerAllowMethods  = "Access-Control-Allow-Methods"
+	corsAllowMethods    = "GET, POST, OPTIONS"
+	headerAllowHeaders  = "Access-Control-Allow-Headers"
+	corsAllowHeaders    = "Content-Type, Authorization"
+	headerExposeHeaders = "Access-Control-Expose-Headers"
+	corsExposeHeaders   = "Retry-After"
+	headerMaxAge        = "Access-Control-Max-Age"
+	corsMaxAge          = "600"
 )
 
 // CORS 告訴「瀏覽器」哪些網站的 JS 可以讀這個 server 的 response。
@@ -59,16 +61,19 @@ func cors(next http.Handler, allowOrigins []string) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get(headerOrigin)
+		allowed := false // 有設定 Allow-Origin 才算允許這個 origin
 		switch {
 		case origin == "":
 			// ignore
 		case allowAll:
 			w.Header().Set(headerAllowOrigin, "*")
+			allowed = true
 		default:
 			// 不管有沒有比對到都要加：response 會依 Origin 不同而不同
 			w.Header().Add("Vary", headerOrigin)
 			if slices.Contains(allowOrigins, origin) {
 				w.Header().Set(headerAllowOrigin, origin)
+				allowed = true
 			}
 		}
 		if isPreflight(r) {
@@ -80,6 +85,12 @@ func cors(next http.Handler, allowOrigins []string) http.Handler {
 			w.Header().Set(headerMaxAge, corsMaxAge)
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+		if allowed {
+			// Retry-After 不在瀏覽器預設讓 JS 讀的 header 清單（CORS-safelisted response headers：
+			// Cache-Control、Content-Language、Content-Length、Content-Type、Expires、Last-Modified、Pragma），
+			// 跨 origin 的前端要讀 429 的 Retry-After 必須 expose；只對實際 response 有意義，preflight 不用
+			w.Header().Set(headerExposeHeaders, corsExposeHeaders)
 		}
 		next.ServeHTTP(w, r)
 	})

@@ -14,13 +14,14 @@ func TestCORS(t *testing.T) {
 		origin       string // request 的 Origin header，"" 表示不帶
 		wantAllow    string // 預期的 Access-Control-Allow-Origin，"" 表示不該有
 		wantVary     bool
+		wantExpose   string // 預期的 Access-Control-Expose-Headers，"" 表示不該有
 	}{
-		{"no origin", []string{"https://a.com"}, "", "", false},
-		{"empty list", []string{}, "https://a.com", "", true},
-		{"allow all", []string{"*"}, "https://a.com", "*", false},
-		{"in list", []string{"https://a.com", "https://b.com"}, "https://b.com", "https://b.com", true},
-		{"not in list", []string{"https://a.com"}, "https://evil.com", "", true},
-		{"trailing slash mismatch", []string{"https://a.com/"}, "https://a.com", "", true},
+		{"no origin", []string{"https://a.com"}, "", "", false, ""},
+		{"empty list", []string{}, "https://a.com", "", true, ""},
+		{"allow all", []string{"*"}, "https://a.com", "*", false, "Retry-After"},
+		{"in list", []string{"https://a.com", "https://b.com"}, "https://b.com", "https://b.com", true, "Retry-After"},
+		{"not in list", []string{"https://a.com"}, "https://evil.com", "", true, ""},
+		{"trailing slash mismatch", []string{"https://a.com/"}, "https://a.com", "", true, ""},
 	}
 
 	for _, tc := range cases {
@@ -48,6 +49,9 @@ func TestCORS(t *testing.T) {
 			if got := rec.Header().Get("Vary") == "Origin"; got != tc.wantVary {
 				t.Errorf("Vary: Origin = %v, want %v", got, tc.wantVary)
 			}
+			if got := rec.Header().Get("Access-Control-Expose-Headers"); got != tc.wantExpose {
+				t.Errorf("Expose-Headers = %q, want %q", got, tc.wantExpose)
+			}
 		})
 	}
 }
@@ -65,14 +69,15 @@ func TestCORSPreflight(t *testing.T) {
 		wantStatus    int
 		wantNext      bool   // false = 被當成 preflight 攔下
 		wantAllow     string // 預期的 Access-Control-Allow-Origin
+		wantExpose    string // 預期的 Access-Control-Expose-Headers；preflight 一律 ""，只有放行的實際 request 且 origin 被允許才有
 	}{
-		{"valid preflight", allowed, http.MethodOptions, "https://a.com", "POST", http.StatusNoContent, false, "https://a.com"},
-		{"not OPTIONS", allowed, http.MethodGet, "https://a.com", "POST", http.StatusOK, true, "https://a.com"},
-		{"no origin", allowed, http.MethodOptions, "", "POST", http.StatusOK, true, ""},
-		{"no request method", allowed, http.MethodOptions, "https://a.com", "", http.StatusOK, true, "https://a.com"},
+		{"valid preflight", allowed, http.MethodOptions, "https://a.com", "POST", http.StatusNoContent, false, "https://a.com", ""},
+		{"not OPTIONS", allowed, http.MethodGet, "https://a.com", "POST", http.StatusOK, true, "https://a.com", "Retry-After"},
+		{"no origin", allowed, http.MethodOptions, "", "POST", http.StatusOK, true, "", ""},
+		{"no request method", allowed, http.MethodOptions, "https://a.com", "", http.StatusOK, true, "https://a.com", "Retry-After"},
 		// 仍然攔下回 204，但沒有 Allow-Origin → 瀏覽器不會送出真正的 request
-		{"origin not in list", allowed, http.MethodOptions, "https://evil.com", "POST", http.StatusNoContent, false, ""},
-		{"allow all", []string{"*"}, http.MethodOptions, "https://a.com", "POST", http.StatusNoContent, false, "*"},
+		{"origin not in list", allowed, http.MethodOptions, "https://evil.com", "POST", http.StatusNoContent, false, "", ""},
+		{"allow all", []string{"*"}, http.MethodOptions, "https://a.com", "POST", http.StatusNoContent, false, "*", ""},
 	}
 
 	for _, tc := range cases {
@@ -105,6 +110,11 @@ func TestCORSPreflight(t *testing.T) {
 			got := rec.Result().Header
 			if v := got.Get("Access-Control-Allow-Origin"); v != tc.wantAllow {
 				t.Errorf("Allow-Origin = %q, want %q", v, tc.wantAllow)
+			}
+
+			// Expose-Headers 只給實際 request；preflight 被攔下時不能有
+			if v := got.Get("Access-Control-Expose-Headers"); v != tc.wantExpose {
+				t.Errorf("Expose-Headers = %q, want %q", v, tc.wantExpose)
 			}
 
 			// header 名稱寫字面值而不是用 cors.go 的 const：
