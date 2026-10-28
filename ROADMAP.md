@@ -62,13 +62,16 @@
   - [x] Refresh token（opaque、存 SHA-256、7 天、rotation + duplicate use detection、15s grace）、`/refresh`、`/logout`
   - [x] `requireAuth` + route helper（`post` 預設要登入、`publicGet` 公開）、加回 `POST /messages`、廣播改 JSON；WS 寫入一律拒絕、回 error frame 不斷線（Step 8）
   - [x] WS 驗證：token 可選，連線內送 auth frame（失敗 / 過期退回匿名、不斷線；過期 timer 拿鎖後重查 exp）；會員 / 非會員分開統計（`websocket_viewers`，只算單台 server；跨 server 去重見 W6）（Step 9）
-  - [ ] Client：存 token、401 自動 refresh（Step 10）
+  - [x] Client：存 token、401 自動 refresh（Step 10）
     - 發彈幕改走 `POST /messages`；WS 訊息格式 `{type, payload}`（`message` / `error`，error 的 `code` 如 `ws_write_forbidden` 可接 popup）
     - POST 回 201 + payload，WS 廣播也會再收到一次 → 用 `payload.id` 去重；依 `id` 插入而不是依到達順序 append（response / 廣播都可能晚到）
-    - `username: null` → client 顯示「已刪除的用戶」（i18n、防冒名）
+    - `username: null` → client 顯示「匿名」（000009 之前的匿名彈幕和已刪除的 user 目前不區分，見 W4b）
     - Token 存放（Step 10 定案）：access token 只放 memory；refresh token 放 `localStorage`（F5 / 重開頁面時打 `/refresh` 換新的）。防 XSS 靠源頭：彈幕一律純文字渲染（禁用 `dangerouslySetInnerHTML`）+ `index.html` 的 CSP meta；損害由 rotation + duplicate use 限制
     - 新增 `GET /me`（要登入）：F5 後取得目前 user
     - 上線檢查：前端部署後在 Railway 開 replicas = 2，實測跨 instance（不需要 sticky session：WS 建立後固定在一台、廣播走 Redis、限流 / refresh 狀態在 Redis / Postgres）
+  - [ ] 跨分頁登出同步：refresh token 在 `localStorage`，同一個瀏覽器的分頁共用。A 分頁登出後，B 分頁的 access token 還在 memory（JWT stateless，server 撤不掉）→ B 還能發彈幕，最多到 B 下一次 refresh（約 55 分鐘）才發現 refresh token 不見而登出
+    - 方向：監聽 `window` 的 `storage` 事件（只有**其他**分頁改 `localStorage` 才會觸發），refresh token 被刪 → 本分頁 `clearAll()`（WS 跟著降回訪客）
+    - 也可用 `BroadcastChannel`；兩者都只在同一個瀏覽器內有效，跨裝置登出要靠 server（W4b「登出所有裝置」）
   - [ ] Refresh token 改 HttpOnly cookie：前端 `github.io`、後端 `railway.app` 是 cross-site → third-party cookie，Safari 預設擋。等有自訂網域（同 site）再改，同時處理 CSRF（`SameSite`）、CORS `Allow-Credentials`、WS `CheckOrigin`
   - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
   - Refresh token 延後的項目：

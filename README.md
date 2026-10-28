@@ -133,6 +133,7 @@ CORS middleware 依 `CORS_ORIGINS` 決定哪些網站的前端可以讀取 API r
 - `*`（預設）：所有網站都允許
 - allowlist：Origin 在清單內才回寫 `Access-Control-Allow-Origin`，並加上 `Vary: Origin`
 - Preflight（`OPTIONS` + `Origin` + `Access-Control-Request-Method`）由 middleware 直接回 `204`，不進 handler
+- 允許的實際 response 會加 `Access-Control-Expose-Headers: Retry-After`：瀏覽器預設只讓 JS 讀少數幾個 response header，前端要讀 `429` 的 `Retry-After` 必須 expose（DevTools / curl 一律看得到，不受影響）
 - 設定格式錯誤（含 path、缺 scheme、`*` 與其他 origin 混用）時 server 啟動失敗，log 會指出是哪一項
 - 比對是字串完全相等，所以 origin 必須跟瀏覽器送的寫法一樣（全小寫、不寫預設 port `:443` / `:80`、沒有 query / fragment / 帳號），否則啟動失敗並提示正確寫法
 
