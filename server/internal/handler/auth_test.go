@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/httpx"
+	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
@@ -496,4 +498,94 @@ func TestHandleLogout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx（context key 沒有也不該 export setter）
+func serveMe(t *testing.T, h *AuthHandler, userID int64) *httptest.ResponseRecorder {
+	t.Helper()
+	token, _, err := testTokens.IssueAccessToken(userID)
+	if err != nil {
+		t.Fatalf("IssueAccessToken: %v", err)
+	}
+	wrapped := middleware.RequireAuth(testTokens)(http.HandlerFunc(h.HandleMe))
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleMe(t *testing.T) {
+	const userID = 7
+
+	t.Run("returns current user", func(t *testing.T) {
+		fake := &fakeDBStore{userByID: model.User{ID: userID, Username: "jay", PasswordHash: "secret-hash"}}
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+
+		rec := serveMe(t, h, userID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if got := strings.TrimSpace(rec.Body.String()); got != `{"id":7,"username":"jay"}` {
+			t.Errorf("body = %q, want %q", got, `{"id":7,"username":"jay"}`)
+		}
+		if fake.gotByIDCall != userID {
+			t.Errorf("GetUserByID id = %d, want %d", fake.gotByIDCall, userID)
+		}
+	})
+
+	t.Run("deleted user returns same 401 as RequireAuth", func(t *testing.T) {
+		h := NewAuthHandler(&fakeDBStore{getByIDErr: store.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
+
+		rec := serveMe(t, h, userID)
+
+		want := httptest.NewRecorder()
+		httpx.WriteUnauthorized(want)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+		if rec.Body.String() != want.Body.String() {
+			t.Errorf("body = %q, want %q", rec.Body.String(), want.Body.String())
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+			t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+	})
+
+	t.Run("db error returns 500", func(t *testing.T) {
+		h := NewAuthHandler(&fakeDBStore{getByIDErr: errors.New("db down")}, &fakeRateLimiter{}, "", testTokens)
+
+		rec := serveMe(t, h, userID)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+	})
+
+	// handler 沒經過 RequireAuth（route 註冊錯）：fail closed 回 500，不查 DB
+	t.Run("missing user id in context returns 500", func(t *testing.T) {
+		fake := &fakeDBStore{}
+		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		req := httptest.NewRequest(http.MethodGet, "/me", nil)
+		rec := httptest.NewRecorder()
+
+		h.HandleMe(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+		if fake.gotByIDCall != 0 {
+			t.Error("queried DB without a user id")
+		}
+	})
 }

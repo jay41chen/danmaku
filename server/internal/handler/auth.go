@@ -10,6 +10,7 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
+	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -326,4 +327,39 @@ func (this *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// 回目前登入的 user：client 重新整理頁面（F5）後只剩 token，用這個取回身分
+// 要登入的 route（用 get 註冊），user id 由 RequireAuth 放進 context
+func (this *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
+	// 回應內容依「誰在問」（Authorization）而不同，不能進任何快取：
+	// CDN 命中快取時不會經過 server 的驗證，會把 A 的資料給 B；
+	// 瀏覽器也不存，避免同一台電腦換人登入時看到上一個人
+	// 放在最前面：錯誤回應也不該被快取
+	w.Header().Set("Cache-Control", "no-store")
+
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		// 走到這裡是 server 設定錯誤、不是 client 的錯：這個 route 忘了用 get 註冊（誤用 publicGet）
+		this.logger.ErrorContext(r.Context(), "no user id in context, route must be registered with get, not publicGet")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	user, err := this.db.GetUserByID(r.Context(), userID)
+	if errors.Is(err, store.ErrUserNotFound) {
+		// user 已刪除但 access token 還沒過期：跟 RequireAuth 同一個 401，
+		// client 會去 /refresh → refresh token 已被 CASCADE 刪除 → 401 → 登出
+		httpx.WriteUnauthorized(w)
+		return
+	}
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "get user by id failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	httpx.SetContentType(w)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(userResponse{ID: user.ID, Username: user.Username})
 }

@@ -108,4 +108,19 @@ func TestRoutes(t *testing.T) {
 			t.Errorf("POST /messages status = %d, want %d", rec.Code, http.StatusUnauthorized)
 		}
 	})
+	t.Run("GET /me without token returns 401", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("RequireAuth panicked (not implemented yet?): %v", r)
+			}
+		}()
+		req := httptest.NewRequest(http.MethodGet, "/me", nil)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET /me status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+	})
 }

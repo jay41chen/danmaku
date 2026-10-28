@@ -160,6 +160,8 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	r.publicPost("/login", http.HandlerFunc(h.auth.HandleLogin))
 	r.publicPost("/refresh", http.HandlerFunc(h.auth.HandleRefresh))
 	r.publicPost("/logout", http.HandlerFunc(h.auth.HandleLogout))
+	// 要登入：回目前 token 對應的 user
+	r.get("/me", http.HandlerFunc(h.auth.HandleMe))
 }
 
 // origins 已經由 config.Load 用 middleware.ParseOrigins 解析、檢查過
