@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	// login 失敗回 400 而不是 401，讓 401 只代表「access token 失效」，client 的 refresh interceptor 不用排除 /login
+	// 防帳號列舉靠的是所有失敗回應一模一樣，不是 status code
 	msgInvalidCredentials = "invalid username or password"
 )
 
@@ -151,6 +153,7 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// 做ip的429 check
 	// ip 存起來：登入成功時要用同一個 key 退還
+	// 放在最前面：被擋的 IP 連 body 都不用 decode；格式錯誤的請求也算這個 IP 的一次失敗（不 Refund）
 	ip := httpx.ClientIP(r, this.trustedHeaderKey)
 	if !this.allow(w, r, loginIPRule, ip) {
 		return
@@ -159,6 +162,13 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	var req credentials
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// 格式規則是公開的（register 會回 400 告知），格式不合法的帳號不可能存在，所以直接回、不洩漏帳號是否存在
+	// 放在 username 限流之前：不讓超長字串變成 Redis key；也不跑 bcrypt、不查 DB
+	if err := auth.ValidateUsername(req.Username); err != nil {
+		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
 		return
 	}
 
@@ -175,7 +185,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		// 結果不重要，目的是花跟「密碼錯」一樣的時間
 		// 借以避免讓攻擊者知道錯誤
 		_, _ = auth.CheckPassword(dummyHash, req.Password)
-		http.Error(w, msgInvalidCredentials, http.StatusUnauthorized)
+		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
 		return
 	}
 	if err != nil {
@@ -192,7 +202,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !success {
-		http.Error(w, msgInvalidCredentials, http.StatusUnauthorized)
+		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
 		return
 	}
 

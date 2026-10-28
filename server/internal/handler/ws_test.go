@@ -345,6 +345,52 @@ func TestWebsocketAuthRenewalBeforeExpiry(t *testing.T) {
 	}
 }
 
+// 競態：expiry timer 已觸發、callback 卡在等 h.mutex 時，連線因壞掉的 auth frame 被降級成匿名（收到 ws_auth_failed）
+// callback 拿到鎖後必須靠第三個 guard（c.userID == 0）直接 return，不能再送 ws_auth_expired
+func TestWebsocketExpiryTimerAfterDowngradeToAnonymous(t *testing.T) {
+	h, url := newAuthTestServer(t)
+	conn := dialWS(t, url)
+	sendAuth(t, conn, "user7@100ms")
+	expectAuthOK(t, conn, 7, "jay")
+
+	// 在 exp 之前搶下全站鎖，讓 timer callback 觸發後卡在 Lock()
+	h.mutex.Lock()
+	time.Sleep(250 * time.Millisecond) // 超過 exp，並確保 callback 已經在等鎖
+
+	// 持鎖期間模擬壞 auth frame 造成的降級（不能走網路：handleAuth 也要拿鎖）
+	var c *wsClient
+	for _, cl := range h.clients {
+		c = cl
+	}
+	if c == nil || c.userID != 7 {
+		h.mutex.Unlock()
+		t.Fatalf("client = %+v, want one member client with userID 7", c)
+	}
+	h.downgradeLocked(context.Background(), c, wsReasonAuthFailed)
+	h.mutex.Unlock()
+
+	// callback 拿到鎖後不該再送 ws_auth_expired
+	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	for {
+		var f wsFrame
+		if err := conn.ReadJSON(&f); err != nil {
+			break // timeout = 沒收到任何 frame，通過
+		}
+		var e wsError
+		if f.Type == wsTypeError && json.Unmarshal(f.Payload, &e) == nil && e.Code == wsCodeAuthExpired {
+			t.Fatalf("got %s after downgrade to anonymous, want none", wsCodeAuthExpired)
+		}
+	}
+
+	waitGauge(t, memberGauge(), 0)
+	waitGauge(t, prom.WebsocketViewers.WithLabelValues("anonymous"), 1)
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	if len(h.members) != 0 {
+		t.Errorf("members = %v, want empty", h.members)
+	}
+}
+
 // 需要 TODO(user) 完成才會過（refcount）
 func TestWebsocketMemberRefcount(t *testing.T) {
 	_, url := newAuthTestServer(t)

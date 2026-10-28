@@ -109,8 +109,8 @@ func TestHandleLogin(t *testing.T) {
 	}{
 		{"broken json", http.MethodPost, `{"username":"jay",}`, stored, nil, http.StatusBadRequest, ""},
 		// 這兩個 case 要回一模一樣的 status 和訊息，不能讓人分辨帳號存不存在
-		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, store.ErrUserNotFound, http.StatusUnauthorized, msgInvalidCredentials},
-		{"wrong password", http.MethodPost, body("jay", "wrong-password"), stored, nil, http.StatusUnauthorized, msgInvalidCredentials},
+		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, store.ErrUserNotFound, http.StatusBadRequest, msgInvalidCredentials},
+		{"wrong password", http.MethodPost, body("jay", "wrong-password"), stored, nil, http.StatusBadRequest, msgInvalidCredentials},
 		{"db error", http.MethodPost, body("jay", password), model.User{}, errors.New("db down"), http.StatusInternalServerError, ""},
 		// DB 裡的 hash 壞掉是系統錯誤，不是密碼錯
 		{"corrupt hash", http.MethodPost, body("jay", password), model.User{ID: 7, Username: "Jay", PasswordHash: "not-a-hash"}, nil, http.StatusInternalServerError, ""},
@@ -215,7 +215,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		wantResetKeys  []string
 		wantRefundKeys []string
 	}{
-		// IP 被擋：還沒 decode 就回 429，不會再問帳號
+		// IP 被擋：還沒 decode body 就回 429，不會再問帳號
 		{"ip blocked", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 30 * time.Second}, http.StatusTooManyRequests, "30", []string{ipKey}, nil, nil},
 		{"username blocked", http.MethodPost, body, &fakeRateLimiter{blockKey: usernameKey, retryAfter: 30 * time.Second}, http.StatusTooManyRequests, "30", []string{ipKey, usernameKey}, nil, nil},
 		// 秒數無條件進位：30.4 秒回 31（回 30 的話 client 會早到、又被擋一次）
@@ -227,7 +227,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		// 成功：帳號 reset、IP 只退還一次（reset IP 的話，攻擊者用自己的帳號登入一次就能把 IP 計數歸零）
 		{"success resets username and refunds ip", http.MethodPost, body, &fakeRateLimiter{}, http.StatusOK, "", []string{ipKey, usernameKey}, []string{usernameKey}, []string{ipKey}},
 		// 失敗的不退：IP 規則等於只數失敗
-		{"wrong password no reset or refund", http.MethodPost, `{"username":"JAY","password":"wrong-password"}`, &fakeRateLimiter{}, http.StatusUnauthorized, "", []string{ipKey, usernameKey}, nil, nil},
+		{"wrong password no reset or refund", http.MethodPost, `{"username":"JAY","password":"wrong-password"}`, &fakeRateLimiter{}, http.StatusBadRequest, "", []string{ipKey, usernameKey}, nil, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,6 +255,59 @@ func TestHandleLoginRateLimit(t *testing.T) {
 			}
 		})
 	}
+
+	// username 格式不合法：IP 限流照算（算一次失敗，不 Refund），但回 400 後不碰 username 限流（不能變成 Redis key）、不查 DB
+	for name, username := range map[string]string{
+		"overlong username":     strings.Repeat("a", 1000),
+		"bad chars in username": "bad name!",
+	} {
+		t.Run(name, func(t *testing.T) {
+			limiter := &fakeRateLimiter{}
+			db := &fakeDBStore{user: stored}
+			h := NewAuthHandler(db, limiter, "", testTokens)
+			req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"`+username+`","password":"`+password+`"}`))
+			rec := httptest.NewRecorder()
+
+			h.HandleLogin(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+			if got := strings.TrimSpace(rec.Body.String()); got != msgInvalidCredentials {
+				t.Errorf("body = %q, want %q", got, msgInvalidCredentials)
+			}
+			if !slices.Equal(limiter.allowKeys, []string{ipKey}) {
+				t.Errorf("Allow keys = %q, want only %q", limiter.allowKeys, []string{ipKey})
+			}
+			if len(limiter.resetKeys) != 0 || len(limiter.refundKeys) != 0 {
+				t.Errorf("Reset keys = %q, Refund keys = %q, want both empty", limiter.resetKeys, limiter.refundKeys)
+			}
+			if db.getUserCalled {
+				t.Error("GetUser was called, want not called")
+			}
+		})
+	}
+
+	// IP 已被擋時，即使 username 超長也是 429（IP 限流在 decode / 格式檢查之前）
+	t.Run("ip blocked beats invalid username", func(t *testing.T) {
+		limiter := &fakeRateLimiter{blockKey: ipKey, retryAfter: 30 * time.Second}
+		db := &fakeDBStore{user: stored}
+		h := NewAuthHandler(db, limiter, "", testTokens)
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"`+strings.Repeat("a", 1000)+`","password":"`+password+`"}`))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+		}
+		if !slices.Equal(limiter.allowKeys, []string{ipKey}) {
+			t.Errorf("Allow keys = %q, want only %q", limiter.allowKeys, []string{ipKey})
+		}
+		if db.getUserCalled {
+			t.Error("GetUser was called, want not called")
+		}
+	})
 
 	// 簽 token 失敗 = server 的錯：回 500，而且不算登入成功（不 Reset 帳號、不退還 IP）
 	t.Run("token issue failure returns 500 without reset or refund", func(t *testing.T) {

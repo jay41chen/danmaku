@@ -31,8 +31,9 @@ type fakeDBStore struct {
 	gotHash     string
 
 	// GetUser 用
-	user   model.User
-	getErr error
+	user          model.User
+	getErr        error
+	getUserCalled bool // spy：GetUser 有沒有被呼叫
 
 	// GetUserByID 用
 	userByID    model.User
@@ -66,6 +67,7 @@ func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash str
 }
 
 func (f *fakeDBStore) GetUser(ctx context.Context, username string) (model.User, error) {
+	f.getUserCalled = true
 	return f.user, f.getErr
 }
 

@@ -185,7 +185,8 @@ func (this *WebsocketHandler) listenConnection(ctx context.Context, connection *
 			this.removeClient(ctx, connection)
 			break
 		}
-		this.logger.DebugContext(ctx, "info received", "content", string(msg))
+		// auth frame 裡有 access token，不能進 log；誰送的看身分變化的 INFO log
+		this.logger.DebugContext(ctx, "info received", "bytes", len(msg))
 		// 加上一秒內5則的rate limit
 		now := time.Now()
 		if now.Sub(windowStart) > time.Second {
@@ -348,6 +349,10 @@ func (this *WebsocketHandler) scheduleExpiryLocked(ctx context.Context, c *wsCli
 		}
 		if time.Now().Before(c.exp) {
 			// 等lock的時候已經被其他goroutine給renew了
+			return
+		}
+		if c.userID == 0 {
+			// 等lock的時候已經被其他goroutine降級回匿名了（例如送了壞掉的 auth frame）
 			return
 		}
 		this.downgradeLocked(ctx, c, wsReasonExpired)
