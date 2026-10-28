@@ -105,6 +105,8 @@ npm run dev
     - `ws_auth_failed`：auth 失敗（token 無效、user 不存在），連線退回匿名
     - `ws_auth_expired`：token 到期，連線退回匿名
   - `auth_ok`：auth 成功，payload `{"user": {"id", "username"}, "expires_in": 秒數}`
+  - `pong`：回應 client 的 `ping`
+- WS keepalive：client 每 25 秒送 `{"type": "ping"}`，server 回 `{"type": "pong"}`；server 也每 25 秒送 WebSocket protocol ping（瀏覽器自動回 pong），75 秒沒收到任何東西就斷線。目的是讓閒置連線不被 nginx `proxy_read_timeout`（60s）切掉，並偵測半開連線
 - WS 登入：client 送 `{"type": "auth", "payload": {"token": "<access token>"}}`。快到期時在同一條連線再送一次新的 token 續期；送別人的 token 會直接換身分
 
 ## Request ID & Log 追蹤

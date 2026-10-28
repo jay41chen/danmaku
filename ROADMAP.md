@@ -68,6 +68,7 @@
     - `username: null` → client 顯示「已刪除的用戶」（i18n、防冒名）
     - Token 存放（Step 10 定案）：access token 只放 memory；refresh token 放 `localStorage`（F5 / 重開頁面時打 `/refresh` 換新的）。防 XSS 靠源頭：彈幕一律純文字渲染（禁用 `dangerouslySetInnerHTML`）+ `index.html` 的 CSP meta；損害由 rotation + duplicate use 限制
     - 新增 `GET /me`（要登入）：F5 後取得目前 user
+    - 上線檢查：前端部署後在 Railway 開 replicas = 2，實測跨 instance（不需要 sticky session：WS 建立後固定在一台、廣播走 Redis、限流 / refresh 狀態在 Redis / Postgres）
   - [ ] Refresh token 改 HttpOnly cookie：前端 `github.io`、後端 `railway.app` 是 cross-site → third-party cookie，Safari 預設擋。等有自訂網域（同 site）再改，同時處理 CSRF（`SameSite`）、CORS `Allow-Credentials`、WS `CheckOrigin`
   - WS `CheckOrigin` 目前全部放行：若改用 cookie 驗證，要依 `CORS_ORIGINS` 檢查 Origin，防 CSWSH（跨站 WebSocket 劫持）；token 放在 header / query 則不受影響
   - Refresh token 延後的項目：
@@ -90,6 +91,7 @@
   - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
   - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /messages`，WS 寫入一律回 error）
 - [ ] 彈幕內容過濾：`POST /messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理
+- [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
 - [ ] Ban（封鎖使用者，含 shadow ban）
   - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
   - 每台 server 在**記憶體**維護 ban set（人數極少），每個 request 查記憶體即可，不查 DB / Redis
@@ -103,6 +105,10 @@
   - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
   - Limiter 呼叫加短 timeout（例如 `context.WithTimeout` 100ms）：Redis 網路黑洞時 go-redis 預設 dial timeout 5 秒，一次 login 呼叫 limiter 4 次，fail open 最慢要等約 20 秒
   - 全域基本限制（每 IP 每秒 N 個 request，nginx `limit_req` 或 middleware）：目前只有個別 endpoint 的嚴格限制。依「被濫用的代價」決定而不是 HTTP method：`GET /messages?limit=10000` 一樣貴
+  - WS 連線數限制：WS 不用登入就能連，現在只有每條連線 5 frame/秒（`listenConnection`），擋不住「開很多條」
+    - 開 100 條閒置連線就佔滿 `maxClients`，正常使用者連不上；keepalive 之後閒置連線會回 pong，不會被 read deadline 踢掉
+    - 開 100 條、每條每秒送 5 個 → 合計每秒 500 次搶全域鎖回應，廣播變慢
+    - 方向：每 IP 最多 N 條 WS（nginx `limit_conn` 或 upgrade 前在 middleware 擋），多台 server 時要跨 instance 計數（Redis）
 - [ ] Login CAPTCHA（reCAPTCHA / Turnstile 等，接外部服務前先討論選型）
   - 補限流擋不到的兩個洞：攻擊者分散到大量 IP（每個 IP 都低於上限、credential stuffing 每個帳號只試一次）；per-username 限流可被拿來故意鎖別人的帳號（DoS）
   - 失敗超過門檻時改成要求驗證，而不是直接 429：真人解完照樣登入，bot 每次嘗試都要付成本
@@ -136,6 +142,12 @@
   - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
+  - goroutine 洩漏：`go_goroutines` 和 `websocket_connections_active` 一起看，每條 WS 帶 2 個 goroutine（net/http 的 + `pingLoop`），手動驗過 17 → 開 10 條 37 → 關掉回 17。連線數回落但 goroutine 呈階梯狀上升 = 洩漏
+- [ ] Goroutine 洩漏的自動化檢查（WS keepalive 的 `pingLoop` 有沒有在 `done` 後結束）：目前只有手動驗證，test 沒涵蓋
+  - test：`go.uber.org/goleak`（新套件，引入前先討論）在 test 結束時檢查多出來的 goroutine；`runtime.NumGoroutine` 前後比對太不準
+  - production 定位：`net/http/pprof` 的 `/debug/pprof/goroutine?debug=1` 依 stack 分組計數，一眼看出卡在哪一行；**不能對外**，開在只有內網能連的 port
+  - 同樣沒測的：`pingLoop` 寫 ping 失敗時的 `Close`（難穩定製造寫入失敗）→ 靠 log 追：同一個 `request_id` 的 `write ping failed` 到 `client disconnected` 應該只差幾 ms，差 ~75s 代表 Close 沒生效
+- [ ] Graceful shutdown 時對 WS client 送 close frame（`1001 Going Away`）：`server.Shutdown` 不會關已 hijack 的 WS 連線，現在重新部署時 client 只會看到 `1006` 異常斷線。前端判斷要不要重連看的是「是不是 client 自己關的」，不看 `code` / `wasClean`，所以補上後前端不用改
 - [ ] Migration 成功時 log 目前的 schema version（`m.Version()`）：現在成功時完全沒有 log，只能從 `server listening` 間接推斷，要確認版本得去開 DB
 - [ ] 大表加 index 改用 `CREATE INDEX CONCURRENTLY`：一般的 `CREATE INDEX`（如 000009 的 `messages_user_id_idx`）建立期間會擋住該表的寫入，表小時一瞬間，量大時彈幕會卡住。`CONCURRENTLY` 不能放在 transaction 裡 → 獨立一份 migration、不包 `BEGIN` / `COMMIT`；失敗會留下 `INVALID` 的 index，要先 `DROP INDEX` 再重跑
 - [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
