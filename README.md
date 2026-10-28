@@ -96,6 +96,7 @@ npm run dev
 | `GET` | `/healthcheck`、`/metrics` | | 健康檢查、Prometheus metrics |
 
 - 要登入的 endpoint 帶 `Authorization: Bearer <access token>`。沒帶、token 無效或過期一律回同一個 `401`（`WWW-Authenticate: Bearer`），client 用 refresh token 換新的再重送
+- `/login` 失敗（格式不合法、帳號不存在、密碼錯）一律回同一個 `400 invalid username or password`，不是 `401`：讓 `401` 只代表 access token 失效，client 的自動 refresh 不用排除 `/login`
 - WS 訊息格式是 `{"type": ..., "payload": ...}`：
   - `message`：新彈幕，payload 跟 `POST /messages` 的回應相同
   - `error`：只送給那條連線，連線不會斷，`code` 有：
