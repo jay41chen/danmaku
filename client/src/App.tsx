@@ -1,56 +1,54 @@
-import { useState, useRef, useEffect } from "react";
-
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8080/ws";
+import { useEffect, useState } from "react";
+import * as session from "./auth/session";
+import { AuthForm } from "./components/AuthForm";
+import { Composer } from "./components/Composer";
+import { MessageList } from "./components/MessageList";
+import { useSession } from "./hooks/useSession";
+import * as connection from "./realtime/connection";
 
 function App() {
-  const [msgs, setMsgs] = useState<string[]>([]);
-  const [input, setInput] = useState("");
-  const wsRef = useRef<WebSocket | null>(null);
+  const { status, user } = useSession();
+  // 登出可能要等進行中的 refresh 結束（最多約 10 秒），期間按鈕停用並顯示「登出中…」
+  const [loggingOut, setLoggingOut] = useState(false);
 
-  useEffect(() => {
-    fetch(`${API_URL}/messages`)
-      .then((res) => res.json())
-      .then((data) => {
-        setMsgs(data.map((m: { content: string }) => m.content));
-      })
-      .catch(console.error);
-
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
-
-    ws.onmessage = (e) => {
-      setMsgs((prev) => [...prev, e.data]);
-    };
-
-    ws.onopen = () => console.log("connected");
-    ws.onclose = () => console.log("disconnected");
-
-    return () => ws.close();
-  }, []);
-
-  const send = () => {
-    if (input.trim() && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(input);
-      setInput("");
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await session.logout();
+    } finally {
+      setLoggingOut(false);
     }
   };
 
+  useEffect(() => {
+    // bootstrap 內部是 idempotent 的（StrictMode 下不會打兩次 /refresh）
+    void session.bootstrap();
+    connection.start();
+    return () => connection.stop();
+  }, []);
+
   return (
     <div style={{ padding: 20 }}>
+      {!session.isStorageAvailable && (
+        <div style={{ color: "crimson" }}>
+          你的瀏覽器封鎖了網站資料，登入狀態最多維持 1 小時，重新整理後也需要重新登入。請允許本站儲存資料。
+        </div>
+      )}
       <h2>Danmaku Chat</h2>
-      <ul>
-        {msgs.map((msg, i) => (
-          <li key={i}>{msg}</li>
-        ))}
-      </ul>
-      <input
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && send()}
-        placeholder="type a message..."
-      />
-      <button onClick={send}>Send</button>
+      {user ? (
+        <div>
+          {user.username} 已登入{" "}
+          <button onClick={() => void handleLogout()} disabled={loggingOut}>
+            {loggingOut ? "登出中…" : "登出"}
+          </button>
+        </div>
+      ) : status === "refreshing" ? (
+        <div>載入中…</div>
+      ) : (
+        <AuthForm />
+      )}
+      <MessageList />
+      <Composer />
     </div>
   );
 }
