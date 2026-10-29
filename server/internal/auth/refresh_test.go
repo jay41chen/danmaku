@@ -2,13 +2,8 @@ package auth
 
 import (
 	"encoding/base64"
-	"strings"
 	"testing"
 )
-
-func isURLSafeBase64(r rune) bool {
-	return 'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' || '0' <= r && r <= '9' || r == '-' || r == '_'
-}
 
 func TestHashRefreshToken(t *testing.T) {
 	// 已知答案：sha256("abc") 是標準測試向量（FIPS 180-2），確定真的是 SHA-256 + hex，不是別的算法或編碼
@@ -46,9 +41,7 @@ func TestNewRefreshToken(t *testing.T) {
 		if len(plain) != 43 {
 			t.Errorf("len(plain) = %d, want 43", len(plain))
 		}
-		if i := strings.IndexFunc(plain, func(r rune) bool { return !isURLSafeBase64(r) }); i >= 0 {
-			t.Errorf("plain = %q has %q at %d, want only A-Z a-z 0-9 - _", plain, plain[i], i)
-		}
+		// 字元集交給 randx 的 TestURLText 測；這裡 RawURL decode 成功就代表沒有非法字元
 		b, err := base64.RawURLEncoding.DecodeString(plain)
 		if err != nil || len(b) != 32 {
 			t.Errorf("decode plain = (%d bytes, %v), want (32 bytes, nil)", len(b), err)
