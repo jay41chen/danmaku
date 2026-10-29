@@ -302,9 +302,16 @@ func newTestDBStore(t *testing.T) *DBStore {
 	t.Cleanup(s.dbPool.Close)
 
 	// 每個測試從空表開始，彼此不互相影響
-	// refresh_tokens 有 foreign key 指向 users：只 TRUNCATE users 會被擋，要一起列出來
-	if _, err := s.dbPool.Exec(ctx, "TRUNCATE users, messages, refresh_tokens"); err != nil {
-		t.Fatalf("truncate tables: %v", err)
+	// 但 migration 000010 種下的 admin user 和 legacy 房間（id 1）要留著：
+	//   messages.room_id 的 DEFAULT 1 指向它；TRUNCATE 不會重設 identity，砍掉就補不回 id 1
+	// 所以不能 TRUNCATE rooms / users（rooms 有 FK 指向 users、messages 指向 rooms），改成依 FK 順序刪：
+	//   messages、refresh_tokens 先清空 → 刪 legacy 以外的房間 → 刪 admin 以外的 user
+	if _, err := s.dbPool.Exec(ctx, `
+		TRUNCATE messages, refresh_tokens;
+		DELETE FROM rooms WHERE public_id <> 'legacy00000';
+		DELETE FROM users WHERE username <> 'admin';
+	`); err != nil {
+		t.Fatalf("reset tables: %v", err)
 	}
 	return s
 }

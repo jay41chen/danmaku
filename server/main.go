@@ -41,6 +41,7 @@ func main() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
 		messages: handler.NewMessageHandler(db, redis, redis),
+		rooms:    handler.NewRoomHandler(db),
 		health:   handler.NewHealthHandler(db, redis),
 		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),
 		ws:       wsHandler,
@@ -110,6 +111,7 @@ func initTokenIssuer(secret string) *auth.TokenIssuer {
 // 所有 route 用到的 handler，集中在一起，registerRoutes 才好在 test 裡換成假的依賴
 type appHandlers struct {
 	messages *handler.MessageHandler
+	rooms    *handler.RoomHandler
 	health   *handler.HealthHandler
 	auth     *handler.AuthHandler
 	ws       *handler.WebsocketHandler
@@ -148,6 +150,9 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	// 同一個 path 的 GET 是公開的、POST 要登入：讀歷史訊息不用登入，發訊息要
 	r.publicGet("/messages", http.HandlerFunc(h.messages.HandleGetMessages))
 	r.post("/messages", http.HandlerFunc(h.messages.HandleCreateMessage))
+
+	r.post("/rooms", http.HandlerFunc(h.rooms.HandleCreateRoom))
+	r.publicGet("/rooms/{public_id}", http.HandlerFunc(h.rooms.HandleGetRoom))
 
 	r.publicGet("/healthcheck", http.HandlerFunc(h.health.HandleHealthCheck))
 	// 公開 route：任何人都能連（匿名）；連上後可以在連線內送 auth frame 升級成登入身分（選擇性）

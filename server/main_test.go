@@ -34,6 +34,7 @@ func newTestMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	registerRoutes(mux, rejectAllParser{}, appHandlers{
 		messages: handler.NewMessageHandler(nil, nil, nil),
+		rooms:    handler.NewRoomHandler(nil),
 		health:   handler.NewHealthHandler(healthyDB{}, healthyRedis{}),
 		auth:     handler.NewAuthHandler(nil, nil, "", nil),
 		ws:       handler.NewWebsocketHandler(nil, nil, nil),
@@ -106,6 +107,23 @@ func TestRoutes(t *testing.T) {
 
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("POST /messages status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+	})
+	// POST /rooms 同樣要登入：handler 自己的 test 只能測「拿到 user id 之後怎麼處理」，
+	// 擋不住有人把 r.post 改成 r.publicPost，只有這層 mux 的 test 能鎖住這個接法
+	t.Run("POST /rooms without token returns 401", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("RequireAuth panicked (not implemented yet?): %v", r)
+			}
+		}()
+		req := httptest.NewRequest(http.MethodPost, "/rooms", nil)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("POST /rooms status = %d, want %d", rec.Code, http.StatusUnauthorized)
 		}
 	})
 	t.Run("GET /me without token returns 401", func(t *testing.T) {

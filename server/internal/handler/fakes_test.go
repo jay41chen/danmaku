@@ -49,6 +49,18 @@ type fakeDBStore struct {
 	gotOldHash     string // spy：RotateRefreshToken 收到的舊 hash
 	revokeErr      error
 	gotRevokeHash  string // spy：RevokeRefreshToken 收到的 hash
+
+	// CreateRoom 用
+	createdRoom     model.Room
+	createRoomErr   error
+	gotRoomOwnerID  int64 // spy：CreateRoom 收到的 owner id
+	gotRoomName     string
+	createRoomCalls int
+
+	// GetRoomByPublicID 用
+	room          model.Room
+	getRoomErr    error
+	gotRoomPublic string // spy：GetRoomByPublicID 收到的 public id
 }
 
 func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
@@ -89,6 +101,17 @@ func (f *fakeDBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash s
 func (f *fakeDBStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
 	f.gotRevokeHash = tokenHash
 	return f.revokeErr
+}
+
+func (f *fakeDBStore) CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error) {
+	f.createRoomCalls++
+	f.gotRoomOwnerID, f.gotRoomName = ownerID, name
+	return f.createdRoom, f.createRoomErr
+}
+
+func (f *fakeDBStore) GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error) {
+	f.gotRoomPublic = publicID
+	return f.room, f.getRoomErr
 }
 
 // handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數

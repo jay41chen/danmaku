@@ -33,6 +33,10 @@ type DBStoreInterface interface {
 	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
 	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
+
+	// 實作在 room.go
+	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
+	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
 }
 
 type DBStore struct {
