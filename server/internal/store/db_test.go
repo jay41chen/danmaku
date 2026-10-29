@@ -148,7 +148,7 @@ func TestQueryMessage(t *testing.T) {
 			// 用 raw SQL 存（不經 CreateMessage）：這個 test 只驗查詢，不該被 CreateMessage 的 SQL 影響
 			// 照順序存：id 由 DB 遞增，所以先存的就是比較舊的
 			for _, content := range tc.saved {
-				if _, err := s.dbPool.Exec(t.Context(), "INSERT INTO messages(content) VALUES ($1)", content); err != nil {
+				if _, err := s.dbPool.Exec(t.Context(), "INSERT INTO messages(room_id, content) VALUES ($1, $2)", legacyRoomID, content); err != nil {
 					t.Fatalf("setup insert %q error = %v", content, err)
 				}
 			}
@@ -369,7 +369,7 @@ func TestQueryMessageUserColumns(t *testing.T) {
 	// LEFT JOIN 的重點：沒有發送者的舊資料不能被丟掉，Username / UserID 要是 nil
 	t.Run("rows without user come back with nil user fields", func(t *testing.T) {
 		s := newTestDBStore(t)
-		if _, err := s.dbPool.Exec(t.Context(), "INSERT INTO messages(content) VALUES ('old')"); err != nil {
+		if _, err := s.dbPool.Exec(t.Context(), "INSERT INTO messages(room_id, content) VALUES ($1, 'old')", legacyRoomID); err != nil {
 			t.Fatalf("setup insert: %v", err)
 		}
 
@@ -391,7 +391,7 @@ func TestQueryMessageUserColumns(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
 		if _, err := s.dbPool.Exec(t.Context(),
-			"INSERT INTO messages(content, user_id) VALUES ('bye', $1)", userID); err != nil {
+			"INSERT INTO messages(room_id, content, user_id) VALUES ($1, 'bye', $2)", legacyRoomID, userID); err != nil {
 			t.Fatalf("setup insert: %v", err)
 		}
 		if _, err := s.dbPool.Exec(t.Context(), "DELETE FROM users WHERE id = $1", userID); err != nil {
@@ -415,7 +415,7 @@ func TestQueryMessageUserColumns(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "Jay")
 		if _, err := s.dbPool.Exec(t.Context(),
-			"INSERT INTO messages(content, user_id) VALUES ('hi', $1)", userID); err != nil {
+			"INSERT INTO messages(room_id, content, user_id) VALUES ($1, 'hi', $2)", legacyRoomID, userID); err != nil {
 			t.Fatalf("setup insert: %v", err)
 		}
 

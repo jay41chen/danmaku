@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // 需要真的 Postgres：沒設 TEST_DATABASE_URL 就 skip（見 newTestDBStore）
@@ -191,7 +193,7 @@ func TestCreateRoom(t *testing.T) {
 	})
 }
 
-// migration 000010 的結果：舊資料掛在 admin 的 legacy 房間；沒帶 room_id 的 INSERT 落在房間 1
+// migration 000010 / 000011 的結果：舊資料掛在 admin 的 legacy 房間（id 1）；000011 拿掉 DEFAULT 後，沒帶 room_id 的 INSERT 會被 NOT NULL 擋下
 func TestRoomsMigration(t *testing.T) {
 	t.Run("legacy room exists and is owned by admin", func(t *testing.T) {
 		s := newTestDBStore(t)
@@ -210,7 +212,7 @@ func TestRoomsMigration(t *testing.T) {
 		}
 	})
 
-	t.Run("message without room_id lands in legacy room", func(t *testing.T) {
+	t.Run("legacy public id resolves to room 1", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID, err := s.CreateUser(t.Context(), "jay", "fake-hash")
 		if err != nil {
@@ -229,6 +231,19 @@ func TestRoomsMigration(t *testing.T) {
 		}
 		if roomID != 1 {
 			t.Errorf("room_id = %d, want 1", roomID)
+		}
+	})
+
+	// 鎖住 000011 的 contract：DEFAULT 被加回來的話，忘了帶 room_id 的 INSERT 會默默落到 legacy 房間，這個 test 會抓到
+	t.Run("insert without room_id fails with not null violation", func(t *testing.T) {
+		s := newTestDBStore(t)
+
+		_, err := s.dbPool.Exec(t.Context(), `INSERT INTO messages(content) VALUES ('hi')`)
+
+		var pgErr *pgconn.PgError
+		// 23502 = not_null_violation
+		if !errors.As(err, &pgErr) || pgErr.Code != "23502" || pgErr.ColumnName != "room_id" {
+			t.Fatalf("error = %v, want not_null_violation on room_id", err)
 		}
 	})
 }
