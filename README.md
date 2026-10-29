@@ -90,6 +90,8 @@ npm run dev
 |---|---|---|---|
 | `GET` | `/messages` | | 歷史訊息；發送者已刪除的訊息 `username` 是 `null` |
 | `POST` | `/messages` | ✓ | 發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。成功回 `201` + 訊息，並廣播給所有 WS 連線 |
+| `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：trim 後 1～30 字；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
+| `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
 | `GET` | `/me` | ✓ | 目前登入的 user `{"id", "username"}`；F5 後 client 用它取得身分。`Cache-Control: no-store` |
@@ -163,6 +165,7 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 | `000007_rename_revoked_reason_reuse` | `revoked_reason` 的值 `reuse` 改名為 `reuse_detected` |
 | `000008_rename_revoked_reason_duplicate_use` | `reuse_detected` 改名為 `duplicate_use_detected`（目前的值：`rotated` / `logout` / `duplicate_use_detected`） |
 | `000009_messages_add_user_id` | `messages` 加 `user_id`（nullable FK → `users.id`，`ON DELETE SET NULL`，訊息保留）+ index |
+| `000010_create_rooms` | `rooms` 表（`public_id` unique、soft delete）；種下系統帳號 `admin`（不能登入）和 `legacy00000` 房間（id 1）；`messages` 加 `room_id`（`DEFAULT 1`，之後的 migration 會拿掉）+ index |
 
 ### 新增 migration
 

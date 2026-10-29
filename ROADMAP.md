@@ -89,11 +89,20 @@
 > Room 排在 RBAC 前面：有「房主」之後，權限規則才具體（房主刪訊息、踢人）
 
 - [ ] Room 概念（房間 + 房主）
+  - 房間 = 長期存在的 channel（跟著擁有者，不是一次直播）；「一次直播」之後需要時再加 `streams` 子實體 + `messages.stream_id`（見 go-notes 3.28）
+  - 網址 `/{username}/{public_id}`：只用 `public_id`（11 字元 base64url，`randx.URLText(8)` 產生，跟 refresh token 共用，unique index 擋碰撞）找房間，username 對不上就 301 導向；內部 PK / FK 仍用 `BIGINT id`
+  - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
+  - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
+  - 彈幕綁房間：`messages.room_id BIGINT NOT NULL REFERENCES rooms(id)`；舊彈幕歸進 legacy room（`public_id = 'legacy00000'`、名稱 `Legacy`，owner 是 migration 建的系統帳號 `admin`，`password_hash = '!'` 不能登入）。**部署前確認 prod 沒人註冊 `admin`**
+  - 部署分兩次（expand / contract）：第一次 migration 加 `room_id` 時帶 `DEFAULT 1`，讓新舊版同時在線時舊版 INSERT 不會撞 NOT NULL；全部換成新版後，下一次部署再 `DROP DEFAULT`
+  - 房間 soft delete（`deleted_at`）：已刪除的不算上限、連結回 404、所有讀取只走會過濾 `deleted_at IS NULL` 的共用 method。Known issue：可無限「建立 → 刪除」累積資料，靠 rate limit
+  - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
+  - 房間人數（presence，設計已定案，見 go-notes 3.27）：每個房間一個 Redis Sorted Set `room:R:members`，member = `conn_id:user_id`（綁連線不綁 user；訪客用唯一值，不能留空），score = 最後續期時間。每台 server 每 10 秒用 pipeline 續期自己的連線 + 對 key 下 `EXPIRE 30`；正常斷線直接刪。算人數：先刪 score < now − 30s → 讀出 member 依 user_id 去重；每台各自每 5 秒算一次推給自己的觀眾，算不到就沿用上一次的數字
 - [ ] Authorization（RBAC）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
   - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
   - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /messages`，WS 寫入一律回 error）
-- [ ] 彈幕內容過濾：`POST /messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理
+- [ ] 彈幕內容過濾：`POST /messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理。`room_name` 同樣只 trim 頭尾，中間可以有換行 / 控制字元，一起處理
 - [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
 - [ ] Ban（封鎖使用者，含 shadow ban）
   - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
@@ -104,6 +113,7 @@
 
 ## W5 — API 設計強化
 
+- [ ] HTTP 錯誤格式統一：目前 `http.Error` 只回純文字，同一個 status 分不出原因（例如 403 可能是「被 ban」或「房間數到上限」）。改成 status + 機器判斷用的 `code` + 給人看的 `message`（WS 已經是 `{code, message}`；可參考 RFC 9457 Problem Details），所有 endpoint 一次換
 - [ ] Rate limiting（middleware）
   - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
   - Limiter 呼叫加短 timeout（例如 `context.WithTimeout` 100ms）：Redis 網路黑洞時 go-redis 預設 dial timeout 5 秒，一次 login 呼叫 limiter 4 次，fail open 最慢要等約 20 秒
@@ -142,6 +152,7 @@
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
   - 每條連線改成自己的寫入 goroutine 後，WS 連線的身分（user、exp、timer）改用每條連線各自的 mutex：Step 9 先用全站那把鎖，因為寫 frame 本來就要拿全站鎖，拆身分鎖省不到東西；要拆時上鎖順序固定「全站 → 單條連線」
 - [ ] 跨 server 的「不同會員數」：Step 9 的 gauge 只有單台 server 的數字，同一個 user 連到 server-1、server-2 加總會算 2。要共用的地方（Redis）合併，server 被 kill -9 時沒機會清 → 靠 TTL + heartbeat（活著的 server 定期續命，死掉的自然過期），不能靠 server 自己起的 timer。待討論：TTL / heartbeat 間隔（server 死掉後數字錯多久 vs Redis 寫入量）、資料結構、誰來加總、要不要改成獨立的 health checker service（它本身也要被監控，Redis TTL 等於免費的 checker）；要「每個直播間」統計的話等 W4b Room
+  - 2026-10-29：TTL / 續期間隔 / 資料結構 / 誰來加總已在 W4b presence 定案（見上方 W4b「Room 概念」）。剩下的 known issue：去重要讀出整個房間的 member，成本 ∝ 房間人數，超大房間（5 萬人）時改用 per-user Sorted Set / HyperLogLog / 分片等（比較見 go-notes 3.27）
   - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
