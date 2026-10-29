@@ -56,7 +56,7 @@ func (this *DBStore) GetRoomByPublicID(ctx context.Context, publicID string) (mo
 //     後面的 count 跟 INSERT 之間不會被插隊（否則兩個請求都數到 2、都建成功 → 4 間）；不同 user 不會互相卡住
 //  3. 拿 username 放進回傳的 Room
 //
-// 參數是 pgx.Tx 不是 dbtx：FOR UPDATE 離開 transaction 就沒效（單句自動 commit、鎖馬上放開），讓 compiler 擋掉「拿 pool 來呼叫」
+// 參數是 pgx.Tx 不是 pool：FOR UPDATE 離開 transaction 就沒效（單句自動 commit、鎖馬上放開），讓 compiler 擋掉「拿 pool 來呼叫」
 func lockOwner(ctx context.Context, tx pgx.Tx, ownerID int64) (string, error) {
 	var username string
 	err := tx.QueryRow(ctx,

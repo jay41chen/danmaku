@@ -36,35 +36,17 @@ func (e *RefreshTokenDuplicateUseError) Is(target error) bool {
 	return target == ErrRefreshTokenDuplicateUse
 }
 
-// *pgxpool.Pool 和 pgx.Tx 共有的 method（簽名一模一樣），refresh token 的查詢都透過它
-// 同一份 method 可以在 transaction 外（pool）、也可以在 transaction 裡（tx）跑
-// （structural typing：Pool 和 Tx 都不用宣告實作了 dbtx）
-type dbtx interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-// refresh token 的查詢，綁定一個 dbtx
-// DBStore 的 public method 用 pool 建一份；RotateRefreshToken 用 withTx 建一份綁 tx 的
-type refreshTokenQueries struct {
-	db dbtx
-}
-
-// 回傳一份「查詢都走 tx」的 refreshTokenQueries（Unit of Work）
-//
-// 為什麼是每次建新的，而不是在 DBStore 上放一個欄位、需要時換成 tx：
-// DBStore 只有一個、所有 request 的 goroutine 共用（像 @Singleton Repository）；transaction 是每個 request 自己的
-// 改共用的欄位 → 別的 request 的查詢會跑進這個 transaction、一起被 rollback，而且賦值本身就是 data race
-//
-// 只活在這次 transaction 裡：Commit / Rollback 後就不能再用
-func withTx(tx pgx.Tx) *refreshTokenQueries {
-	return &refreshTokenQueries{db: tx}
-}
-
 // 時間一律用 DB 的 now()，不用 Go 的 time.Now()：
 // 兩台 server 的時鐘可能差幾秒，DB 只有一個，「過期了沒」「作廢多久了」才有同一個基準
-func (this *refreshTokenQueries) create(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
-	_, err := this.db.Exec(ctx,
+//
+// db 只要求有 Exec：login 時傳 pool、rotate 時傳 tx
+// （*pgxpool.Pool 和 pgx.Tx 都有 Exec，structural typing，不用宣告實作）
+// 不強制要 pgx.Tx，因為單獨一句 INSERT 不在 transaction 裡跑也是對的；
+// 在 rotate 裡傳 tx 才會跟作廢舊 token 一起生效
+func createRefreshToken(ctx context.Context, db interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}, userID int64, tokenHash string, ttl time.Duration) error {
+	_, err := db.Exec(ctx,
 		`
 			INSERT INTO refresh_tokens(user_id,token_hash,created_at ,expires_at )
 			VALUES ($1, $2,now(), now() + $3)
@@ -75,11 +57,10 @@ func (this *refreshTokenQueries) create(ctx context.Context, userID int64, token
 
 // login 成功時呼叫：不在 transaction 裡，用 pool
 func (this *DBStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
-	q := &refreshTokenQueries{db: this.dbPool}
-	return q.create(ctx, userID, tokenHash, ttl)
+	return createRefreshToken(ctx, this.dbPool, userID, tokenHash, ttl)
 }
 
-// refresh token 在 /refresh 當下的狀態（classify 的結果）
+// refresh token 在 /refresh 當下的狀態（classifyRefreshToken 的結果）
 // iota：const 區塊裡從 0 開始自動 +1（= Kotlin enum 的 ordinal）
 type tokenState int
 
@@ -93,10 +74,11 @@ const (
 // 只負責「判斷」oldHash 現在是哪個狀態，不決定接下來要做什麼
 // 唯一的寫入是 r1 的 conditional UPDATE：「搶到」本身就是判斷的一部分（兩個 request 同時來只有一個搶得到）
 // 回傳的 userID 只有 tokenActive / tokenInGrace / tokenDuplicateUse 才有意義
-func (this *refreshTokenQueries) classify(ctx context.Context, oldHash string, grace time.Duration) (tokenState, int64, error) {
+// 參數是 pgx.Tx 不是 pool：r1 的 UPDATE 已經把舊 token 作廢，一定要跟後面「存新的」或「撤銷全部」在同一個 transaction 裡，讓 compiler 擋掉拿 pool 來呼叫
+func classifyRefreshToken(ctx context.Context, tx pgx.Tx, oldHash string, grace time.Duration) (tokenState, int64, error) {
 	var userID int64
 	// r1：只有「還沒作廢、還沒過期」的才會被更新，RETURNING user_id
-	err := this.db.QueryRow(
+	err := tx.QueryRow(
 		ctx,
 		`
 			UPDATE refresh_tokens
@@ -121,13 +103,13 @@ func (this *refreshTokenQueries) classify(ctx context.Context, oldHash string, g
 	// SELECT 除了拿欄位，也能回傳算出來的結果（像 Kotlin 的 map）：比較式對每一列算一次 → true / false，AS 幫它取名
 	// in_grace：「作廢的時間點比 grace 秒前還晚」→ 是 now() - $2，不是 +（+ 是未來，永遠不會成立）
 	//   $2::interval 一定要寫：timestamptz - ? 有兩種可能（- interval → 時間、- timestamptz → interval），
-	//   Postgres 猜成後者 → 拿時間跟 interval 比 → operator does not exist（create 的 now() + $3 只有一種可能，所以不用）
+	//   Postgres 猜成後者 → 拿時間跟 interval 比 → operator does not exist（createRefreshToken 的 now() + $3 只有一種可能，所以不用）
 	//   只有 rotated 才算 grace：logout 掉的 token 15 秒內再出現，不能讓它換到新的
 	// COALESCE(x, false)：x 是 NULL 就改用 false（= Kotlin 的 x ?: false）
 	//   沒作廢過的 token revoked_at 是 NULL，NULL 跟任何東西比較結果都是 NULL（不是 false）
 	//   Go 的 bool 裝不下 NULL → Scan 會回 error → 「過期但沒作廢」的 token 會變成 500 而不是 401
 	// Scan 依「位置」對應 SELECT 的欄位順序，不是依名字
-	err = this.db.QueryRow(
+	err = tx.QueryRow(
 		ctx,
 		`
 			SELECT user_id, expires_at <= now() AS expired, COALESCE(revoked_reason = 'rotated' AND revoked_at > now() - $2::interval, false) AS in_grace
@@ -166,18 +148,16 @@ func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash st
 	// 中途任何一個 return 都會 rollback；Commit 成功之後再 Rollback 不會做任何事
 	// （回傳的 ErrTxClosed 直接忽略），所以不用每個 return 前都手動 rollback
 	defer tx.Rollback(ctx)
-	// 以下的查詢都用 q（不是 this.dbPool）：才會在同一個 transaction 裡
-	q := withTx(tx)
 
-	state, userID, err := q.classify(ctx, oldHash, grace)
+	state, userID, err := classifyRefreshToken(ctx, tx, oldHash, grace)
 	if err != nil {
 		return 0, err
 	}
 
 	switch state {
 	case tokenActive, tokenInGrace:
-		// 存新的：跟 classify 裡 r1 的 UPDATE 同一個 transaction
-		if err := q.create(ctx, userID, newHash, ttl); err != nil {
+		// 存新的：跟 classifyRefreshToken 裡 r1 的 UPDATE 同一個 transaction
+		if err := createRefreshToken(ctx, tx, userID, newHash, ttl); err != nil {
 			return 0, err
 		}
 		// 作廢舊的 + 存新的一起生效
@@ -187,7 +167,7 @@ func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash st
 		return userID, nil
 	case tokenDuplicateUse:
 		// 撤銷這個 user 全部還有效的 token
-		_, err = q.db.Exec(
+		_, err = tx.Exec(
 			ctx,
 			`
 				UPDATE refresh_tokens
