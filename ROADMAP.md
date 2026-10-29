@@ -56,7 +56,7 @@
     - [x] Broadcast 加 10s write deadline，避免單一卡住的 client 無限期佔住 lock
     - [x] 補 test：Chain 順序、RequestID middleware、RecoverPanic（含 `ErrAbortHandler`）
 - [x] Database migration tool（golang-migrate）：SQL embed 進 binary、啟動時自動跑；DB URL 用 pgx 解析、Redis URL 錯誤時不洩漏密碼
-- [ ] Authentication（JWT middleware）
+- [x] Authentication（JWT middleware）
   - [x] `/register`、`/login`（bcrypt、timing 防帳號列舉、rate limit）
   - [x] Access token（JWT HS256，1 小時，`JWT_SECRET` fail fast）
   - [x] Refresh token（opaque、存 SHA-256、7 天、rotation + duplicate use detection、15s grace）、`/refresh`、`/logout`
@@ -68,7 +68,7 @@
     - `username: null` → client 顯示「匿名」（000009 之前的匿名彈幕和已刪除的 user 目前不區分，見 W4b）
     - Token 存放（Step 10 定案）：access token 只放 memory；refresh token 放 `localStorage`（F5 / 重開頁面時打 `/refresh` 換新的）。防 XSS 靠源頭：彈幕一律純文字渲染（禁用 `dangerouslySetInnerHTML`）+ `index.html` 的 CSP meta；損害由 rotation + duplicate use 限制
     - 新增 `GET /me`（要登入）：F5 後取得目前 user
-    - 上線檢查：前端部署後在 Railway 開 replicas = 2，實測跨 instance（不需要 sticky session：WS 建立後固定在一台、廣播走 Redis、限流 / refresh 狀態在 Redis / Postgres）
+    - 上線檢查（2026-10-29 已驗證：replicas = 2，不同台的 A 發、B 收）：前端部署後在 Railway 開 replicas = 2，實測跨 instance（不需要 sticky session：WS 建立後固定在一台、廣播走 Redis、限流 / refresh 狀態在 Redis / Postgres）
   - [ ] 跨分頁登出同步：refresh token 在 `localStorage`，同一個瀏覽器的分頁共用。A 分頁登出後，B 分頁的 access token 還在 memory（JWT stateless，server 撤不掉）→ B 還能發彈幕，最多到 B 下一次 refresh（約 55 分鐘）才發現 refresh token 不見而登出
     - 方向：監聽 `window` 的 `storage` 事件（只有**其他**分頁改 `localStorage` 才會觸發），refresh token 被刪 → 本分頁 `clearAll()`（WS 跟著降回訪客）
     - 也可用 `BroadcastChannel`；兩者都只在同一個瀏覽器內有效，跨裝置登出要靠 server（W4b「登出所有裝置」）
@@ -146,6 +146,7 @@
   - SSE 要 flush：用 `http.NewResponseController(w).Flush()`（StatusCodeRecorder 沒實作 `http.Flusher`，靠 `Unwrap` 轉到內層）
 - [ ] Alerts
   - goroutine 洩漏：`go_goroutines` 和 `websocket_connections_active` 一起看，每條 WS 帶 2 個 goroutine（net/http 的 + `pingLoop`），手動驗過 17 → 開 10 條 37 → 關掉回 17。連線數回落但 goroutine 呈階梯狀上升 = 洩漏
+- [ ] 多 replica 時 `/metrics` 只收得到其中一台：從外部打 `/metrics` 會經過 Railway 的 load balancer，每次只落在某一台 replica，看到的是半套數字。Prometheus 要能個別找到每台 replica（內網位址 / service discovery）再加總；連線數這類可相加的數字在監控層 `sum` 即可，不需要另寫 aggregate service（不重複會員數不能相加，見上方「不同會員數」）
 - [ ] Goroutine 洩漏的自動化檢查（WS keepalive 的 `pingLoop` 有沒有在 `done` 後結束）：目前只有手動驗證，test 沒涵蓋
   - test：`go.uber.org/goleak`（新套件，引入前先討論）在 test 結束時檢查多出來的 goroutine；`runtime.NumGoroutine` 前後比對太不準
   - production 定位：`net/http/pprof` 的 `/debug/pprof/goroutine?debug=1` 依 stack 分組計數，一眼看出卡在哪一行；**不能對外**，開在只有內網能連的 port

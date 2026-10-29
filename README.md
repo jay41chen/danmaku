@@ -204,13 +204,32 @@ UPDATE schema_migrations SET version = <已完成的版本>, dirty = false;
 
 | | Local (Docker Compose) | Production (Railway) |
 |---|---|---|
-| Server | Go x2 + Nginx LB | Go x1 |
+| Server | Go x2 + Nginx LB | Go x1（replicas 可調，見下方 Deployment） |
 | Database | PostgreSQL container | Railway PostgreSQL |
 | Cache | Redis container | Railway Redis |
 | Logs | Promtail → Loki → Grafana | Railway built-in logs |
 | Metrics | Prometheus + Grafana | — |
 
 Observability stack（Loki、Promtail、Grafana、Prometheus）只存在於 local dev 環境，不部署到 production。
+
+## Deployment
+
+| | 平台 | 觸發方式 |
+|---|---|---|
+| Frontend | GitHub Pages | push 到 `dev` 且有改到 `client/**`（`.github/workflows/deploy-frontend.yml`），也可在 Actions 手動跑 `workflow_dispatch`；`VITE_API_URL` / `VITE_WS_URL` 放在 GitHub Secrets |
+| Backend | Railway（`danmaku` service + PostgreSQL + Redis） | push 到 `dev` 由 Railway 自動 build `server/Dockerfile` 並部署；migration 在 server 啟動時自動套用 |
+
+Railway 上的 env（`DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、`CORS_ORIGINS`、`CLIENT_IP_HEADER=X-Real-IP`）都在 dashboard 設定，**不進 repo**。`JWT_SECRET` 沒設時新版會 fail fast 起不來，部署前先確認。
+
+### 開關 replicas
+
+Railway dashboard → `danmaku` service → **Settings** → **Replicas**（Scale 區塊）調整台數 → 按上方出現的 **Deploy** 套用變更。
+
+- 平常維持 **1** 台（省額度）。
+- 要驗證跨 instance 行為時開 **2** 台。server 本身沒有不能重建的狀態（JWT 各台用同一把 `JWT_SECRET` 驗、refresh token 在 PostgreSQL、限流計數在 Redis、彈幕透過 Redis Pub/Sub 廣播），所以**不需要 sticky session**。
+- 看某個 request 落在哪一台：Railway **HTTP Logs** 的 `upstreamAddress`（replica 的內網 IPv6）。WebSocket 看 `/ws` 那筆 101 handshake。
+- 2026-10-29 已用 replicas = 2 驗證：落在不同台的 A（登入）發彈幕、B（訪客）收得到。
+- 已知限制：多台時從外部打 `/metrics` 只會落在其中一台（見 ROADMAP W6）。
 
 ## Environment Variables
 
