@@ -38,7 +38,7 @@
 - [x] API method validation（405 Method Not Allowed）
 - [x] Redis Subscribe exponential backoff retry
 
-## W4a — Middleware + Migration + Auth
+## W4a — Middleware + Migration + Auth ✅
 
 - [x] HTTP middleware pattern（request logging + request ID）
   - [x] Middleware chain + Request ID（`X-Request-ID`，沿用合法的 client header，否則自動產生）
@@ -92,13 +92,15 @@
   - 房間 = 長期存在的 channel（跟著擁有者，不是一次直播）；「一次直播」之後需要時再加 `streams` 子實體 + `messages.stream_id`（見 go-notes 3.28）
   - 網址 `/{username}/{public_id}`：只用 `public_id`（11 字元 base64url，`randx.URLText(8)` 產生，跟 refresh token 共用，unique index 擋碰撞）找房間，username 對不上就 301 導向；內部 PK / FK 仍用 `BIGINT id`
     - **暫時做法（待改）**：前端先用 `?room={public_id}`，沒帶就進 `legacy00000`。原因：GitHub Pages 是純靜態 hosting，直接開 `/{username}/{public_id}` 這種深層路徑會 404（沒有 SPA fallback）。等有自訂網域 / 換 hosting，或用 `404.html` 轉址做 SPA fallback 時，改回上面的路徑格式
-    - 彈幕 API 改成 `POST` / `GET /rooms/{public_id}/messages`；舊的 `/messages` 標 deprecated、固定讀寫 legacy room，前端都換過去之後再拿掉
+    - ✅ 彈幕 API 改成 `POST` / `GET /rooms/{public_id}/messages`（2c17ac8），前端已換過去（91b3940）
+    - [ ] 移除已棄用的 `/messages`（route、handler、test）：目前固定讀寫 legacy room，暫時保留
     - **Known issue（暫時）**：WS 仍是全站一個 Redis channel，在房間 X 的觀眾會收到所有房間的彈幕 → W4b 即時部分（Pub/Sub channel 切法）修掉
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
   - 彈幕綁房間：`messages.room_id BIGINT NOT NULL REFERENCES rooms(id)`；舊彈幕歸進 legacy room（`public_id = 'legacy00000'`、名稱 `Legacy`，owner 是 migration 建的系統帳號 `admin`，`password_hash = '!'` 不能登入）。**部署前確認 prod 沒人註冊 `admin`**
   - 部署分兩次（expand / contract）：第一次 migration 加 `room_id` 時帶 `DEFAULT 1`，讓新舊版同時在線時舊版 INSERT 不會撞 NOT NULL；全部換成新版後，下一次部署再 `DROP DEFAULT`
+    - ✅ 000010（expand）、000011 `DROP DEFAULT`（contract，34ab09f）都已上線。退版注意：後端要退回 `2c17ac8` 之前的版本，得先手動跑 000011 的 down
   - 房間 soft delete（`deleted_at`）：已刪除的不算上限、連結回 404、所有讀取只走會過濾 `deleted_at IS NULL` 的共用 method。Known issue：可無限「建立 → 刪除」累積資料，靠 rate limit
     - 之後再做：房主看自己已刪除的房間要能分辨「已刪除」（例如之後的恢復功能），觀眾一律只看到 404
   - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
@@ -106,8 +108,8 @@
 - [ ] Authorization（RBAC）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
   - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
-  - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /messages`，WS 寫入一律回 error）
-- [ ] 彈幕內容過濾：`POST /messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理。`room_name` 同樣只 trim 頭尾，中間可以有換行 / 控制字元，一起處理
+  - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /rooms/{public_id}/messages`，WS 寫入一律回 error）
+- [ ] 彈幕內容過濾：`POST /rooms/{public_id}/messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理。`room_name` 同樣只 trim 頭尾，中間可以有換行 / 控制字元，一起處理
 - [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
 - [ ] Ban（封鎖使用者，含 shadow ban）
   - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
@@ -136,7 +138,7 @@
 - [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
 - [ ] Metrics path cardinality：`path` label 直接用 `r.URL.Path`，被亂掃 URL 時每個 path 都會產生新的時間序列；改用 route pattern（如 Go 1.23+ 的 `r.Pattern`，mux 路由後才有值）或把未知路徑歸成 `other`
 - [ ] Pagination
-  - `/messages` 加 `before=<id>`（往上捲載入更舊）/ `after=<id>`（重連補漏），store 跟著加方向參數：`WHERE id < $1 ORDER BY id DESC` / `WHERE id > $1 ORDER BY id ASC`
+  - `GET /rooms/{public_id}/messages` 加 `before=<id>`（往上捲載入更舊）/ `after=<id>`（重連補漏），store 跟著加方向參數：`WHERE id < $1 ORDER BY id DESC` / `WHERE id > $1 ORDER BY id ASC`
   - 「選哪 N 則」（store，ORDER BY + LIMIT）跟「回傳順序」（API 契約，handler）是兩件事，不要用一個 order 參數同時控制
   - 方向不能用 `$1` 傳（placeholder 只能放值），用 typed enum + switch 對應到寫死的 `ASC` / `DESC`
 - [ ] 密碼外洩檢查：register 時查 HIBP Pwned Passwords API（取代 / 補強 W4-3 embed 的常見密碼清單）
@@ -144,7 +146,6 @@
   - 要決定外部服務慢 / 掛掉時 fail open（放行）還是 fail closed（擋下），並加 timeout
   - 順帶評估 NFKC 正規化（`golang.org/x/text/unicode/norm`，新套件），避免同字不同編碼登不進去
 - [ ] API versioning
-- [ ] 統一 error response 格式
 - [ ] 評估引入 OpenTelemetry（W4 結束後決定）
   - metrics 改走 vendor-neutral API，backend 可替換
   - 評估 tracing 的 trace ID 是否取代 W4a 的 request ID
