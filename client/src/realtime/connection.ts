@@ -1,5 +1,5 @@
 // WS 連線管理（純 TS）。level-triggered：只要 WS 連著，它的身分就要和 session 目前狀態一致。
-import { WS_URL } from "../config";
+import { WS_URL, ROOM_MESSAGES_PATH } from "../config";
 import { apiFetch } from "../api/client";
 import * as session from "../auth/session";
 import { equalJitter } from "../lib/backoff";
@@ -79,11 +79,11 @@ function syncAuth() {
 
 async function fetchMessages() {
   try {
-    const res = await apiFetch("/messages");
+    const res = await apiFetch(ROOM_MESSAGES_PATH);
     const data: unknown = await res.json();
     if (Array.isArray(data)) messages.merge(data.filter(messages.isMessage));
   } catch (e) {
-    console.warn("fetch /messages failed", e);
+    console.warn(`fetch ${ROOM_MESSAGES_PATH} failed`, e);
   }
 }
 

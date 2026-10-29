@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ApiError, apiFetch } from "../api/client";
+import { ROOM_MESSAGES_PATH } from "../config";
 import { useSession } from "../hooks/useSession";
 import * as messages from "../realtime/messages";
 
@@ -24,7 +25,7 @@ export function Composer() {
     setError("");
     try {
       const res = await apiFetch(
-        "/messages",
+        ROOM_MESSAGES_PATH,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -39,6 +40,7 @@ export function Composer() {
     } catch (e) {
       if (e instanceof ApiError) {
         if (e.status === 401) setError("登入已過期，請重新登入");
+        else if (e.status === 404) setError("房間不存在");
         else if (e.status === 429)
           setError(
             e.retryAfter !== null

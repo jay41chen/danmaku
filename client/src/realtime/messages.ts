@@ -26,7 +26,7 @@ export function isMessage(v: unknown): v is Message {
   return typeof m.id === "number" && typeof m.content === "string";
 }
 
-// WS 廣播與 GET /messages 會重疊，所以一律走 merge 用 id 去重
+// WS 廣播與 GET /rooms/{public_id}/messages 會重疊，所以一律走 merge 用 id 去重
 export function merge(incoming: readonly Message[]) {
   if (incoming.length === 0) return;
   const byId = new Map<number, Message>();
