@@ -91,11 +91,16 @@
 - [ ] Room 概念（房間 + 房主）
   - 房間 = 長期存在的 channel（跟著擁有者，不是一次直播）；「一次直播」之後需要時再加 `streams` 子實體 + `messages.stream_id`（見 go-notes 3.28）
   - 網址 `/{username}/{public_id}`：只用 `public_id`（11 字元 base64url，`randx.URLText(8)` 產生，跟 refresh token 共用，unique index 擋碰撞）找房間，username 對不上就 301 導向；內部 PK / FK 仍用 `BIGINT id`
+    - **暫時做法（待改）**：前端先用 `?room={public_id}`，沒帶就進 `legacy00000`。原因：GitHub Pages 是純靜態 hosting，直接開 `/{username}/{public_id}` 這種深層路徑會 404（沒有 SPA fallback）。等有自訂網域 / 換 hosting，或用 `404.html` 轉址做 SPA fallback 時，改回上面的路徑格式
+    - 彈幕 API 改成 `POST` / `GET /rooms/{public_id}/messages`；舊的 `/messages` 標 deprecated、固定讀寫 legacy room，前端都換過去之後再拿掉
+    - **Known issue（暫時）**：WS 仍是全站一個 Redis channel，在房間 X 的觀眾會收到所有房間的彈幕 → W4b 即時部分（Pub/Sub channel 切法）修掉
+  - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
   - 彈幕綁房間：`messages.room_id BIGINT NOT NULL REFERENCES rooms(id)`；舊彈幕歸進 legacy room（`public_id = 'legacy00000'`、名稱 `Legacy`，owner 是 migration 建的系統帳號 `admin`，`password_hash = '!'` 不能登入）。**部署前確認 prod 沒人註冊 `admin`**
   - 部署分兩次（expand / contract）：第一次 migration 加 `room_id` 時帶 `DEFAULT 1`，讓新舊版同時在線時舊版 INSERT 不會撞 NOT NULL；全部換成新版後，下一次部署再 `DROP DEFAULT`
   - 房間 soft delete（`deleted_at`）：已刪除的不算上限、連結回 404、所有讀取只走會過濾 `deleted_at IS NULL` 的共用 method。Known issue：可無限「建立 → 刪除」累積資料，靠 rate limit
+    - 之後再做：房主看自己已刪除的房間要能分辨「已刪除」（例如之後的恢復功能），觀眾一律只看到 404
   - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
   - 房間人數（presence，設計已定案，見 go-notes 3.27）：每個房間一個 Redis Sorted Set `room:R:members`，member = `conn_id:user_id`（綁連線不綁 user；訪客用唯一值，不能留空），score = 最後續期時間。每台 server 每 10 秒用 pipeline 續期自己的連線 + 對 key 下 `EXPIRE 30`；正常斷線直接刪。算人數：先刪 score < now − 30s → 讀出 member 依 user_id 去重；每台各自每 5 秒算一次推給自己的觀眾，算不到就沿用上一次的數字
 - [ ] Authorization（RBAC）
@@ -147,6 +152,7 @@
 ## W6 — CI/CD + 進階穩定性
 
 - [ ] CI/CD（GitHub Actions）
+- [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
