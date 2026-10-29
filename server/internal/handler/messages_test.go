@@ -36,7 +36,8 @@ func TestHandleGetMessages(t *testing.T) {
 		// copy一份input並翻轉，這是我們期待的結果
 		expect := slices.Clone(input)
 		slices.Reverse(expect)
-		h := NewMessageHandler(&fakeDBStore{msgs: input}, &fakeRedis{}, &fakeRateLimiter{})
+		db := &fakeDBStore{msgs: input, room: model.Room{ID: 1, PublicID: store.LegacyRoomPublicID}}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 		req := httptest.NewRequest(http.MethodGet, "/messages", nil)
 		rec := httptest.NewRecorder()
 
@@ -44,6 +45,10 @@ func TestHandleGetMessages(t *testing.T) {
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		// 已棄用的 /messages 固定走 legacy 房間
+		if db.gotRoomPublic != store.LegacyRoomPublicID || db.gotQueryRoomID != 1 {
+			t.Errorf("got room (%q, %d), want (%q, 1)", db.gotRoomPublic, db.gotQueryRoomID, store.LegacyRoomPublicID)
 		}
 
 		var got []model.Message
@@ -88,6 +93,20 @@ func TestHandleGetMessages(t *testing.T) {
 // RequireAuth 還是 stub 時會 panic：recover 成 test 失敗，不然整個 package 的 test 都會被中斷
 func serveCreateMessage(t *testing.T, h *MessageHandler, userID int64, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body))
+	return serveAuthed(t, http.HandlerFunc(h.HandleCreateMessage), userID, req)
+}
+
+// 同上，但打 POST /rooms/{public_id}/messages
+func serveCreateRoomMessage(t *testing.T, h *MessageHandler, userID int64, publicID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/rooms/"+publicID+"/messages", strings.NewReader(body))
+	req.SetPathValue("public_id", publicID)
+	return serveAuthed(t, http.HandlerFunc(h.HandleCreateRoomMessage), userID, req)
+}
+
+func serveAuthed(t *testing.T, handler http.Handler, userID int64, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("RequireAuth panicked (not implemented yet?): %v", r)
@@ -97,8 +116,7 @@ func serveCreateMessage(t *testing.T, h *MessageHandler, userID int64, body stri
 	if err != nil {
 		panic(err)
 	}
-	wrapped := middleware.RequireAuth(testTokens)(http.HandlerFunc(h.HandleCreateMessage))
-	req := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body))
+	wrapped := middleware.RequireAuth(testTokens)(handler)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	wrapped.ServeHTTP(rec, req)
@@ -127,6 +145,9 @@ func TestHandleCreateMessage(t *testing.T) {
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+		if db.gotMsgRoomPublic != store.LegacyRoomPublicID {
+			t.Errorf("CreateMessage room = %q, want legacy %q", db.gotMsgRoomPublic, store.LegacyRoomPublicID)
 		}
 		if db.gotMsgUserID != userID || db.gotMsgContent != "哈哈" {
 			t.Errorf("CreateMessage got (%d, %q), want (%d, %q)", db.gotMsgUserID, db.gotMsgContent, userID, "哈哈")
@@ -278,6 +299,113 @@ func TestHandleCreateMessage(t *testing.T) {
 		}
 		if db.createMsgCalled {
 			t.Error("saved without a user id")
+		}
+	})
+}
+
+func TestHandleGetRoomMessages(t *testing.T) {
+	serve := func(h *MessageHandler, publicID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/rooms/"+publicID+"/messages", nil)
+		req.SetPathValue("public_id", publicID)
+		rec := httptest.NewRecorder()
+		h.HandleGetRoomMessages(rec, req)
+		return rec
+	}
+
+	t.Run("uses path public id and room id", func(t *testing.T) {
+		db := &fakeDBStore{
+			room: model.Room{ID: 9, PublicID: "abc"},
+			msgs: []model.Message{{ID: 2, Content: "b"}, {ID: 1, Content: "a"}},
+		}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serve(h, "abc")
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if db.gotRoomPublic != "abc" || db.gotQueryRoomID != 9 {
+			t.Errorf("got room (%q, %d), want (abc, 9)", db.gotRoomPublic, db.gotQueryRoomID)
+		}
+		var got []model.Message
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+			t.Errorf("got %+v, want oldest first [1 2]", got)
+		}
+	})
+	t.Run("room not found returns 404", func(t *testing.T) {
+		db := &fakeDBStore{getRoomErr: store.ErrRoomNotFound}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serve(h, "nope")
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+		// 查不到房間就不該再查訊息
+		if db.queryMsgCalled {
+			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
+		}
+	})
+	t.Run("other room lookup error returns 500", func(t *testing.T) {
+		db := &fakeDBStore{getRoomErr: errors.New("db down")}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serve(h, "abc")
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+		// 查房間失敗就不該再查訊息
+		if db.queryMsgCalled {
+			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
+		}
+	})
+	// 空房間：非 nil 的空 slice 會編成 []；不是 null（client 不用特別處理）
+	t.Run("empty room returns empty array", func(t *testing.T) {
+		db := &fakeDBStore{room: model.Room{ID: 9}, msgs: []model.Message{}}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serve(h, "abc")
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+			t.Errorf("body = %q, want []", got)
+		}
+	})
+}
+
+func TestHandleCreateRoomMessage(t *testing.T) {
+	const userID = int64(7)
+
+	t.Run("success passes path public id and returns 201", func(t *testing.T) {
+		db := &fakeDBStore{createdMsg: model.Message{ID: 42, Content: "hi"}}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serveCreateRoomMessage(t, h, userID, "abc", contentBody("hi"))
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+		if db.gotMsgRoomPublic != "abc" || db.gotMsgUserID != userID {
+			t.Errorf("CreateMessage got (%q, %d), want (abc, %d)", db.gotMsgRoomPublic, db.gotMsgUserID, userID)
+		}
+	})
+	t.Run("room not found returns 404 and does not publish", func(t *testing.T) {
+		redis := &fakeRedis{}
+		h := NewMessageHandler(&fakeDBStore{createMsgErr: store.ErrRoomNotFound}, redis, &fakeRateLimiter{})
+
+		rec := serveCreateRoomMessage(t, h, userID, "nope", contentBody("hi"))
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+		if len(redis.published) != 0 {
+			t.Error("published despite failed save")
 		}
 	})
 }

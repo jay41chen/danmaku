@@ -21,8 +21,8 @@ var (
 )
 
 type DBStoreInterface interface {
-	CreateMessage(ctx context.Context, userID int64, content string) (model.Message, error)
-	QueryMessage(ctx context.Context, limit int) ([]model.Message, error)
+	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error)
+	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)
 	CheckHealth(ctx context.Context) error
 
 	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
@@ -59,34 +59,49 @@ func (this *DBStore) CheckHealth(ctx context.Context) error {
 }
 
 // 存訊息並回傳完整的 Message（含 id、username、created_at），handler 直接拿去廣播 / 回給 client
-func (this *DBStore) CreateMessage(ctx context.Context, userID int64, content string) (model.Message, error) {
+// 房間用 public_id 指定：「房間存在且未刪除」和 INSERT 合成同一句 statement（INSERT ... SELECT FROM rooms）
+func (this *DBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
 	var msg model.Message
 	// 一個 statement 同時 INSERT 和 JOIN users 取 username，不用兩次來回
 	err := this.dbPool.QueryRow(ctx,
-		// TODO(user): CTE — WITH m AS (INSERT ... RETURNING ...) SELECT ... JOIN users，欄位順序要對上 Scan：m.id, m.user_id, u.username, m.content, m.created_at
 		`
 			WITH m AS (
-				INSERT INTO messages(user_id, content)
-				VALUES ($1, $2)
+				INSERT INTO messages(room_id, user_id, content)
+				SELECT id, $2, $3 FROM rooms WHERE public_id = $1 AND deleted_at IS NULL
 				RETURNING id, user_id, content, created_at
 			)
 			SELECT m.id, m.user_id, u.username, m.content, m.created_at
 			FROM m
 			JOIN users u ON m.user_id = u.id
-		`, userID, content,
+		`, roomPublicID, userID, content,
 	).Scan(&msg.ID, &msg.UserID, &msg.Username, &msg.Content, &msg.CreatedAt)
 	if err != nil {
+		// 同 insertRoom 的手法：房間不存在或已 soft delete → SELECT 回 0 列 → 插入 0 列 → RETURNING 也是空 → ErrNoRows
+		// 檢查跟插入在同一句裡，「查房間」和「插入」之間沒有空隙，而且省一次來回（熱門房間約 50 msgs/s）
+		// user 不存在時 FK 會先失敗（23503），到不了 JOIN，所以這裡的 ErrNoRows 只可能是房間不存在
+		// 房間跟 user 都不存在時回 ErrRoomNotFound：插入 0 列，根本不會觸發 FK 檢查（handler 會回 404 而不是 401）
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Message{}, ErrRoomNotFound
+		}
 		var pgErr *pgconn.PgError
 		// 23503 = foreign_key_violation：user_id 指向的 user 不存在（已被刪除）
+		// messages 現在有兩個 FK（user_id、room_id），但這裡的 23503 只可能是 user 那個：
+		// room_id 來自 SELECT（那一刻列一定存在）、房間只做 soft delete、ON DELETE RESTRICT 也擋住「刪有訊息的房間」
+		// 之後若加了 hard delete，要用 pgErr.ConstraintName 區分
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 			return model.Message{}, ErrMessageUserNotFound
 		}
 		return model.Message{}, err
 	}
+	// 已接受的 race：Read Committed 下，若 owner 的 soft delete 在這句 statement 的 snapshot 之後才 commit，
+	// 訊息仍會寫進剛被刪除的房間。可以接受，因為已刪除的房間不會再被讀取；
+	// 要避免就得每則訊息都加鎖或提高 isolation level，不划算
 	return msg, nil
 }
 
-func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
+// roomID 是房間的內部 id：handler 先用 GetRoomByPublicID 換到 id（同時負責回 404），這裡不再檢查房間狀態
+// 索引 (room_id, id) 讓 WHERE room_id ... ORDER BY id DESC LIMIT 直接走索引
+func (this *DBStore) QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error) {
 	// LEFT JOIN：舊資料和發送者已被刪除的訊息 user_id 是 NULL，INNER JOIN 會把這些列整個丟掉
 	// 所以 Message.Username / UserID 是指標：NULL 掃不進 string / int64，只能掃進 *string / *int64
 	rows, err := this.dbPool.Query(ctx,
@@ -94,9 +109,10 @@ func (this *DBStore) QueryMessage(ctx context.Context, limit int) ([]model.Messa
 			SELECT m.id, m.user_id, u.username, m.content, m.created_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
+			WHERE m.room_id = $1
 			ORDER BY m.id DESC
-			LIMIT $1
-		`, limit)
+			LIMIT $2
+		`, roomID, limit)
 	if err != nil {
 		return nil, err
 	}

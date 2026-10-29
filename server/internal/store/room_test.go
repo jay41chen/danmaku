@@ -216,7 +216,7 @@ func TestRoomsMigration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("setup CreateUser error = %v", err)
 		}
-		msg, err := s.CreateMessage(t.Context(), userID, "hi")
+		msg, err := s.CreateMessage(t.Context(), LegacyRoomPublicID, userID, "hi")
 		if err != nil {
 			t.Fatalf("setup CreateMessage error = %v", err)
 		}

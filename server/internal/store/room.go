@@ -21,6 +21,9 @@ var (
 )
 
 const (
+	// migration 000010 建的房間，裝房間功能之前的舊訊息；已棄用的 /messages endpoints 讀寫的就是它
+	LegacyRoomPublicID = "legacy00000"
+
 	// 每個 user 最多同時擁有的（未刪除）房間數
 	maxRoomsPerUser = 3
 	// public_id 用幾個隨機 bytes 產生（8 bytes 編成 base64url 是 11 字元）

@@ -45,15 +45,39 @@ func NewMessageHandler(db store.DBStoreInterface, redis store.RedisStoreInterfac
 	}
 }
 
-// POST /messages 的 request body
+// POST /rooms/{public_id}/messages（與已棄用的 POST /messages）的 request body
 type createMessageRequest struct {
 	Content string `json:"content"`
 }
 
+// 公開：讀歷史訊息不用登入，知道 public_id 的人都能讀
+func (this *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) {
+	this.getMessages(w, r, r.PathValue("public_id"))
+}
+
+// Deprecated: 固定讀 legacy 房間；前端改用 GET /rooms/{public_id}/messages 之後移除
 func (this *MessageHandler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
+	this.getMessages(w, r, store.LegacyRoomPublicID)
+}
+
+// GET 分兩步：先用 public id 查房間拿內部 id，再查訊息（POST 則是 CreateMessage 內一次做完）
+// 因為這個 API 每次進房才打一次；兩步之間房間剛好被刪的 race，
+// 只會多回一次剛刪房間的歷史訊息，無害
+func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, roomPublicID string) {
 	httpx.SetContentType(w)
 
-	msgs, err := this.db.QueryMessage(r.Context(), 50)
+	room, err := this.db.GetRoomByPublicID(r.Context(), roomPublicID)
+	if errors.Is(err, store.ErrRoomNotFound) {
+		// 已刪除的房間也回 404（跟 HandleGetRoom 一樣）
+		http.Error(w, "room not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "get room failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	msgs, err := this.db.QueryMessage(r.Context(), room.ID, 50)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "query messages failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -65,14 +89,24 @@ func (this *MessageHandler) HandleGetMessages(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(msgs)
 }
 
+// 要登入（RequireAuth）；訊息存進 path 指定的房間
+func (this *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *http.Request) {
+	this.createMessage(w, r, r.PathValue("public_id"))
+}
+
+// Deprecated: 固定發到 legacy 房間；前端改用 POST /rooms/{public_id}/messages 之後移除
+func (this *MessageHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request) {
+	this.createMessage(w, r, store.LegacyRoomPublicID)
+}
+
 // flow:
 // 取 user id（RequireAuth 放的）
 // 檢查 body
 // 限流
-// 存 DB
+// 存 DB（房間不存在 → 404、user 不存在 → 401）
 // 發到 Redis 廣播
 // 回 201
-func (this *MessageHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request) {
+func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request, roomPublicID string) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
 		// 走到這裡是 server 設定錯誤、不是 client 的錯：這個 route 忘了用 post 註冊（誤用 publicPost）
@@ -104,7 +138,12 @@ func (this *MessageHandler) HandleCreateMessage(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	msg, err := this.db.CreateMessage(r.Context(), userID, req.Content)
+	msg, err := this.db.CreateMessage(r.Context(), roomPublicID, userID, req.Content)
+	if errors.Is(err, store.ErrRoomNotFound) {
+		// 房間不存在或已刪除（兩者都不讓外人分辨）
+		http.Error(w, "room not found", http.StatusNotFound)
+		return
+	}
 	if errors.Is(err, store.ErrMessageUserNotFound) {
 		// user 已刪除但 access token 還沒過期：回跟 RequireAuth 一模一樣的 401
 		// client 會去 /refresh → refresh token 已經被 CASCADE 刪掉 → 401 → 跳登入

@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+// migration 000010 建的 legacy room（public_id = LegacyRoomPublicID）固定是 id 1，newTestDBStore 清資料時也會保留它
+const legacyRoomID int64 = 1
+
 // 需要真的 Postgres：沒設 TEST_DATABASE_URL 就 skip（見 newTestDBStore）
 func TestCreateUser(t *testing.T) {
 	t.Run("new username returns id", func(t *testing.T) {
@@ -150,7 +153,7 @@ func TestQueryMessage(t *testing.T) {
 				}
 			}
 
-			msgs, err := s.QueryMessage(t.Context(), tc.limit)
+			msgs, err := s.QueryMessage(t.Context(), legacyRoomID, tc.limit)
 
 			if err != nil {
 				t.Fatalf("QueryMessage(%d) error = %v, want nil", tc.limit, err)
@@ -176,7 +179,7 @@ func TestCreateMessage(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "Jay")
 
-		msg, err := s.CreateMessage(t.Context(), userID, "哈哈")
+		msg, err := s.CreateMessage(t.Context(), LegacyRoomPublicID, userID, "哈哈")
 
 		if err != nil {
 			t.Fatalf("CreateMessage error = %v, want nil", err)
@@ -203,17 +206,161 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("nonexistent user returns ErrMessageUserNotFound and inserts nothing", func(t *testing.T) {
 		s := newTestDBStore(t)
 
-		_, err := s.CreateMessage(t.Context(), 999999, "hi")
+		_, err := s.CreateMessage(t.Context(), LegacyRoomPublicID, 999999, "hi")
 
 		if !errors.Is(err, ErrMessageUserNotFound) {
 			t.Fatalf("CreateMessage error = %v, want ErrMessageUserNotFound", err)
 		}
-		var count int
-		if err := s.dbPool.QueryRow(t.Context(), "SELECT count(*) FROM messages").Scan(&count); err != nil {
-			t.Fatalf("count messages: %v", err)
+		if n := countMessages(t, s); n != 0 {
+			t.Errorf("messages count = %d, want 0", n)
 		}
-		if count != 0 {
-			t.Errorf("messages count = %d, want 0", count)
+	})
+}
+
+func countMessages(t *testing.T, s *DBStore) int {
+	t.Helper()
+	var count int
+	if err := s.dbPool.QueryRow(t.Context(), "SELECT count(*) FROM messages").Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	return count
+}
+
+func TestCreateMessageRooms(t *testing.T) {
+	t.Run("message lands in the given room", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		room, err := s.CreateRoom(t.Context(), userID, "r")
+		if err != nil {
+			t.Fatalf("setup CreateRoom: %v", err)
+		}
+
+		msg, err := s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
+
+		if err != nil {
+			t.Fatalf("CreateMessage error = %v, want nil", err)
+		}
+		var roomID int64
+		if err := s.dbPool.QueryRow(t.Context(), "SELECT room_id FROM messages WHERE id = $1", msg.ID).Scan(&roomID); err != nil {
+			t.Fatalf("query room_id: %v", err)
+		}
+		if roomID != room.ID {
+			t.Errorf("room_id = %d, want %d", roomID, room.ID)
+		}
+	})
+
+	t.Run("nonexistent room returns ErrRoomNotFound and inserts nothing", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+
+		_, err := s.CreateMessage(t.Context(), "nope0000000", userID, "hi")
+
+		if !errors.Is(err, ErrRoomNotFound) {
+			t.Fatalf("CreateMessage error = %v, want ErrRoomNotFound", err)
+		}
+		if n := countMessages(t, s); n != 0 {
+			t.Errorf("messages count = %d, want 0", n)
+		}
+	})
+
+	// room 跟 user 都不存在：插入 0 列、FK 不會被檢查 → 房間優先（handler 回 404 不是 401）
+	t.Run("nonexistent room and user returns ErrRoomNotFound", func(t *testing.T) {
+		s := newTestDBStore(t)
+
+		_, err := s.CreateMessage(t.Context(), "nope0000000", 999999, "hi")
+
+		if !errors.Is(err, ErrRoomNotFound) {
+			t.Fatalf("CreateMessage error = %v, want ErrRoomNotFound", err)
+		}
+	})
+
+	t.Run("soft-deleted room returns ErrRoomNotFound", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		room, err := s.CreateRoom(t.Context(), userID, "r")
+		if err != nil {
+			t.Fatalf("setup CreateRoom: %v", err)
+		}
+		if _, err := s.dbPool.Exec(t.Context(), "UPDATE rooms SET deleted_at = now() WHERE id = $1", room.ID); err != nil {
+			t.Fatalf("soft delete room: %v", err)
+		}
+
+		_, err = s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
+
+		if !errors.Is(err, ErrRoomNotFound) {
+			t.Fatalf("CreateMessage error = %v, want ErrRoomNotFound", err)
+		}
+		if n := countMessages(t, s); n != 0 {
+			t.Errorf("messages count = %d, want 0", n)
+		}
+	})
+
+	t.Run("nonexistent user in existing room still returns ErrMessageUserNotFound", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		room, err := s.CreateRoom(t.Context(), userID, "r")
+		if err != nil {
+			t.Fatalf("setup CreateRoom: %v", err)
+		}
+
+		_, err = s.CreateMessage(t.Context(), room.PublicID, 999999, "hi")
+
+		if !errors.Is(err, ErrMessageUserNotFound) {
+			t.Fatalf("CreateMessage error = %v, want ErrMessageUserNotFound", err)
+		}
+	})
+}
+
+func TestQueryMessageRooms(t *testing.T) {
+	t.Run("only returns messages of the given room", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		roomA, err := s.CreateRoom(t.Context(), userID, "a")
+		if err != nil {
+			t.Fatalf("setup CreateRoom a: %v", err)
+		}
+		roomB, err := s.CreateRoom(t.Context(), userID, "b")
+		if err != nil {
+			t.Fatalf("setup CreateRoom b: %v", err)
+		}
+		for _, c := range []struct {
+			room    string
+			content string
+		}{{roomA.PublicID, "a1"}, {roomB.PublicID, "b1"}, {roomA.PublicID, "a2"}} {
+			if _, err := s.CreateMessage(t.Context(), c.room, userID, c.content); err != nil {
+				t.Fatalf("setup CreateMessage %q: %v", c.content, err)
+			}
+		}
+
+		msgs, err := s.QueryMessage(t.Context(), roomA.ID, 50)
+
+		if err != nil {
+			t.Fatalf("QueryMessage error = %v", err)
+		}
+		got := []string{}
+		for _, m := range msgs {
+			got = append(got, m.Content)
+		}
+		if !slices.Equal(got, []string{"a2", "a1"}) {
+			t.Errorf("contents = %q, want [a2 a1]", got)
+		}
+	})
+
+	t.Run("room without messages returns empty non-nil slice", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		room, err := s.CreateRoom(t.Context(), userID, "empty")
+		if err != nil {
+			t.Fatalf("setup CreateRoom: %v", err)
+		}
+
+		msgs, err := s.QueryMessage(t.Context(), room.ID, 50)
+
+		if err != nil {
+			t.Fatalf("QueryMessage error = %v", err)
+		}
+		if msgs == nil || len(msgs) != 0 {
+			t.Errorf("msgs = %#v, want empty non-nil slice", msgs)
 		}
 	})
 }
@@ -226,7 +373,7 @@ func TestQueryMessageUserColumns(t *testing.T) {
 			t.Fatalf("setup insert: %v", err)
 		}
 
-		msgs, err := s.QueryMessage(t.Context(), 50)
+		msgs, err := s.QueryMessage(t.Context(), legacyRoomID, 50)
 
 		if err != nil {
 			t.Fatalf("QueryMessage error = %v", err)
@@ -251,7 +398,7 @@ func TestQueryMessageUserColumns(t *testing.T) {
 			t.Fatalf("delete user: %v", err)
 		}
 
-		msgs, err := s.QueryMessage(t.Context(), 50)
+		msgs, err := s.QueryMessage(t.Context(), legacyRoomID, 50)
 
 		if err != nil {
 			t.Fatalf("QueryMessage error = %v", err)
@@ -272,7 +419,7 @@ func TestQueryMessageUserColumns(t *testing.T) {
 			t.Fatalf("setup insert: %v", err)
 		}
 
-		msgs, err := s.QueryMessage(t.Context(), 50)
+		msgs, err := s.QueryMessage(t.Context(), legacyRoomID, 50)
 
 		if err != nil {
 			t.Fatalf("QueryMessage error = %v", err)

@@ -18,11 +18,14 @@ type fakeDBStore struct {
 	err                    error
 
 	// CreateMessage 用
-	createdMsg      model.Message
-	createMsgErr    error
-	gotMsgUserID    int64 // spy：CreateMessage 收到的 user id
-	gotMsgContent   string
-	createMsgCalled bool
+	createdMsg       model.Message
+	createMsgErr     error
+	gotMsgUserID     int64 // spy：CreateMessage 收到的 user id
+	gotMsgContent    string
+	gotMsgRoomPublic string // spy：CreateMessage 收到的 room public id
+	gotQueryRoomID   int64  // spy：QueryMessage 收到的 room id
+	queryMsgCalled   bool   // spy：QueryMessage 有沒有被呼叫（不能用 gotQueryRoomID == 0 判斷：零值 room 也會傳 0）
+	createMsgCalled  bool
 
 	// CreateUser 用
 	createID    int64
@@ -63,13 +66,15 @@ type fakeDBStore struct {
 	gotRoomPublic string // spy：GetRoomByPublicID 收到的 public id
 }
 
-func (f *fakeDBStore) QueryMessage(ctx context.Context, limit int) ([]model.Message, error) {
+func (f *fakeDBStore) QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error) {
+	f.queryMsgCalled = true
+	f.gotQueryRoomID = roomID
 	return f.msgs, f.err
 }
 
-func (f *fakeDBStore) CreateMessage(ctx context.Context, userID int64, content string) (model.Message, error) {
+func (f *fakeDBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
 	f.createMsgCalled = true
-	f.gotMsgUserID, f.gotMsgContent = userID, content
+	f.gotMsgRoomPublic, f.gotMsgUserID, f.gotMsgContent = roomPublicID, userID, content
 	return f.createdMsg, f.createMsgErr
 }
 

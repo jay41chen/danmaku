@@ -55,6 +55,7 @@ func TestRoutes(t *testing.T) {
 			{http.MethodPost, "/healthcheck"},
 			{http.MethodPost, "/ws"},
 			{http.MethodPut, "/messages"},
+			{http.MethodPut, "/rooms/abc/messages"},
 		}
 		for _, tc := range cases {
 			req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -107,6 +108,21 @@ func TestRoutes(t *testing.T) {
 
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("POST /messages status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+	})
+	t.Run("POST /rooms/{id}/messages without token returns 401", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("RequireAuth panicked (not implemented yet?): %v", r)
+			}
+		}()
+		req := httptest.NewRequest(http.MethodPost, "/rooms/abc/messages", nil)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("POST /rooms/abc/messages status = %d, want %d", rec.Code, http.StatusUnauthorized)
 		}
 	})
 	// POST /rooms 同樣要登入：handler 自己的 test 只能測「拿到 user id 之後怎麼處理」，

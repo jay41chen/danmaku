@@ -148,6 +148,9 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	r := &routes{mux: mux, auth: middleware.RequireAuth(tokens)}
 
 	// 同一個 path 的 GET 是公開的、POST 要登入：讀歷史訊息不用登入，發訊息要
+	r.publicGet("/rooms/{public_id}/messages", http.HandlerFunc(h.messages.HandleGetRoomMessages))
+	r.post("/rooms/{public_id}/messages", http.HandlerFunc(h.messages.HandleCreateRoomMessage))
+	// 已棄用：固定讀寫 legacy 房間，前端改用上面的 /rooms/{public_id}/messages 之後移除
 	r.publicGet("/messages", http.HandlerFunc(h.messages.HandleGetMessages))
 	r.post("/messages", http.HandlerFunc(h.messages.HandleCreateMessage))
 
@@ -156,7 +159,7 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 
 	r.publicGet("/healthcheck", http.HandlerFunc(h.health.HandleHealthCheck))
 	// 公開 route：任何人都能連（匿名）；連上後可以在連線內送 auth frame 升級成登入身分（選擇性）
-	// WS 不接受寫入（發訊息走 POST /messages），auth 失敗也不會斷線
+	// WS 不接受寫入（發訊息走 POST /rooms/{public_id}/messages），auth 失敗也不會斷線
 	r.publicGet("/ws", http.HandlerFunc(h.ws.HandleWebsocket))
 	// 如果要custom registry再換
 	r.publicGet("/metrics", promhttp.Handler())
