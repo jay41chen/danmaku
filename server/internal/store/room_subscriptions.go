@@ -29,6 +29,11 @@ type roomSubscription struct {
 	// 每次啟動新的 timer 就 +1；timer 觸發時比對自己出生時的 gen，不一樣就代表自己已經過期
 	// （跟搜尋框 debounce 比對 request id 一樣：晚到的舊 callback 直接丟掉）
 	gen uint64
+	// 「Redis 已經確認訂閱好了」的訊號：只用 close，不送值（close 一次就能叫醒所有在等的人，之後來讀的也立刻過）
+	//   - 建立：addViewer 建 entry 時一起 make（mu 底下）
+	//   - close：只有 confirmSubscribed（consumer 收到確認時，mu 底下）
+	//   - 等：Join 在鎖外 <-ready
+	ready chan struct{}
 }
 
 // 這台 server 上每個房間有幾條 WS 連線，決定要不要對 Redis SUBSCRIBE / UNSUBSCRIBE（lazy subscribe）
@@ -67,22 +72,50 @@ func newRoomSubscriptions(
 	}
 }
 
-// 一條連線進入 roomID
-// 回傳 error = SUBSCRIBE 失敗，狀態已退回（沒有建立 entry），呼叫端回 ws_join_unavailable
+// 一條連線進入 roomID，回傳時 Redis 已經確認訂閱好了（join_ok 之後補撈歷史才補得到洞）
+// 回傳 error = SUBSCRIBE 失敗或等確認 timeout，狀態已退回，呼叫端回 ws_join_unavailable
+// 「退回」分兩種：
+//   - addViewer 失敗：還沒加到人，addViewer 自己清掉 entry
+//   - 等確認 timeout：人已經加了，用 Leave 退（最後一個人的話走正常的 debounce，30 秒後 expire 清掉）
 func (this *roomSubscriptions) Join(ctx context.Context, roomID string) error {
+	// 鎖底下：改 viewers、必要時寫出 SUBSCRIBE，拿到這間房的 ready
+	ready, err := this.addViewer(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	// select會等待所有列出的case，但其中一個channel case好了就可以往下走
+	// 不能在鎖底下等：mu 整台 server 共用一把，等確認的這段時間所有房間的 Join / Leave 都會排隊
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		// ctx 到期（ws.go 給的 200ms）或被取消，確認還沒回來：當作沒進房，把 addViewer 加的人退掉
+		// 確認之後才到也沒關係：confirmSubscribed 照樣 close ready，下一個進房的人就不用等
+		this.Leave(ctx, roomID)
+		return ctx.Err()
+	}
+}
+
+// Join 在鎖底下的那一半（原本 Join 的內容）；回傳這間房的 ready 給 Join 在鎖外等
+func (this *roomSubscriptions) addViewer(ctx context.Context, roomID string) (<-chan struct{}, error) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 	entry := this.rooms[roomID]
 	if entry == nil {
+		// 先 subscribe、成功才放進 map 也不會漏掉確認：確認就算馬上回來，consumer 的 confirmSubscribed
+		// 也要先拿 mu 才查得到 map，會等到這裡放鎖，那時 entry 已經在 map 裡
+		// subscribe 失敗時 map 裡本來就沒有它，不用另外清
+		newEntry := &roomSubscription{viewers: 1, ready: make(chan struct{})}
 		// 找不到這個room，建立subscription
 		if err := this.subscribe(ctx, roomID); err != nil {
 			if uerr := this.unsubscribe(ctx, roomID); uerr != nil {
 				this.logger.WarnContext(ctx, "unsubscribe after failed subscribe failed", "room", roomID, "error", uerr)
 			}
-			return err
+			return nil, err
 		}
-		// 成功subscribe，加到map內
-		this.rooms[roomID] = &roomSubscription{viewers: 1}
+		this.rooms[roomID] = newEntry
+		// 讓最後的 return entry.ready 三個分支都能用（改 map 不會改到上面抄出來的 entry 變數）
+		entry = newEntry
 	} else if entry.viewers == 0 {
 		// 沒有viewer => 代表有timer正在等著unsubscribe
 		// Stop + 設 nil 只是省掉一次白跑（timer 觸發 → 搶鎖 → 放棄），不是正確性的來源：
@@ -95,7 +128,28 @@ func (this *roomSubscriptions) Join(ctx context.Context, roomID string) error {
 		// 單純加上去就好
 		entry.viewers += 1
 	}
-	return nil
+	return entry.ready, nil
+}
+
+// consumer 收到 Redis 對 SUBSCRIBE roomID 的確認時呼叫
+// 同一間房可能被呼叫多次：go-redis 斷線重連後會自動重新 SUBSCRIBE 所有記住的 channel，每個都會再回一次確認
+func (this *roomSubscriptions) confirmSubscribed(roomID string) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	entry := this.rooms[roomID]
+	if entry == nil {
+		// 確認晚到，entry 已經不在了（例如等確認 timeout → Leave → 30 秒後 expire 刪掉）：沒人在等，忽略
+		return
+	}
+	// close 已經 close 過的 channel 會 panic，所以先非阻塞讀一次看是不是 close 過了
+	// 讀完到 close 之間不會有人插進來：只有這裡會 close ready，而且握著 mu
+	select {
+	case <-entry.ready:
+		// 讀得到 = 早就 close 過了（重連後的重複確認），不用再做事
+	default:
+		// 讀不到 = 還沒 close：把正在等的 Join（第一個進房的人和之後進來的人）全部叫醒
+		close(entry.ready)
+	}
 }
 
 // 一條連線離開 roomID。不做 I/O：最後一個人離開只啟動 timer，真正的 UNSUBSCRIBE 在 expire

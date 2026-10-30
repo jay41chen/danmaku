@@ -10,15 +10,22 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // 假的 SUBSCRIBE / UNSUBSCRIBE：依序記下收到的 roomID，例如 []string{"sub a", "unsub a"}
 // failSub / failUnsub = true 時回 error（但一樣記下呼叫）
+// SUBSCRIBE 成功時預設「確認馬上回來」：另開 goroutine 呼叫 confirm（= consumer 收到 *redis.Subscription）
+//   - 不能直接呼叫：subscribe 是在 roomSubscriptions.mu 底下被呼叫的，confirmSubscribed 也要拿 mu，Go 的 mutex 不能重入 → 卡死
+//   - manualConfirm = true：不自動確認，test 自己呼叫 subs.confirmSubscribed 決定確認什麼時候到（或永遠不到）
 type fakePubSub struct {
-	mu        sync.Mutex // 併發 test 用；正常情況 roomSubscriptions 已經在鎖內呼叫，多一把是保險
-	calls     []string
-	failSub   bool
-	failUnsub bool
+	mu            sync.Mutex // 併發 test 用；正常情況 roomSubscriptions 已經在鎖內呼叫，多一把是保險
+	calls         []string
+	failSub       bool
+	failUnsub     bool
+	manualConfirm bool
+	confirm       func(roomID string) // newTestRoomSubscriptions 接上 subs.confirmSubscribed
 }
 
 var (
@@ -32,6 +39,9 @@ func (this *fakePubSub) subscribe(ctx context.Context, roomID string) error {
 	this.calls = append(this.calls, "sub "+roomID)
 	if this.failSub {
 		return errFakeSubscribe
+	}
+	if !this.manualConfirm {
+		go this.confirm(roomID)
 	}
 	return nil
 }
@@ -102,8 +112,18 @@ func (this *fakeClock) fireAll() {
 	}
 }
 
+// 所有 Join 都要帶上限：Join 會等 SUBSCRIBE 確認，確認沒來（bug）時用 Background 會卡到 go test 的 10 分鐘 timeout，
+// 帶上限的話 1 秒內就 fail 在出事的那一行
+func testCtx(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func newTestRoomSubscriptions(fake *fakePubSub, clock *fakeClock) *roomSubscriptions {
-	return newRoomSubscriptions(fake.subscribe, fake.unsubscribe, clock.afterFunc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	subs := newRoomSubscriptions(fake.subscribe, fake.unsubscribe, clock.afterFunc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	fake.confirm = subs.confirmSubscribed
+	return subs
 }
 
 // 每間房目前的 viewers（含 viewers = 0、還在等 timer 的 entry），方便跟 map 字面值比對
@@ -197,7 +217,7 @@ func TestRoomSubscriptionsJoinLeave(t *testing.T) {
 			fake := &fakePubSub{}
 			clock := &fakeClock{}
 			subs := newTestRoomSubscriptions(fake, clock)
-			ctx := context.Background()
+			ctx := testCtx(t)
 
 			for _, s := range tc.steps {
 				switch s.op {
@@ -230,7 +250,7 @@ func TestRoomSubscriptionsTimerFiresWhileRejoining(t *testing.T) {
 	fake := &fakePubSub{}
 	clock := &fakeClock{}
 	subs := newTestRoomSubscriptions(fake, clock)
-	ctx := context.Background()
+	ctx := testCtx(t)
 
 	mustJoin(t, subs, "a") // X
 	subs.Leave(ctx, "a")   // X 離開 → timer₁
@@ -253,7 +273,7 @@ func TestRoomSubscriptionsStaleTimerDoesNotUnsubscribeEarly(t *testing.T) {
 	fake := &fakePubSub{}
 	clock := &fakeClock{}
 	subs := newTestRoomSubscriptions(fake, clock)
-	ctx := context.Background()
+	ctx := testCtx(t)
 
 	mustJoin(t, subs, "a") // X
 	subs.Leave(ctx, "a")   // X 離開 → timer₁
@@ -287,7 +307,7 @@ func TestRoomSubscriptionsStaleTimerDoesNotUnsubscribeEarly(t *testing.T) {
 func TestRoomSubscriptionsJoinSubscribeFails(t *testing.T) {
 	fake := &fakePubSub{failSub: true}
 	subs := newTestRoomSubscriptions(fake, &fakeClock{})
-	ctx := context.Background()
+	ctx := testCtx(t)
 
 	err := subs.Join(ctx, "a")
 
@@ -318,7 +338,7 @@ func TestRoomSubscriptionsExpireUnsubscribeFails(t *testing.T) {
 	fake := &fakePubSub{}
 	clock := &fakeClock{}
 	subs := newTestRoomSubscriptions(fake, clock)
-	ctx := context.Background()
+	ctx := testCtx(t)
 
 	if err := subs.Join(ctx, "a"); err != nil {
 		t.Fatalf("Join error = %v, want nil", err)
@@ -348,7 +368,7 @@ func TestRoomSubscriptionsConcurrentJoinLeave(t *testing.T) {
 	fake := &fakePubSub{}
 	clock := &fakeClock{}
 	subs := newTestRoomSubscriptions(fake, clock)
-	ctx := context.Background()
+	ctx := testCtx(t)
 
 	var wg sync.WaitGroup
 	for range 100 {
@@ -390,9 +410,203 @@ func TestRoomSubscriptionsConcurrentJoinLeave(t *testing.T) {
 	}
 }
 
+// ---- 等 SUBSCRIBE 確認（ready）----
+// 下面的 test 用 manualConfirm：確認什麼時候到由 test 決定
+
+// 在背景跑 Join，回傳一個收結果的 channel（Join 會卡在等 ready，不能在 test 的 goroutine 直接呼叫）
+func joinAsync(ctx context.Context, subs *roomSubscriptions, roomID string) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- subs.Join(ctx, roomID) }()
+	return done
+}
+
+// 背景的 Join 已經在等了：viewers 達到 want 代表 addViewer 跑完、放鎖、正在 <-ready
+// 用輪詢不用 sleep 固定時間：等的是「狀態到了」，不是「時間到了」
+func waitViewers(t *testing.T, subs *roomSubscriptions, roomID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		subs.mu.Lock()
+		entry := subs.rooms[roomID]
+		got := -1
+		if entry != nil {
+			got = entry.viewers
+		}
+		subs.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("viewers of %q = %d, want %d", roomID, got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Join 還沒回傳（還在等確認）
+func assertBlocked(t *testing.T, done <-chan error, who string) {
+	t.Helper()
+	select {
+	case err := <-done:
+		t.Fatalf("%s Join returned %v before SUBSCRIBE was confirmed, want still waiting", who, err)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// Join 回傳了，而且沒有 error
+func assertJoined(t *testing.T, done <-chan error, who string) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s Join error = %v, want nil", who, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("%s Join still waiting after confirm, want returned", who)
+	}
+}
+
+// 確認回來之前 Join 不能回傳（join_ok 之後補撈歷史才補得到洞）；
+// 確認還沒回來時進房的第二個人也要等同一個確認，一次 confirm 兩個都叫醒，也不會重新 SUBSCRIBE
+func TestRoomSubscriptionsJoinWaitsForConfirm(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	ctx := testCtx(t)
+
+	a := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	assertBlocked(t, a, "A")
+
+	b := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 2)
+	assertBlocked(t, b, "B")
+
+	subs.confirmSubscribed("a")
+
+	assertJoined(t, a, "A")
+	assertJoined(t, b, "B")
+	if want := []string{"sub a"}; !slices.Equal(fake.calls, want) {
+		t.Errorf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+// 等確認 timeout：回 ctx 的 error，剛加的人要退掉（走 Leave → viewers 0、啟動 timer，entry 留著）
+// 確認之後才到：不 panic，close ready；下一個人進房不用再等、也不重新 SUBSCRIBE
+func TestRoomSubscriptionsJoinConfirmTimeout(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	clock := &fakeClock{}
+	subs := newTestRoomSubscriptions(fake, clock)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := subs.Join(ctx, "a")
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Join error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if got, want := viewerCounts(subs), map[string]int{"a": 0}; !maps.Equal(got, want) {
+		t.Fatalf("viewers = %v, want %v (timed-out viewer rolled back via Leave)", got, want)
+	}
+	if len(clock.timers) != 1 {
+		t.Fatalf("timers = %d, want 1 (Leave of the last viewer starts the unsubscribe delay)", len(clock.timers))
+	}
+
+	// 確認晚到
+	subs.confirmSubscribed("a")
+
+	// 下一個人：ready 已經 close，不用等；entry 還在，不重新 SUBSCRIBE
+	next := joinAsync(testCtx(t), subs, "a")
+	assertJoined(t, next, "next")
+	if want := []string{"sub a"}; !slices.Equal(fake.calls, want) {
+		t.Errorf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+// 確認一直沒來，timeout 的人退掉後 30 秒到期：照樣 UNSUBSCRIBE、刪 entry（不會因為沒確認就漏掉清理）
+// 之後確認才到（entry 已經不在）：忽略，不 panic、不建 entry
+func TestRoomSubscriptionsConfirmAfterExpireIsIgnored(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	clock := &fakeClock{}
+	subs := newTestRoomSubscriptions(fake, clock)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := subs.Join(ctx, "a"); err == nil {
+		t.Fatal("Join error = nil, want timeout")
+	}
+	clock.fireAll()
+
+	if want := []string{"sub a", "unsub a"}; !slices.Equal(fake.calls, want) {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+
+	subs.confirmSubscribed("a")
+
+	if len(subs.rooms) != 0 {
+		t.Errorf("rooms = %v, want empty", viewerCounts(subs))
+	}
+}
+
+// 同一間房收到多次確認（go-redis 斷線重連後會自動重新 SUBSCRIBE）：不能 close 兩次（會 panic）
+// 不認識的房間收到確認：忽略
+func TestRoomSubscriptionsConfirmTwiceDoesNotPanic(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+
+	a := joinAsync(testCtx(t), subs, "a")
+	waitViewers(t, subs, "a", 1)
+	subs.confirmSubscribed("a")
+	assertJoined(t, a, "A")
+
+	subs.confirmSubscribed("a") // 重連後的重複確認
+	subs.confirmSubscribed("x") // 沒有 entry 的房間
+
+	if got, want := viewerCounts(subs), map[string]int{"a": 1}; !maps.Equal(got, want) {
+		t.Errorf("viewers = %v, want %v", got, want)
+	}
+}
+
+// debounce 期間有人回來：entry（和已經 close 的 ready）還在，Join 立刻回傳，不用再等確認
+func TestRoomSubscriptionsRejoinWithinDelayDoesNotWait(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	ctx := testCtx(t)
+
+	a := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	subs.confirmSubscribed("a")
+	assertJoined(t, a, "A")
+	subs.Leave(ctx, "a")
+
+	// 不再 confirm：如果 Join 要等新的確認，這裡會卡住
+	again := joinAsync(ctx, subs, "a")
+	assertJoined(t, again, "rejoin")
+	if want := []string{"sub a"}; !slices.Equal(fake.calls, want) {
+		t.Errorf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+// consumer 收到 unsubscribe 的確認：不能拿去叫醒等 SUBSCRIBE 確認的人
+// 情境：expire 送出 UNSUBSCRIBE、刪掉 entry 之後，X 馬上進房建了新 entry；舊的 UNSUBSCRIBE 確認這時才到（時間軸見 handleSubscription）
+func TestHandleSubscriptionIgnoresUnsubscribe(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	store := &RedisStore{rooms: subs, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+
+	store.handleSubscription(ctx, &redis.Subscription{Kind: "unsubscribe", Channel: roomChannel("a")})
+	assertBlocked(t, x, "X")
+
+	store.handleSubscription(ctx, &redis.Subscription{Kind: "subscribe", Channel: roomChannel("a")})
+	assertJoined(t, x, "X")
+}
+
 func mustJoin(t *testing.T, subs *roomSubscriptions, roomID string) {
 	t.Helper()
-	if err := subs.Join(context.Background(), roomID); err != nil {
+	if err := subs.Join(testCtx(t), roomID); err != nil {
 		t.Fatalf("Join(%q) error = %v, want nil", roomID, err)
 	}
 }
