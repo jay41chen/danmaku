@@ -29,6 +29,8 @@ Client → Nginx (load balancer, least_conn)
                 └── Redis (Pub/Sub 跨 instance 廣播，每個房間一個 channel `room:{public_id}`)
 ```
 
+每台 server 只訂閱自己身上有人的房間：第一個人進房時 `SUBSCRIBE`，最後一個人離開後**等 30 秒**才 `UNSUBSCRIBE`（這段時間內有人回來就不用重新訂閱，避免冷門房人數在 0↔1 之間跳時一直送指令）。所以用 `redis-cli PUBSUB CHANNELS 'room:*'` 排查時，房間沒人後 channel 還會留約 30 秒，不是訂閱洩漏。
+
 ## Getting Started
 
 ### Prerequisites
