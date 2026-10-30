@@ -95,6 +95,15 @@
     - ✅ 彈幕 API 改成 `POST` / `GET /rooms/{public_id}/messages`（2c17ac8），前端已換過去（91b3940）
     - [ ] 移除已棄用的 `/messages`（route、handler、test）：目前固定讀寫 legacy room，暫時保留
     - **Known issue（暫時）**：WS 仍是全站一個 Redis channel，在房間 X 的觀眾會收到所有房間的彈幕 → W4b 即時部分（Pub/Sub channel 切法）修掉
+  - [ ] Pub/Sub 每個房間一個 channel（`room:{id}`，過濾交給 Redis），設計已定案：
+    - 每台 server 只看自己身上的連線：某房間的 `viewers` 0→1 時 `SUBSCRIBE`、1→0 時 `UNSUBSCRIBE`（lazy subscribe），全部走同一條 Redis Pub/Sub 連線
+    - 進房走 WS frame（不用 `?room=`、不用 HTTP API：要改變某條連線的狀態，資訊就要從那條連線進來；只留一套進房機制）：`join` 只負責加入，一條連線最多一間房，已在房間內再 `join` 回 error；成功回 `join_ok`（同 `auth_ok` 模式）；換房 = client 先 `leave` 再 `join`（以後做多房只要放寬這條限制，不改語意，舊前端不受影響）。代價：`join` 失敗後連線不在任何房間，前端要能顯示
+    - `join` 查房間存不存在（沿用 `GetRoom` 的 store method）帶 200 ms timeout（含等 DB pool 的時間）；錯誤只分兩種：`ws_room_not_found`（≈ 404，含 soft delete，重試沒用）、`ws_join_unavailable`（≈ 503，DB / Redis 出問題或 timeout，真正原因只寫 log）。前端收到後者用現有的 `equalJitter` backoff 重試
+    - channel 名稱 `room:{public_id}`（client 送來的、`createMessage` 手上的都是 public_id，不用轉換）
+    - 一把鎖（`roomSubscriptions.mu`）保護 `viewers map[public_id]int` + 0↔1 時的 SUBSCRIBE / UNSUBSCRIBE，降到 0 直接刪 entry。原本設計的 per-room keyed mutex + refcount 換不到平行度：整台 server 只有一個 go-redis `PubSub`，它的 `Subscribe` / `Unsubscribe` 本來就在內部 `c.mu` 排隊（見 go-notes）。跟 `WebsocketHandler.mutex` 永不巢狀：拿著全域鎖時不呼叫 `Join` / `Leave`
+    - 連線目前在哪間房由讀取迴圈的 goroutine 自己記（join / leave / 斷線清理都在它身上），結束時在鎖外 `Leave`；`wsClient.room` 另存一份給廣播過濾
+    - 部署分兩次 push：先上前端（舊 backend 對 `join` 回 `ws_write_forbidden`，前端要當無害忽略），再上 backend；backend 上線後還開著舊頁面的人要重新整理
+  - [ ] （接在上一項之後）Pub/Sub flapping debounce：冷門房 `viewers` 在 0↔1 之間跳，每次都送 SUBSCRIBE / UNSUBSCRIBE；20,000 間房 × 10 台 server 會超過單台 Redis。做法：延遲 UNSUBSCRIBE（例如 30 秒，SUBSCRIBE 不延遲）；timer 觸發時要重新上鎖再檢查 `viewers == 0`（`timer.Stop()` 回 `false` 時取消不了）；有 timer 在等的 entry 不能刪；test 要能注入時間
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
@@ -157,6 +166,7 @@
 - [ ] Redis List replay（搭配前端 auto-reconnect）
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
+  - 順便拆 `ws.go`（W4b 已先把長函式拆小，檔案沒拆）：照 Hub 之後的邊界拆（例如 `hub.go` 管連線 / 廣播、`client.go` 管單條連線讀寫），不要先照 auth / room 拆一次再重拆；純搬家和改 code 分兩個 commit，diff 才 review 得了
   - 每條連線改成自己的寫入 goroutine 後，WS 連線的身分（user、exp、timer）改用每條連線各自的 mutex：Step 9 先用全站那把鎖，因為寫 frame 本來就要拿全站鎖，拆身分鎖省不到東西；要拆時上鎖順序固定「全站 → 單條連線」
 - [ ] 跨 server 的「不同會員數」：Step 9 的 gauge 只有單台 server 的數字，同一個 user 連到 server-1、server-2 加總會算 2。要共用的地方（Redis）合併，server 被 kill -9 時沒機會清 → 靠 TTL + heartbeat（活著的 server 定期續命，死掉的自然過期），不能靠 server 自己起的 timer。待討論：TTL / heartbeat 間隔（server 死掉後數字錯多久 vs Redis 寫入量）、資料結構、誰來加總、要不要改成獨立的 health checker service（它本身也要被監控，Redis TTL 等於免費的 checker）；要「每個直播間」統計的話等 W4b Room
   - 2026-10-29：TTL / 續期間隔 / 資料結構 / 誰來加總已在 W4b presence 定案（見上方 W4b「Room 概念」）。剩下的 known issue：去重要讀出整個房間的 member，成本 ∝ 房間人數，超大房間（5 萬人）時改用 per-user Sorted Set / HyperLogLog / 分片等（比較見 go-notes 3.27）

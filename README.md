@@ -26,7 +26,7 @@ Client → Nginx (load balancer, least_conn)
            ├── Server-1 (Go :8080)
            └── Server-2 (Go :8080)
                 ├── PostgreSQL (持久化)
-                └── Redis (Pub/Sub 跨 instance 廣播)
+                └── Redis (Pub/Sub 跨 instance 廣播，每個房間一個 channel `room:{public_id}`)
 ```
 
 ## Getting Started
@@ -89,11 +89,11 @@ npm run dev
 | Method | Path | 要登入 | 說明 |
 |---|---|---|---|
 | `GET` | `/rooms/{public_id}/messages` | | 該房間的歷史訊息；房間不存在或已刪除回 `404`，沒有訊息回 `[]`。發送者已刪除的訊息 `username` 是 `null` |
-| `POST` | `/rooms/{public_id}/messages` | ✓ | 在該房間發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。房間不存在或已刪除回 `404`。成功回 `201` + 訊息，並廣播給所有 WS 連線（目前不分房間，見 ROADMAP W4b） |
+| `POST` | `/rooms/{public_id}/messages` | ✓ | 在該房間發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。房間不存在或已刪除回 `404`。成功回 `201` + 訊息，並廣播給已 `join` 這個房間的 WS 連線 |
 | `GET`、`POST` | `/messages` | POST ✓ | **已棄用**：固定讀寫 legacy 房間（`legacy00000`），行為同上，之後移除 |
 | `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：trim 後 1～30 字；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
-| `GET` | `/ws` | | WebSocket，接收即時廣播。連上是匿名，可在連線內送 auth frame 登入（見下方） |
+| `GET` | `/ws` | | WebSocket，接收即時廣播。連上後要送 `join` 進房才收得到該房間的彈幕；連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
 | `GET` | `/me` | ✓ | 目前登入的 user `{"id", "username"}`；F5 後 client 用它取得身分。`Cache-Control: no-store` |
 | `POST` | `/refresh`、`/logout` | | 用 refresh token 換新的一組 / 作廢 |
@@ -107,9 +107,15 @@ npm run dev
     - `ws_write_forbidden`：client 從 WS 送訊息（發彈幕要走 `POST /rooms/{public_id}/messages`）
     - `ws_auth_failed`：auth 失敗（token 無效、user 不存在），連線退回匿名
     - `ws_auth_expired`：token 到期，連線退回匿名
+    - `ws_room_not_found`：`join` 的房間不存在或已刪除（payload 格式錯也是這個），重試沒用
+    - `ws_join_unavailable`：server 暫時無法進房（DB / Redis 出問題或逾時），client 用 backoff + jitter 重試
+    - `ws_already_in_room`：已經在房間裡又送 `join`（要先 `leave`）
+    - `ws_not_in_room`：不在任何房間卻送 `leave`
   - `auth_ok`：auth 成功，payload `{"user": {"id", "username"}, "expires_in": 秒數}`
+  - `join_ok` / `leave_ok`：進房 / 離房成功，payload `{"room": "<public_id>"}`
   - `pong`：回應 client 的 `ping`
 - WS keepalive：client 每 25 秒送 `{"type": "ping"}`，server 回 `{"type": "pong"}`；server 也每 25 秒送 WebSocket protocol ping（瀏覽器自動回 pong），75 秒沒收到任何東西就斷線。目的是讓閒置連線不被 nginx `proxy_read_timeout`（60s）切掉，並偵測半開連線
+- WS 進房：client 送 `{"type": "join", "payload": {"room": "<public_id>"}}`，收到 `join_ok` 之後才會收到該房間的 `message`。一條連線同時最多在一個房間；換房 = 先送 `{"type": "leave"}` 再 `join`。斷線時 server 自動離房。`join_ok` 之前發出的彈幕不會補送（Redis Pub/Sub 不存訊息），client 收到 `join_ok` 後要再抓一次歷史訊息
 - WS 登入：client 送 `{"type": "auth", "payload": {"token": "<access token>"}}`。快到期時在同一條連線再送一次新的 token 續期；送別人的 token 會直接換身分
 
 ## Request ID & Log 追蹤
