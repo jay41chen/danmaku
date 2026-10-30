@@ -43,7 +43,7 @@ const (
 	wsPongWait = 3 * wsPingPeriod
 
 	wsCodeWriteForbidden  = "ws_write_forbidden"
-	wsMsgWriteForbidden   = "請透過 POST /messages 發送"
+	wsMsgWriteForbidden   = "請透過 POST /rooms/{public_id}/messages 發送"
 	wsCodeAuthFailed      = "ws_auth_failed"
 	wsMsgAuthFailed       = "登入驗證失敗，目前為訪客"
 	wsCodeAuthExpired     = "ws_auth_expired"
@@ -334,7 +334,7 @@ func (this *WebsocketHandler) listenConnection(ctx context.Context, conn *websoc
 		// auth frame 裡有 access token，不能進 log；誰送的看身分變化的 INFO log
 		this.logger.DebugContext(ctx, "frame received", "bytes", len(msg))
 		// WS 收到的 frame（auth / ping / 其他）每條連線每秒最多 rateLimit 個，超過的直接丟掉（不驗、不查、不回）
-		// 跟 POST /messages 的限流無關：WS 連線不用登入就能連，任何人都能送 frame 逼 server 做事
+		// 跟 POST /rooms/{public_id}/messages 的限流無關：WS 連線不用登入就能連，任何人都能送 frame 逼 server 做事
 		// （每個 frame 都要拿全域鎖回應；用自己合法 token 狂送 auth 還會每次查 DB）
 		if !limiter.allow(time.Now()) {
 			this.logger.WarnContext(ctx, "too many msgs sent", "limit", rateLimit)
@@ -369,7 +369,7 @@ func (this *WebsocketHandler) removeClient(ctx context.Context, conn *websocket.
 //   - type = "leave" → handleLeave（離開房間）
 //   - 其他（含不是合法 JSON）→ 回 ws_write_forbidden
 //
-// WS 不能寫入：發訊息要走 POST /messages（那裡才驗得了身分、存得進 DB 並帶 user_id）
+// WS 不能寫入：發訊息要走 POST /rooms/{public_id}/messages（那裡才驗得了身分、存得進 DB 並帶 user_id）
 // 這裡只回一個 error envelope 給「這條連線」，不存 DB、不 Publish、不關連線
 // 目前對所有人一律拒絕，直到 W4b 有角色（房主 / curator）才會有人能透過 WS 寫
 //

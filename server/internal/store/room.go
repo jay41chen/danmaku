@@ -21,7 +21,8 @@ var (
 )
 
 const (
-	// migration 000010 建的房間，裝房間功能之前的舊訊息；已棄用的 /messages endpoints 讀寫的就是它
+	// migration 000010 建的房間，裝房間功能之前的舊訊息；已移除的 /messages endpoints 以前讀寫的就是它，
+	// 現在是 client 的預設房間（client/src/config.ts），test 也會用
 	LegacyRoomPublicID = "legacy00000"
 
 	// 每個 user 最多同時擁有的（未刪除）房間數

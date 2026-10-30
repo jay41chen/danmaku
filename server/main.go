@@ -117,7 +117,7 @@ type appHandlers struct {
 	ws       *handler.WebsocketHandler
 }
 
-// route 註冊的唯一入口：每條 route 要嘛 get / post（要登入），要嘛 publicGet / publicPost（公開）
+// route 註冊的唯一入口：每條 route 要嘛 get / post（要登入），要嘛 publicGet / publicPost（公開），要嘛 removed（已下架，回 410）
 // 預設 = 要登入（fail closed）：忘了想這件事時，結果是「多擋了人」而不是「多開了洞」
 // 公開要明寫 public，code review 看得到；如果預設是公開，少寫一個 middleware 在 diff 裡是看不出來的
 type routes struct {
@@ -136,6 +136,16 @@ func (this *routes) publicPost(path string, h http.Handler) {
 	this.handle(http.MethodPost, path, h)
 }
 
+// 已移除的 route：任何 method 都回 410 Gone + 指路到 replacement
+// 刻意不收 handler：只能拿來下架，沒辦法被拿去開「公開、不分 method」的 API（繞過上面的 fail closed）
+// 公開：不讀不寫任何資料；如果要登入，沒帶 token 的舊 client 只會拿到 401、以為要去 /refresh，永遠不知道 API 沒了
+// pattern 不帶 METHOD，所有 method 都比對得到（CORS preflight 一樣先被外層 CORS middleware 回掉）
+func (this *routes) removed(path, replacement string) {
+	this.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone: use "+replacement, http.StatusGone)
+	}))
+}
+
 // Go 1.22 的 "METHOD /path" pattern：method 不符由 mux 自己回 405（附 Allow header），
 // handler 裡不用再各自檢查 method
 // 注意 "GET /x" 也會比對 HEAD（healthcheck 原本就是 GET + HEAD 都允許，行為不變）
@@ -150,9 +160,8 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	// 同一個 path 的 GET 是公開的、POST 要登入：讀歷史訊息不用登入，發訊息要
 	r.publicGet("/rooms/{public_id}/messages", http.HandlerFunc(h.messages.HandleGetRoomMessages))
 	r.post("/rooms/{public_id}/messages", http.HandlerFunc(h.messages.HandleCreateRoomMessage))
-	// 已棄用：固定讀寫 legacy 房間，前端改用上面的 /rooms/{public_id}/messages 之後移除
-	r.publicGet("/messages", http.HandlerFunc(h.messages.HandleGetMessages))
-	r.post("/messages", http.HandlerFunc(h.messages.HandleCreateMessage))
+	// 舊的 legacy 房間 API，前端已改用上面的 /rooms/{public_id}/messages
+	r.removed("/messages", "/rooms/{public_id}/messages")
 
 	r.post("/rooms", http.HandlerFunc(h.rooms.HandleCreateRoom))
 	r.publicGet("/rooms/{public_id}", http.HandlerFunc(h.rooms.HandleGetRoom))

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
@@ -54,7 +55,6 @@ func TestRoutes(t *testing.T) {
 			{http.MethodGet, "/logout"},
 			{http.MethodPost, "/healthcheck"},
 			{http.MethodPost, "/ws"},
-			{http.MethodPut, "/messages"},
 			{http.MethodPut, "/rooms/abc/messages"},
 		}
 		for _, tc := range cases {
@@ -93,23 +93,35 @@ func TestRoutes(t *testing.T) {
 		}
 	})
 
-	// 這個 case 放最後，而且自己 recover：RequireAuth 還沒實作時會 panic，
-	// 不 recover 的話 panic 會中斷整個 test binary
-	t.Run("POST /messages without token returns 401", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Fatalf("RequireAuth panicked (not implemented yet?): %v", r)
+	// /messages 已下架：公開的 tombstone，任何 method、沒帶 token 都是 410（不是 401）
+	t.Run("/messages is gone for any method without token", func(t *testing.T) {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete} {
+			req := httptest.NewRequest(method, "/messages", nil)
+			rec := httptest.NewRecorder()
+
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusGone {
+				t.Errorf("%s /messages status = %d, want %d", method, rec.Code, http.StatusGone)
 			}
-		}()
-		req := httptest.NewRequest(http.MethodPost, "/messages", nil)
+			if !strings.Contains(rec.Body.String(), "/rooms/{public_id}/messages") {
+				t.Errorf("%s /messages body = %q, want it to point to /rooms/{public_id}/messages", method, rec.Body.String())
+			}
+		}
+	})
+	// pattern 不帶結尾斜線 = 只比對完全相同的路徑
+	t.Run("GET /messages/ returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/messages/", nil)
 		rec := httptest.NewRecorder()
 
 		mux.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("POST /messages status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET /messages/ status = %d, want %d", rec.Code, http.StatusNotFound)
 		}
 	})
+	// 下面這些 401 case 自己 recover：RequireAuth 還沒實作時會 panic，
+	// 不 recover 的話 panic 會中斷整個 test binary
 	t.Run("POST /rooms/{id}/messages without token returns 401", func(t *testing.T) {
 		defer func() {
 			if r := recover(); r != nil {

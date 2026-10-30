@@ -17,87 +17,9 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
-func TestHandleGetMessages(t *testing.T) {
-	t.Run("db error returns 500", func(t *testing.T) {
-		h := NewMessageHandler(&fakeDBStore{err: errors.New("db down")}, &fakeRedis{}, &fakeRateLimiter{})
-		req := httptest.NewRequest(http.MethodGet, "/messages", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetMessages(rec, req)
-
-		if rec.Code != http.StatusInternalServerError {
-			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
-		}
-	})
-	t.Run("returns oldest first", func(t *testing.T) {
-		input := []model.Message{{ID: 3, Content: "c"},
-			{ID: 2, Content: "b"},
-			{ID: 1, Content: "a"}}
-		// copy一份input並翻轉，這是我們期待的結果
-		expect := slices.Clone(input)
-		slices.Reverse(expect)
-		db := &fakeDBStore{msgs: input, room: model.Room{ID: 1, PublicID: store.LegacyRoomPublicID}}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
-		req := httptest.NewRequest(http.MethodGet, "/messages", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetMessages(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-		}
-		// 已棄用的 /messages 固定走 legacy 房間
-		if db.gotRoomPublic != store.LegacyRoomPublicID || db.gotQueryRoomID != 1 {
-			t.Errorf("got room (%q, %d), want (%q, 1)", db.gotRoomPublic, db.gotQueryRoomID, store.LegacyRoomPublicID)
-		}
-
-		var got []model.Message
-		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-
-		if !slices.EqualFunc(expect, got, func(a, b model.Message) bool { return a.ID == b.ID && a.Content == b.Content }) {
-			t.Errorf("expect = %+v, got %+v", expect, got)
-		}
-	})
-	// 沒有發送者的訊息：user_id / username 要序列化成 null，不是省略也不是空字串
-	t.Run("user fields serialize as id/username or null", func(t *testing.T) {
-		uid, name := int64(7), "Jay"
-		h := NewMessageHandler(&fakeDBStore{msgs: []model.Message{
-			{ID: 2, UserID: &uid, Username: &name, Content: "hi"},
-			{ID: 1, Content: "old"},
-		}}, &fakeRedis{}, &fakeRateLimiter{})
-		req := httptest.NewRequest(http.MethodGet, "/messages", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetMessages(rec, req)
-
-		var got []map[string]any
-		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		// 反轉後：舊的在前
-		if v, ok := got[0]["user_id"]; !ok || v != nil {
-			t.Errorf("old message user_id = %v (present=%v), want null", v, ok)
-		}
-		if v, ok := got[0]["username"]; !ok || v != nil {
-			t.Errorf("old message username = %v (present=%v), want null", v, ok)
-		}
-		if got[1]["user_id"] != float64(7) || got[1]["username"] != "Jay" {
-			t.Errorf("message = %v, want user_id 7 / username Jay", got[1])
-		}
-	})
-}
-
 // 用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx（context key 沒有也不該 export setter）
 // RequireAuth 還是 stub 時會 panic：recover 成 test 失敗，不然整個 package 的 test 都會被中斷
-func serveCreateMessage(t *testing.T, h *MessageHandler, userID int64, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body))
-	return serveAuthed(t, http.HandlerFunc(h.HandleCreateMessage), userID, req)
-}
-
-// 同上，但打 POST /rooms/{public_id}/messages
+// 打 POST /rooms/{public_id}/messages
 func serveCreateRoomMessage(t *testing.T, h *MessageHandler, userID int64, publicID, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/rooms/"+publicID+"/messages", strings.NewReader(body))
@@ -128,7 +50,8 @@ func contentBody(content string) string {
 	return string(b)
 }
 
-func TestHandleCreateMessage(t *testing.T) {
+// 以下測的是共用的 createMessage 行為（驗證 / 限流 / 發佈），透過房間 handler 呼叫
+func TestCreateMessage(t *testing.T) {
 	const userID = int64(7)
 	created := func() model.Message {
 		uid, name := userID, "Jay"
@@ -141,7 +64,7 @@ func TestHandleCreateMessage(t *testing.T) {
 		redis := &fakeRedis{}
 		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
 
-		rec := serveCreateMessage(t, h, userID, contentBody("哈哈"))
+		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("哈哈"))
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
@@ -197,7 +120,7 @@ func TestHandleCreateMessage(t *testing.T) {
 			redis := &fakeRedis{}
 			h := NewMessageHandler(db, redis, &fakeRateLimiter{})
 
-			rec := serveCreateMessage(t, h, userID, tc.body)
+			rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, tc.body)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -214,7 +137,7 @@ func TestHandleCreateMessage(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created()}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serveCreateMessage(t, h, userID, contentBody(content))
+		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody(content))
 
 		if rec.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
@@ -229,7 +152,7 @@ func TestHandleCreateMessage(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created()}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serveCreateMessage(t, h, userID, contentBody("哈 "))
+		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("哈 "))
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusCreated)
@@ -244,7 +167,7 @@ func TestHandleCreateMessage(t *testing.T) {
 		redis := &fakeRedis{}
 		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
 
-		rec := serveCreateMessage(t, h, userID, contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
 
 		// 期望值直接用 middleware 的 helper 產生：兩邊永遠是同一份
 		want := httptest.NewRecorder()
@@ -267,7 +190,7 @@ func TestHandleCreateMessage(t *testing.T) {
 		redis := &fakeRedis{}
 		h := NewMessageHandler(&fakeDBStore{createMsgErr: errors.New("db down")}, redis, &fakeRateLimiter{})
 
-		rec := serveCreateMessage(t, h, userID, contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -281,7 +204,7 @@ func TestHandleCreateMessage(t *testing.T) {
 	t.Run("publish error still returns 201", func(t *testing.T) {
 		h := NewMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
 
-		rec := serveCreateMessage(t, h, userID, contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
 
 		if rec.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
@@ -292,10 +215,11 @@ func TestHandleCreateMessage(t *testing.T) {
 	t.Run("missing user id in context returns 500", func(t *testing.T) {
 		db := &fakeDBStore{}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
-		req := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(contentBody("hi")))
+		req := httptest.NewRequest(http.MethodPost, "/rooms/abc/messages", strings.NewReader(contentBody("hi")))
+		req.SetPathValue("public_id", "abc")
 		rec := httptest.NewRecorder()
 
-		h.HandleCreateMessage(rec, req)
+		h.HandleCreateRoomMessage(rec, req)
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -338,6 +262,31 @@ func TestHandleGetRoomMessages(t *testing.T) {
 			t.Errorf("got %+v, want oldest first [1 2]", got)
 		}
 	})
+	// 沒有發送者的訊息：user_id / username 要序列化成 null，不是省略也不是空字串
+	t.Run("user fields serialize as id/username or null", func(t *testing.T) {
+		uid, name := int64(7), "Jay"
+		h := NewMessageHandler(&fakeDBStore{msgs: []model.Message{
+			{ID: 2, UserID: &uid, Username: &name, Content: "hi"},
+			{ID: 1, Content: "old"},
+		}}, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serve(h, "abc")
+
+		var got []map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		// 反轉後：舊的在前
+		if v, ok := got[0]["user_id"]; !ok || v != nil {
+			t.Errorf("old message user_id = %v (present=%v), want null", v, ok)
+		}
+		if v, ok := got[0]["username"]; !ok || v != nil {
+			t.Errorf("old message username = %v (present=%v), want null", v, ok)
+		}
+		if got[1]["user_id"] != float64(7) || got[1]["username"] != "Jay" {
+			t.Errorf("message = %v, want user_id 7 / username Jay", got[1])
+		}
+	})
 	t.Run("room not found returns 404", func(t *testing.T) {
 		db := &fakeDBStore{getRoomErr: store.ErrRoomNotFound}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
@@ -364,6 +313,16 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		// 查房間失敗就不該再查訊息
 		if db.queryMsgCalled {
 			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
+		}
+	})
+	t.Run("query messages error returns 500", func(t *testing.T) {
+		db := &fakeDBStore{room: model.Room{ID: 9}, err: errors.New("db down")}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		rec := serve(h, "abc")
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 		}
 	})
 	// 空房間：非 nil 的空 slice 會編成 []；不是 null（client 不用特別處理）
@@ -413,7 +372,7 @@ func TestHandleCreateRoomMessage(t *testing.T) {
 	})
 }
 
-func TestHandleCreateMessageRateLimit(t *testing.T) {
+func TestCreateMessageRateLimit(t *testing.T) {
 	const userID = int64(7)
 	burstKey := messageBurstRule.key(strconv.FormatInt(userID, 10))
 	sustainKey := messageSustainRule.key(strconv.FormatInt(userID, 10))
@@ -437,7 +396,7 @@ func TestHandleCreateMessageRateLimit(t *testing.T) {
 			db := &fakeDBStore{}
 			h := NewMessageHandler(db, &fakeRedis{}, tc.limiter)
 
-			rec := serveCreateMessage(t, h, userID, contentBody("hi"))
+			rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)

@@ -30,7 +30,7 @@ func (rule rateRule) key(value string) string {
 
 // 問 limiter 這條規則放不放行；被擋時回傳還要等多久（Retry-After 用）
 // 這裡負責 fail open、記 log、累計 metric；回不回 429 由呼叫端決定
-// （login 一條規則擋住就直接回；POST /messages 兩條都要問，取比較長的等待時間）
+// （login 一條規則擋住就直接回；POST /rooms/{public_id}/messages 兩條都要問，取比較長的等待時間）
 func checkRate(r *http.Request, limiter store.RateLimiterInterface, logger *slog.Logger, rule rateRule, value string) (allowed bool, retryAfter time.Duration) {
 	key := rule.key(value)
 	allowed, retryAfter, err := limiter.Allow(r.Context(), key, rule.limit, rule.window)

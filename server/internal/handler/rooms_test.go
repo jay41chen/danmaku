@@ -15,7 +15,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
-// 同 serveCreateMessage：用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx
+// 同 serveCreateRoomMessage：用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx
 func serveCreateRoom(t *testing.T, h *RoomHandler, userID int64, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	token, _, err := testTokens.IssueAccessToken(userID)

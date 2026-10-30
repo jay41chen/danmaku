@@ -45,7 +45,7 @@ func NewMessageHandler(db store.DBStoreInterface, redis store.RedisStoreInterfac
 	}
 }
 
-// POST /rooms/{public_id}/messages（與已棄用的 POST /messages）的 request body
+// POST /rooms/{public_id}/messages 的 request body
 type createMessageRequest struct {
 	Content string `json:"content"`
 }
@@ -53,11 +53,6 @@ type createMessageRequest struct {
 // 公開：讀歷史訊息不用登入，知道 public_id 的人都能讀
 func (this *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) {
 	this.getMessages(w, r, r.PathValue("public_id"))
-}
-
-// Deprecated: 固定讀 legacy 房間；前端改用 GET /rooms/{public_id}/messages 之後移除
-func (this *MessageHandler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
-	this.getMessages(w, r, store.LegacyRoomPublicID)
 }
 
 // GET 分兩步：先用 public id 查房間拿內部 id，再查訊息（POST 則是 CreateMessage 內一次做完）
@@ -92,11 +87,6 @@ func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, 
 // 要登入（RequireAuth）；訊息存進 path 指定的房間
 func (this *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *http.Request) {
 	this.createMessage(w, r, r.PathValue("public_id"))
-}
-
-// Deprecated: 固定發到 legacy 房間；前端改用 POST /rooms/{public_id}/messages 之後移除
-func (this *MessageHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request) {
-	this.createMessage(w, r, store.LegacyRoomPublicID)
 }
 
 // flow:
