@@ -62,6 +62,10 @@ func TestRoomPubSub(t *testing.T) {
 		s.client.Close()
 	})
 
+	// 換成假時鐘：LeaveRoom 之後的 UNSUBSCRIBE 要等 unsubscribeDelay（30 秒），test 手動讓時間到
+	clock := &fakeClock{}
+	s.rooms.afterFunc = clock.afterFunc
+
 	type received struct{ roomID, msg string }
 	got := make(chan received, 10)
 	go s.Subscribe(t.Context(), func(roomID, msg string) {
@@ -84,13 +88,28 @@ func TestRoomPubSub(t *testing.T) {
 		t.Fatal("did not receive message after JoinRoom")
 	}
 
+	// debounce：LeaveRoom 之後、時間到之前還訂閱著，訊息照收
 	s.LeaveRoom(t.Context(), room)
-	if err := s.Publish(t.Context(), room, "after leave"); err != nil {
+	if err := s.Publish(t.Context(), room, "during delay"); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	select {
 	case r := <-got:
-		t.Fatalf("received %+v after LeaveRoom, want nothing", r)
+		if r != (received{room, "during delay"}) {
+			t.Fatalf("received %+v, want room %q msg %q", r, room, "during delay")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive message during unsubscribe delay")
+	}
+
+	// 時間到：真的 UNSUBSCRIBE，之後收不到
+	clock.fireAll()
+	if err := s.Publish(t.Context(), room, "after unsubscribe"); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	select {
+	case r := <-got:
+		t.Fatalf("received %+v after unsubscribe, want nothing", r)
 	case <-time.After(300 * time.Millisecond):
 	}
 }

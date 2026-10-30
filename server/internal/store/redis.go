@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -15,6 +16,12 @@ type RedisStoreInterface interface {
 	JoinRoom(ctx context.Context, roomID string) error // 委派給 roomSubscriptions.Join
 	LeaveRoom(ctx context.Context, roomID string)      // 委派給 roomSubscriptions.Leave
 	CheckHealth(ctx context.Context) error
+}
+
+// Redis channel 名稱：Publish、Subscribe 收訊息、roomSubscriptions 的 SUBSCRIBE / UNSUBSCRIBE 都經過這裡，不要各自拼字串
+// 只有 redis.go 知道命名規則；roomSubscriptions 只認 roomID
+func roomChannel(roomID string) string {
+	return "room:" + roomID
 }
 
 type RedisStore struct {
@@ -45,8 +52,9 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 
 	pubsub := client.Subscribe(ctx)
 	rooms := newRoomSubscriptions(
-		func(ctx context.Context, ch string) error { return pubsub.Subscribe(ctx, ch) },
-		func(ctx context.Context, ch string) error { return pubsub.Unsubscribe(ctx, ch) },
+		func(ctx context.Context, roomID string) error { return pubsub.Subscribe(ctx, roomChannel(roomID)) },
+		func(ctx context.Context, roomID string) error { return pubsub.Unsubscribe(ctx, roomChannel(roomID)) },
+		func(d time.Duration, f func()) stopper { return time.AfterFunc(d, f) },
 		logger,
 	)
 
