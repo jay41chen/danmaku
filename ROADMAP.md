@@ -94,8 +94,8 @@
     - **暫時做法（待改）**：前端先用 `?room={public_id}`，沒帶就進 `legacy00000`。原因：GitHub Pages 是純靜態 hosting，直接開 `/{username}/{public_id}` 這種深層路徑會 404（沒有 SPA fallback）。等有自訂網域 / 換 hosting，或用 `404.html` 轉址做 SPA fallback 時，改回上面的路徑格式
     - ✅ 彈幕 API 改成 `POST` / `GET /rooms/{public_id}/messages`（2c17ac8），前端已換過去（91b3940）
     - [ ] 移除已棄用的 `/messages`（route、handler、test）：目前固定讀寫 legacy room，暫時保留
-    - **Known issue（暫時）**：WS 仍是全站一個 Redis channel，在房間 X 的觀眾會收到所有房間的彈幕 → W4b 即時部分（Pub/Sub channel 切法）修掉
-  - [ ] Pub/Sub 每個房間一個 channel（`room:{id}`，過濾交給 Redis），設計已定案：
+    - ~~Known issue：WS 仍是全站一個 Redis channel，在房間 X 的觀眾會收到所有房間的彈幕~~ → 已由下一項修掉
+  - [x] Pub/Sub 每個房間一個 channel（`room:{public_id}`，過濾交給 Redis）+ WS `join` / `leave`：store a33e3f5、前端 c4eedc0、backend e0eac93（含 ws.go 長函式拆小）。本機 2 台 server 實測 NUMSUB / MONITOR 行為符合預期（見 go-notes 3.29）
     - 每台 server 只看自己身上的連線：某房間的 `viewers` 0→1 時 `SUBSCRIBE`、1→0 時 `UNSUBSCRIBE`（lazy subscribe），全部走同一條 Redis Pub/Sub 連線
     - 進房走 WS frame（不用 `?room=`、不用 HTTP API：要改變某條連線的狀態，資訊就要從那條連線進來；只留一套進房機制）：`join` 只負責加入，一條連線最多一間房，已在房間內再 `join` 回 error；成功回 `join_ok`（同 `auth_ok` 模式）；換房 = client 先 `leave` 再 `join`（以後做多房只要放寬這條限制，不改語意，舊前端不受影響）。代價：`join` 失敗後連線不在任何房間，前端要能顯示
     - `join` 查房間存不存在（沿用 `GetRoom` 的 store method）帶 200 ms timeout（含等 DB pool 的時間）；錯誤只分兩種：`ws_room_not_found`（≈ 404，含 soft delete，重試沒用）、`ws_join_unavailable`（≈ 503，DB / Redis 出問題或 timeout，真正原因只寫 log）。前端收到後者用現有的 `equalJitter` backoff 重試
