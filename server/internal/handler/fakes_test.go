@@ -3,7 +3,9 @@ package handler
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
@@ -173,19 +175,85 @@ func (failingTokenIssuer) IssueAccessToken(userID int64) (string, time.Duration,
 	return "", 0, errors.New("sign failed")
 }
 
-// handler test 用的假 Redis：只記下 Publish 的內容，Subscribe 立刻返回
+// handler test 用的假 Redis：記下 Publish / JoinRoom / LeaveRoom 的呼叫，Subscribe 只存 handler 然後立刻返回
+// WS 的 handler 在 server 端 goroutine 呼叫 JoinRoom / LeaveRoom，所以這些 spy 都用 mutex 保護
+// 同步執行的 test 可以直接讀 published / publishedRooms
 var _ store.RedisStoreInterface = (*fakeRedis)(nil)
 
 type fakeRedis struct {
 	publishErr error
 	published  []string // spy：Publish 收到過的訊息
+	// spy：Publish 收到過的 room id（跟 published 同 index）
+	publishedRooms []string
+
+	mu      sync.Mutex
+	handler func(roomID, msg string) // Subscribe 收到的 handler，test 用 deliver 推訊息進去
+	joinErr error                    // 不是 nil 時 JoinRoom 回傳這個錯
+	joined  []string                 // spy：JoinRoom 收到過的 room id
+	left    []string                 // spy：LeaveRoom 收到過的 room id
+
+	// 不是 nil 時 JoinRoom 會先對 joinEntered 送一個訊號，再卡到 joinBlock 被 close 才回傳
+	// 用來在 test 裡把 JoinRoom 停在「Redis I/O 進行中」，製造 race 情境；兩個都是 nil 時不影響既有 test
+	joinEntered chan struct{}
+	joinBlock   chan struct{}
 }
 
-func (f *fakeRedis) Publish(ctx context.Context, msg string) error {
+func (f *fakeRedis) Publish(ctx context.Context, roomID, msg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.published = append(f.published, msg)
+	f.publishedRooms = append(f.publishedRooms, roomID)
 	return f.publishErr
 }
 
-func (f *fakeRedis) Subscribe(ctx context.Context, handler func(string)) error { return nil }
+func (f *fakeRedis) Subscribe(ctx context.Context, handler func(roomID, msg string)) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handler = handler
+	return nil
+}
+
+func (f *fakeRedis) JoinRoom(ctx context.Context, roomID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.joined = append(f.joined, roomID)
+	err := f.joinErr
+	entered, block := f.joinEntered, f.joinBlock
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if block != nil {
+		<-block
+	}
+	f.mu.Lock() // 讓上面的 defer Unlock 成對
+	return err
+}
+
+func (f *fakeRedis) LeaveRoom(ctx context.Context, roomID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.left = append(f.left, roomID)
+}
 
 func (f *fakeRedis) CheckHealth(ctx context.Context) error { return nil }
+
+// 模擬 Redis 推來一則訊息：呼叫 Subscribe 存下的 handler（要先呼叫 StartBroadcast）
+func (f *fakeRedis) deliver(roomID, msg string) {
+	f.mu.Lock()
+	h := f.handler
+	f.mu.Unlock()
+	h(roomID, msg)
+}
+
+func (f *fakeRedis) joinedRooms() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.joined)
+}
+
+func (f *fakeRedis) leftRooms() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.left)
+}

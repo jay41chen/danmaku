@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -41,5 +42,55 @@ func TestNewRedisStoreDoesNotLeakPassword(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// 需要真的 Redis：沒設 TEST_REDIS_URL 就 skip
+// 驗證 per-room channel：JoinRoom 之後收得到該房間的訊息，LeaveRoom 之後收不到
+func TestRoomPubSub(t *testing.T) {
+	url := os.Getenv("TEST_REDIS_URL")
+	if url == "" {
+		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
+	}
+	s, err := NewRedisStore(t.Context(), url)
+	if err != nil {
+		t.Fatalf("NewRedisStore: %v", err)
+	}
+	// Close PubSub 會讓 Subscribe 的 Channel() 關閉、goroutine 結束
+	t.Cleanup(func() {
+		s.pubsub.Close()
+		s.client.Close()
+	})
+
+	type received struct{ roomID, msg string }
+	got := make(chan received, 10)
+	go s.Subscribe(t.Context(), func(roomID, msg string) {
+		got <- received{roomID, msg}
+	})
+
+	room := "test-" + t.Name()
+	if err := s.JoinRoom(t.Context(), room); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	if err := s.Publish(t.Context(), room, "hello"); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	select {
+	case r := <-got:
+		if r != (received{room, "hello"}) {
+			t.Fatalf("received %+v, want room %q msg %q", r, room, "hello")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive message after JoinRoom")
+	}
+
+	s.LeaveRoom(t.Context(), room)
+	if err := s.Publish(t.Context(), room, "after leave"); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	select {
+	case r := <-got:
+		t.Fatalf("received %+v after LeaveRoom, want nothing", r)
+	case <-time.After(300 * time.Millisecond):
 	}
 }

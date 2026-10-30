@@ -164,6 +164,9 @@ func TestHandleCreateMessage(t *testing.T) {
 		if len(redis.published) != 1 {
 			t.Fatalf("published %d messages, want 1", len(redis.published))
 		}
+		if redis.publishedRooms[0] != store.LegacyRoomPublicID {
+			t.Errorf("published room = %q, want %q", redis.publishedRooms[0], store.LegacyRoomPublicID)
+		}
 		var env struct {
 			Type    string        `json:"type"`
 			Payload model.Message `json:"payload"`

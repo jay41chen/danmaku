@@ -158,7 +158,7 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 
 	// DB 已經存好了：廣播失敗只記 log、仍回 201（回 5xx 的話 client 重送會變成重複的訊息）
 	// 沒收到即時廣播的人下次載入歷史訊息時還是看得到
-	this.broadcast(r.Context(), wsEnvelope{Type: wsTypeMessage, Payload: msg})
+	this.broadcast(r.Context(), roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
 
 	httpx.SetContentType(w)
 	w.WriteHeader(http.StatusCreated)
@@ -166,13 +166,13 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(msg)
 }
 
-func (this *MessageHandler) broadcast(ctx context.Context, env wsEnvelope) {
+func (this *MessageHandler) broadcast(ctx context.Context, roomPublicID string, env wsEnvelope) {
 	data, err := json.Marshal(env)
 	if err != nil {
 		this.logger.ErrorContext(ctx, "marshal ws envelope failed", "error", err)
 		return
 	}
-	if err := this.redis.Publish(ctx, string(data)); err != nil {
+	if err := this.redis.Publish(ctx, roomPublicID, string(data)); err != nil {
 		this.logger.ErrorContext(ctx, "publish to redis failed", "error", err)
 	}
 }

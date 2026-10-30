@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -111,8 +113,10 @@ func (fakeClaimsParser) ParseAccessTokenClaims(token string) (int64, time.Time, 
 // 假 DB：只有 GetUserByID，users 裡沒有的 id 回 ErrUserNotFound
 type wsFakeDB struct {
 	store.DBStoreInterface
-	users map[int64]string
-	err   error
+	users   map[int64]string
+	err     error
+	rooms   map[string]bool // 存在的房間 public id
+	roomErr error
 }
 
 func (f *wsFakeDB) GetUserByID(ctx context.Context, id int64) (model.User, error) {
@@ -124,6 +128,17 @@ func (f *wsFakeDB) GetUserByID(ctx context.Context, id int64) (model.User, error
 		return model.User{}, store.ErrUserNotFound
 	}
 	return model.User{ID: id, Username: name}, nil
+}
+
+// 房間：rooms 裡有的 public id 回 room，沒有的回 ErrRoomNotFound；roomErr 不是 nil 就直接回這個錯
+func (f *wsFakeDB) GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error) {
+	if f.roomErr != nil {
+		return model.Room{}, f.roomErr
+	}
+	if !f.rooms[publicID] {
+		return model.Room{}, store.ErrRoomNotFound
+	}
+	return model.Room{PublicID: publicID}, nil
 }
 
 type wsFrame struct {
@@ -542,5 +557,340 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 	}
 	if got := clientCount(h); got != 1 {
 		t.Fatalf("clients = %d, want 1 (incoming messages should extend the read deadline)", got)
+	}
+}
+
+// ---- WS join / leave ----
+
+func newRoomTestServer(t *testing.T, redis *fakeRedis, db *wsFakeDB) (*WebsocketHandler, string) {
+	t.Helper()
+	h := NewWebsocketHandler(redis, db, fakeClaimsParser{})
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
+	t.Cleanup(srv.Close)
+	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+func sendFrame(t *testing.T, conn *websocket.Conn, frame string) {
+	t.Helper()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+}
+
+func sendJoin(t *testing.T, conn *websocket.Conn, room string) {
+	t.Helper()
+	sendFrame(t, conn, fmt.Sprintf(`{"type":"join","payload":{"room":%q}}`, room))
+}
+
+func expectRoomFrame(t *testing.T, conn *websocket.Conn, wantType, wantRoom string) {
+	t.Helper()
+	f := readFrame(t, conn, 2*time.Second)
+	var p wsRoomPayload
+	if f.Type != wantType || json.Unmarshal(f.Payload, &p) != nil || p.Room != wantRoom {
+		t.Fatalf("frame = %s %s, want %s room %q", f.Type, f.Payload, wantType, wantRoom)
+	}
+}
+
+func joinRoom(t *testing.T, conn *websocket.Conn, room string) {
+	t.Helper()
+	sendJoin(t, conn, room)
+	expectRoomFrame(t, conn, wsTypeJoinOK, room)
+}
+
+func TestWebsocketJoinSuccess(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	conn := dialWS(t, url)
+
+	joinRoom(t, conn, "abc")
+
+	if got := redis.joinedRooms(); len(got) != 1 || got[0] != "abc" {
+		t.Errorf("JoinRoom calls = %v, want [abc]", got)
+	}
+}
+
+func TestWebsocketJoinTwice(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true, "def": true}})
+	conn := dialWS(t, url)
+	joinRoom(t, conn, "abc")
+
+	sendJoin(t, conn, "def")
+
+	expectErrorCode(t, conn, 2*time.Second, wsCodeAlreadyInRoom)
+	if got := redis.joinedRooms(); len(got) != 1 {
+		t.Errorf("JoinRoom calls = %v, want only the first", got)
+	}
+}
+
+func TestWebsocketJoinUnknownRoom(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{})
+	conn := dialWS(t, url)
+
+	sendJoin(t, conn, "nope")
+
+	expectErrorCode(t, conn, 2*time.Second, wsCodeRoomNotFound)
+	if got := redis.joinedRooms(); len(got) != 0 {
+		t.Errorf("JoinRoom calls = %v, want none", got)
+	}
+}
+
+func TestWebsocketJoinDBError(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{roomErr: errors.New("db down")})
+	conn := dialWS(t, url)
+
+	sendJoin(t, conn, "abc")
+
+	expectErrorCode(t, conn, 2*time.Second, wsCodeJoinUnavailable)
+	if got := redis.joinedRooms(); len(got) != 0 {
+		t.Errorf("JoinRoom calls = %v, want none", got)
+	}
+}
+
+func TestWebsocketJoinRedisError(t *testing.T) {
+	redis := &fakeRedis{joinErr: errors.New("redis down")}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	conn := dialWS(t, url)
+
+	sendJoin(t, conn, "abc")
+
+	expectErrorCode(t, conn, 2*time.Second, wsCodeJoinUnavailable)
+	// join 失敗後還不在房間裡：leave 應該回 ws_not_in_room
+	sendFrame(t, conn, `{"type":"leave"}`)
+	expectErrorCode(t, conn, 2*time.Second, wsCodeNotInRoom)
+}
+
+func TestWebsocketJoinMalformedPayload(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	conn := dialWS(t, url)
+
+	for _, frame := range []string{
+		`{"type":"join","payload":"abc"}`,
+		`{"type":"join","payload":{"room":""}}`,
+		`{"type":"join"}`,
+	} {
+		sendFrame(t, conn, frame)
+		expectErrorCode(t, conn, 2*time.Second, wsCodeRoomNotFound)
+	}
+	if got := redis.joinedRooms(); len(got) != 0 {
+		t.Errorf("JoinRoom calls = %v, want none", got)
+	}
+}
+
+func TestWebsocketLeaveWithoutJoin(t *testing.T) {
+	_, url := newRoomTestServer(t, &fakeRedis{}, &wsFakeDB{})
+	conn := dialWS(t, url)
+
+	sendFrame(t, conn, `{"type":"leave"}`)
+
+	expectErrorCode(t, conn, 2*time.Second, wsCodeNotInRoom)
+}
+
+func TestWebsocketJoinThenLeave(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	conn := dialWS(t, url)
+	joinRoom(t, conn, "abc")
+
+	sendFrame(t, conn, `{"type":"leave"}`)
+
+	expectRoomFrame(t, conn, wsTypeLeaveOK, "abc")
+	deadline := time.Now().Add(2 * time.Second)
+	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
+		t.Errorf("LeaveRoom calls = %v, want [abc]", got)
+	}
+	// 離開後可以再 join
+	joinRoom(t, conn, "abc")
+}
+
+func TestWebsocketDisconnectLeavesRoom(t *testing.T) {
+	redis := &fakeRedis{}
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	conn := dialWS(t, url)
+	joinRoom(t, conn, "abc")
+
+	conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
+		t.Errorf("LeaveRoom calls = %v, want [abc]", got)
+	}
+}
+
+// JoinRoom 成功、但 client 在 applyJoin 拿鎖之前就被移除（例如廣播寫失敗）：
+// 讀取迴圈結束時仍要 LeaveRoom，Join / Leave 才會成對
+func TestWebsocketJoinThenRemovedBeforeApplyLeavesRoom(t *testing.T) {
+	redis := &fakeRedis{joinEntered: make(chan struct{}, 1), joinBlock: make(chan struct{})}
+	// 用 Once 包住 close：test 中途失敗時 cleanup 也會放行卡住的 JoinRoom，正常流程再 close 一次不會 panic
+	var releaseOnce sync.Once
+	releaseJoin := func() { releaseOnce.Do(func() { close(redis.joinBlock) }) }
+	t.Cleanup(releaseJoin)
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	conn := dialWS(t, url)
+
+	sendJoin(t, conn, "abc")
+	select {
+	case <-redis.joinEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("JoinRoom was not entered")
+	}
+
+	// JoinRoom 還卡著：模擬廣播寫失敗，把唯一的 server 端連線 Close + 移除
+	h.mutex.Lock()
+	if len(h.clients) != 1 {
+		h.mutex.Unlock()
+		t.Fatalf("clients = %d, want 1", len(h.clients))
+	}
+	for serverConn := range h.clients {
+		serverConn.Close()
+		h.removeClientLocked(serverConn)
+	}
+	h.mutex.Unlock()
+	releaseJoin()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
+		t.Errorf("LeaveRoom calls = %v, want [abc]", got)
+	}
+}
+
+// 廣播只送給在該房間的連線
+func TestWebsocketBroadcastFilteredByRoom(t *testing.T) {
+	redis := &fakeRedis{}
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true, "b": true}})
+	// fakeRedis.Subscribe 只存 handler 就返回，所以可以直接同步呼叫
+	h.StartBroadcast()
+	conn1 := dialWS(t, url)
+	conn2 := dialWS(t, url)
+	joinRoom(t, conn1, "a")
+	joinRoom(t, conn2, "b")
+
+	redis.deliver("a", `{"type":"message","payload":"hi"}`)
+
+	conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn1.ReadMessage()
+	if err != nil || string(data) != `{"type":"message","payload":"hi"}` {
+		t.Fatalf("conn1 read = %q, %v, want the broadcast", data, err)
+	}
+	conn2.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, data, err := conn2.ReadMessage(); err == nil {
+		t.Fatalf("conn2 received %q, want nothing", data)
+	}
+}
+
+// ---- frameRateLimiter ----
+
+// 固定視窗限流的邊界：視窗內最多 rateLimit 個；剛好滿 1 秒還在同一個視窗（條件是嚴格 >），超過才重置
+// 時間完全由 test 注入，不 sleep
+func TestFrameRateLimiterWindowBoundaries(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := &frameRateLimiter{windowStart: t0}
+
+	steps := []struct {
+		name  string
+		at    time.Time
+		count int  // 這一步連續呼叫幾次
+		want  bool // 每一次呼叫預期的結果
+	}{
+		{"視窗內前 rateLimit 個放行", t0, rateLimit, true},
+		{"第 rateLimit+1 個被擋", t0, 1, false},
+		{"剛好 t0+1s 還在同一視窗，仍被擋", t0.Add(time.Second), 1, false},
+		{"t0+1s+1ns 重置視窗，放行", t0.Add(time.Second + time.Nanosecond), 1, true},
+		{"新視窗內剩下的額度放行", t0.Add(time.Second + time.Nanosecond), rateLimit - 1, true},
+		{"新視窗額度用完，下一個被擋", t0.Add(time.Second + time.Nanosecond), 1, false},
+	}
+	for _, s := range steps {
+		for i := range s.count {
+			if got := l.allow(s.at); got != s.want {
+				t.Fatalf("%s: call #%d allow = %v, want %v", s.name, i+1, got, s.want)
+			}
+		}
+	}
+}
+
+// ---- 廣播寫失敗 ----
+
+// 找出 client 端 conn 對應的 server 端連線（呼叫時要持有 h.mutex）：server 端的 RemoteAddr 就是 client 端的 LocalAddr
+func serverConnForLocked(h *WebsocketHandler, client *websocket.Conn) *websocket.Conn {
+	for serverConn := range h.clients {
+		if serverConn.RemoteAddr().String() == client.LocalAddr().String() {
+			return serverConn
+		}
+	}
+	return nil
+}
+
+// 廣播時對某條連線寫失敗：廣播要把它 Close + 從 clients 移除，其他連線照收
+// 用 CloseWrite 只關 server 端的寫入方向：寫會失敗，但讀取方向還活著，
+// 讀取迴圈不會發現異常，所以「移除」只可能是廣播做的，不會被讀取迴圈的清理蓋掉
+func TestWebsocketBroadcastWriteFailureRemovesClient(t *testing.T) {
+	redis := &fakeRedis{}
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
+	h.StartBroadcast()
+	conn1 := dialWS(t, url)
+	conn2 := dialWS(t, url)
+	joinRoom(t, conn1, "a")
+	joinRoom(t, conn2, "a")
+
+	h.mutex.Lock()
+	failing := serverConnForLocked(h, conn1)
+	healthy := serverConnForLocked(h, conn2)
+	if failing == nil || healthy == nil || len(h.clients) != 2 {
+		h.mutex.Unlock()
+		t.Fatalf("setup: failing=%v healthy=%v clients=%d, want both found and 2 clients", failing != nil, healthy != nil, len(h.clients))
+	}
+	tcp, ok := failing.NetConn().(*net.TCPConn)
+	if !ok {
+		h.mutex.Unlock()
+		t.Fatalf("server conn is %T, want *net.TCPConn", failing.NetConn())
+	}
+	err := tcp.CloseWrite()
+	h.mutex.Unlock()
+	if err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	const msg = `{"type":"message","payload":"hi"}`
+	redis.deliver("a", msg) // 同步：廣播在 mutex 下跑完才返回
+
+	// 立刻檢查（不輪詢）：移除一定是這次廣播做的
+	h.mutex.Lock()
+	_, failingStill := h.clients[failing]
+	_, healthyStill := h.clients[healthy]
+	n := len(h.clients)
+	h.mutex.Unlock()
+	if failingStill {
+		t.Error("寫失敗的 client 還在 h.clients，廣播沒有移除它")
+	}
+	if !healthyStill || n != 1 {
+		t.Errorf("healthy client still in clients = %v, clients = %d, want true and 1", healthyStill, n)
+	}
+
+	// 另一條連線照樣收到
+	conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, data, err := conn2.ReadMessage(); err != nil || string(data) != msg {
+		t.Fatalf("conn2 read = %q, %v, want the broadcast", data, err)
+	}
+
+	// 廣播有 Close 失敗的連線 → 它的讀取迴圈結束 → LeaveRoom
+	// （client 端的 conn1 沒有關，所以這只能是廣播 Close 造成的）
+	deadline := time.Now().Add(2 * time.Second)
+	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "a" {
+		t.Errorf("LeaveRoom calls = %v, want [a]", got)
 	}
 }

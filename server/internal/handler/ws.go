@@ -27,10 +27,14 @@ const (
 	wsAuthDBTimeout = 3 * time.Second
 	wsTypeMessage   = "message"
 	wsTypeError     = "error"
-	wsTypeAuth      = "auth"    // client → server：連線內登入 / 續期
-	wsTypeAuthOK    = "auth_ok" // server → client：登入 / 續期成功
-	wsTypePing      = "ping"    // client → server：應用層心跳
-	wsTypePong      = "pong"    // server → client：回應心跳
+	wsTypeAuth      = "auth"     // client → server：連線內登入 / 續期
+	wsTypeAuthOK    = "auth_ok"  // server → client：登入 / 續期成功
+	wsTypePing      = "ping"     // client → server：應用層心跳
+	wsTypePong      = "pong"     // server → client：回應心跳
+	wsTypeJoin      = "join"     // client → server：進入房間
+	wsTypeJoinOK    = "join_ok"  // server → client：進入房間成功
+	wsTypeLeave     = "leave"    // client → server：離開房間
+	wsTypeLeaveOK   = "leave_ok" // server → client：離開房間成功
 
 	// server 送 protocol ping 的間隔；必須小於 nginx proxy_read_timeout（60s）
 	// client connection.ts 的心跳間隔要跟這個一致，範圍檢查在 ws_test.go
@@ -38,12 +42,24 @@ const (
 	// read deadline：連續 3 次 ping 都沒有回應才判定連線死掉
 	wsPongWait = 3 * wsPingPeriod
 
-	wsCodeWriteForbidden = "ws_write_forbidden"
-	wsMsgWriteForbidden  = "請透過 POST /messages 發送"
-	wsCodeAuthFailed     = "ws_auth_failed"
-	wsMsgAuthFailed      = "登入驗證失敗，目前為訪客"
-	wsCodeAuthExpired    = "ws_auth_expired"
-	wsMsgAuthExpired     = "登入已過期，目前為訪客"
+	wsCodeWriteForbidden  = "ws_write_forbidden"
+	wsMsgWriteForbidden   = "請透過 POST /messages 發送"
+	wsCodeAuthFailed      = "ws_auth_failed"
+	wsMsgAuthFailed       = "登入驗證失敗，目前為訪客"
+	wsCodeAuthExpired     = "ws_auth_expired"
+	wsMsgAuthExpired      = "登入已過期，目前為訪客"
+	wsCodeRoomNotFound    = "ws_room_not_found"
+	wsMsgRoomNotFound     = "房間不存在"
+	wsCodeJoinUnavailable = "ws_join_unavailable"
+	wsMsgJoinUnavailable  = "暫時無法進入房間，請稍後再試"
+	wsCodeAlreadyInRoom   = "ws_already_in_room"
+	wsMsgAlreadyInRoom    = "已在房間內，請先離開"
+	wsCodeNotInRoom       = "ws_not_in_room"
+	wsMsgNotInRoom        = "目前不在任何房間"
+
+	// join / leave frame 的 DB 查詢、JoinRoom、LeaveRoom 各自的上限（每個呼叫各包一個 timeout）：
+	// 卡住時不能一直佔著這條連線的讀取迴圈
+	wsJoinTimeout = 200 * time.Millisecond
 
 	// 身分變更 log 用的 from / to（有登入時用 user id）
 	wsAnonymous = "anonymous"
@@ -70,6 +86,11 @@ type wsAuthPayload struct {
 	Token string `json:"token"`
 }
 
+// type = "join"（client → server）以及 "join_ok" / "leave_ok"（server → client）的 payload：room 是房間的 public_id
+type wsRoomPayload struct {
+	Room string `json:"room"`
+}
+
 // type = "auth_ok" 的 payload：user 沿用 REST 的 userResponse，不用 loginResponse（WS 上沒有 token 要回）
 // expires_in = 剩餘整數秒，跟 REST login 的 expires_in 同單位
 type wsAuthOKPayload struct {
@@ -94,16 +115,28 @@ type wsClient struct {
 	username string
 	exp      time.Time
 	timer    *time.Timer
+	// 目前所在房間的 public_id，空字串 = 不在任何房間。只用來過濾廣播
+	// 「當前房間」的權威狀態在讀取迴圈的 wsConnState，這裡只是給廣播看的副本
+	room string
+}
+
+// 一條連線在讀取迴圈 goroutine 裡的私有狀態：只有 listenConnection 那個 goroutine 讀寫，所以不需要鎖
+// room 是這條連線已經向 Redis JoinRoom 成功、斷線時需要 LeaveRoom 的房間
+type wsConnState struct {
+	room string
 }
 
 // 這個檔案裡的 3 種 context：
 //
 //	StartBroadcast        → context.Background()  process 生命週期，跟任何 request 無關
 //	HandleWebsocket       → r.Context()           這條 WS 連線的生命週期，帶 request_id
-//	  └ listenConnection / removeClient → 沿用上層 ctx
+//	  └ listenConnection / closeConnection / removeClient → 沿用上層 ctx
 //	    └ processRemoteMessage → 沿用上層 ctx
-//	      └ handleAuth → 沿用上層 ctx，但 GetUserByID 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
-//	      其餘（回 error frame）沒有 DB / Redis 呼叫，不需要 timeout
+//	      ├ handleAuth → 沿用上層 ctx，但 GetUserByID 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
+//	      ├ handleJoin（enterRoom → lookupRoom / subscribeRoom）→ 沿用上層 ctx，但 GetRoomByPublicID、JoinRoom 各自另外包 wsJoinTimeout
+//	      ├ handleLeave → 沿用上層 ctx，但 LeaveRoom 另外包 wsJoinTimeout
+//	      └ 其餘（回 error frame）沒有 DB / Redis 呼叫，不需要 timeout
+//	    └ 斷線清理的 LeaveRoom → 沿用連線 ctx，另外包 wsJoinTimeout
 //
 // ctx 負責兩件事：1. 帶資料（request_id）2. 控制生命週期（取消、deadline）
 // Background() 兩者都沒有：log 不會有 request_id，DB/Redis 卡住時也會永遠等下去
@@ -125,7 +158,7 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// constuctor
+// constructor
 func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterface, tokens AccessTokenClaimsParser) *WebsocketHandler {
 	return &WebsocketHandler{
 		redis:   redis,
@@ -142,12 +175,16 @@ func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterf
 
 // 一條連線的生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
 //
-//	各種原因 → ReadMessage 失敗 → removeClient → HandleWebsocket return
-//	                                              ├ defer close(done) → pingLoop 結束
-//	                                              └ defer connection.Close()
+//	各種原因 → ReadMessage 失敗 → closeConnection（removeClient）→ HandleWebsocket return
+//	                                                               ├ defer close(done) → pingLoop 結束
+//	                                                               └ defer conn.Close()
 //
 // 其他 goroutine（pingLoop）發現連線壞了只 Close() 叫醒讀取迴圈，不自己 removeClient
 // 例外：StartBroadcast 持有全域鎖、會立刻 removeClientLocked（重複呼叫是安全的）
+// 但它不能呼叫 LeaveRoom（Redis I/O 不能在鎖內做），離開房間一律由讀取迴圈結束後的清理負責
+//
+// 鎖規則：絕不在持有 this.mutex 時呼叫 JoinRoom / LeaveRoom（Redis I/O）或 DB。
+// 一律照 handleAuth 的做法：I/O 在鎖外做完，再拿鎖更新 wsClient、回 frame
 // 在 listenConnection 之前 return 會跳過 removeClient → clients 裡留一筆，不要這樣寫
 func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
@@ -167,39 +204,44 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	// 所以 middleware 設定的 header（X-Request-ID、CORS）要明確傳進去。
 	// 傳 r.Header 是錯的：那是 client 送來的 request header，而且瀏覽器帶的
 	// Sec-WebSocket-Extensions 會讓 gorilla 直接回 500
-	connection, err := upgrader.Upgrade(w, r, w.Header())
+	conn, err := upgrader.Upgrade(w, r, w.Header())
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "ws upgrade failed", "error", err)
 		return
 	}
-	defer connection.Close()
+	defer conn.Close()
 
-	if !this.tryAddClient(r.Context(), connection) {
+	if !this.tryAddClient(r.Context(), conn) {
 		return
 	}
-	// 連線成功，設定每次發送的上限
-	connection.SetReadLimit(maxMessageBytes)
-	// 加上pingpong的keepalive mechanism
-	if err := this.addPongReadDeadline(connection); err != nil {
-		// 不 return：addPongReadDeadline 失敗時已經 Close，讓下面的 listenConnection 讀取失敗後去 removeClient
-		// 在這裡 return 會跳過 removeClient，clients 裡會留一筆
-		this.logger.WarnContext(r.Context(), "set read deadline failed", "error", err)
-	}
-
-	// 掛上pong handler
-	connection.SetPongHandler(func(appData string) error {
-		err := this.addPongReadDeadline(connection)
-		return err
-	})
+	this.setupKeepalive(r.Context(), conn)
 	// 加上ping loop
 	done := make(chan struct{})
 	defer close(done)
-	go this.pingLoop(r.Context(), connection, done)
+	go this.pingLoop(r.Context(), conn, done)
 
-	this.listenConnection(r.Context(), connection)
+	this.listenConnection(r.Context(), conn)
 }
 
-func (this *WebsocketHandler) pingLoop(ctx context.Context, connection *websocket.Conn, done <-chan struct{}) {
+// 連線成功後的設定：每次發送的上限 + pingpong 的 keepalive mechanism（初始 read deadline、pong handler）
+func (this *WebsocketHandler) setupKeepalive(ctx context.Context, conn *websocket.Conn) {
+	// 連線成功，設定每次發送的上限
+	conn.SetReadLimit(maxMessageBytes)
+	// 加上pingpong的keepalive mechanism
+	if err := this.addPongReadDeadline(conn); err != nil {
+		// 不 return：addPongReadDeadline 失敗時已經 Close，讓之後的 listenConnection 讀取失敗後去 removeClient
+		// 在這裡 return 會跳過 removeClient，clients 裡會留一筆
+		this.logger.WarnContext(ctx, "set read deadline failed", "error", err)
+	}
+
+	// 掛上pong handler
+	conn.SetPongHandler(func(appData string) error {
+		err := this.addPongReadDeadline(conn)
+		return err
+	})
+}
+
+func (this *WebsocketHandler) pingLoop(ctx context.Context, conn *websocket.Conn, done <-chan struct{}) {
 	ticker := time.NewTicker(this.pingPeriod)
 	defer ticker.Stop()
 	for {
@@ -213,14 +255,14 @@ func (this *WebsocketHandler) pingLoop(ctx context.Context, connection *websocke
 		case <-ticker.C:
 			// 送ping
 			deadline := time.Now().Add(writeWait)
-			if err := connection.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+			if err := conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
 				// 送ping的時候遇到錯誤，代表該connection遇到問題
 				// 也可能是等 gorilla 內部寫入鎖逾時（StartBroadcast 正卡在寫這條慢 client，最多 writeWait）：一律視為連線不健康、關掉
 				this.logger.WarnContext(ctx, "write ping failed", "error", err)
 				// 特別注意，因為pingLoop跟listenConnection在不同go routine
 				// 所以這邊要特別指定close，不然listenConnection要等到timeout
 				// 才會繼續走
-				connection.Close()
+				conn.Close()
 				return
 			}
 		}
@@ -253,40 +295,64 @@ func (this *WebsocketHandler) tryAddClient(ctx context.Context, conn *websocket.
 	return true
 }
 
-func (this *WebsocketHandler) listenConnection(ctx context.Context, connection *websocket.Conn) {
-	var msgCount int
-	windowStart := time.Now()
+// 每條連線的 frame 限流：固定視窗，視窗內最多 rateLimit 個 frame
+// 只有讀取迴圈那個 goroutine 會用，所以不需要鎖
+type frameRateLimiter struct {
+	msgCount    int
+	windowStart time.Time
+}
+
+func newFrameRateLimiter() *frameRateLimiter {
+	return &frameRateLimiter{windowStart: time.Now()}
+}
+
+// 回傳 false = 這個 frame 超過限流，要丟掉
+func (this *frameRateLimiter) allow(now time.Time) bool {
+	if now.Sub(this.windowStart) > time.Second {
+		this.msgCount = 0
+		this.windowStart = now
+	}
+	this.msgCount++
+	return this.msgCount <= rateLimit
+}
+
+func (this *WebsocketHandler) listenConnection(ctx context.Context, conn *websocket.Conn) {
+	limiter := newFrameRateLimiter()
+	state := &wsConnState{}
 
 	for {
-		_, msg, err := connection.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			// connection遇到錯誤, 把該connection移除
-			this.removeClient(ctx, connection)
-			break
+			// conn遇到錯誤, 把該conn移除
+			this.closeConnection(ctx, conn, state)
+			return
 		}
 		// 新增：收到任何訊息都代表 client 還活著
-		if err := this.addPongReadDeadline(connection); err != nil {
+		if err := this.addPongReadDeadline(conn); err != nil {
 			this.logger.WarnContext(ctx, "set read deadline failed", "error", err)
 		}
 		// auth frame 裡有 access token，不能進 log；誰送的看身分變化的 INFO log
-		this.logger.DebugContext(ctx, "info received", "bytes", len(msg))
+		this.logger.DebugContext(ctx, "frame received", "bytes", len(msg))
 		// WS 收到的 frame（auth / ping / 其他）每條連線每秒最多 rateLimit 個，超過的直接丟掉（不驗、不查、不回）
 		// 跟 POST /messages 的限流無關：WS 連線不用登入就能連，任何人都能送 frame 逼 server 做事
 		// （每個 frame 都要拿全域鎖回應；用自己合法 token 狂送 auth 還會每次查 DB）
-		now := time.Now()
-		if now.Sub(windowStart) > time.Second {
-			msgCount = 0
-			windowStart = now
-		}
-		msgCount++
-		if msgCount > rateLimit {
+		if !limiter.allow(time.Now()) {
 			this.logger.WarnContext(ctx, "too many msgs sent", "limit", rateLimit)
 			continue
 		}
 
-		this.processRemoteMessage(ctx, connection, msg)
+		this.processRemoteMessage(ctx, conn, state, msg)
 	}
+}
 
+// 斷線清理（讀取迴圈結束時呼叫）：先 removeClient，還在房間裡再 LeaveRoom
+func (this *WebsocketHandler) closeConnection(ctx context.Context, conn *websocket.Conn, state *wsConnState) {
+	this.removeClient(ctx, conn)
+	// 還在房間裡就要 LeaveRoom（鎖外做；廣播寫失敗移除 client 時也是靠這裡清理）
+	if state.room != "" {
+		this.leaveRoom(ctx, state.room)
+		state.room = ""
+	}
 }
 
 func (this *WebsocketHandler) removeClient(ctx context.Context, conn *websocket.Conn) {
@@ -299,6 +365,8 @@ func (this *WebsocketHandler) removeClient(ctx context.Context, conn *websocket.
 // 收到 client 一個 frame 後的分派：
 //   - type = "auth" → handleAuth（連線內登入 / 續期，失敗只降回訪客，不斷線）
 //   - type = "ping" → 回 pong（應用層心跳，payload 忽略；一樣算進每條連線的 5 則/秒限流）
+//   - type = "join" → handleJoin（進入房間，一條連線同時只能在一個房間）
+//   - type = "leave" → handleLeave（離開房間）
 //   - 其他（含不是合法 JSON）→ 回 ws_write_forbidden
 //
 // WS 不能寫入：發訊息要走 POST /messages（那裡才驗得了身分、存得進 DB 並帶 user_id）
@@ -307,47 +375,161 @@ func (this *WebsocketHandler) removeClient(ctx context.Context, conn *websocket.
 //
 // 每條連線的 5 則/秒限流（listenConnection）同時也限制了 error frame 的數量（auth frame 也算），
 // 不用另外擋「狂送訊息逼 server 狂回錯誤」
-func (this *WebsocketHandler) processRemoteMessage(ctx context.Context, connection *websocket.Conn, msg []byte) {
+func (this *WebsocketHandler) processRemoteMessage(ctx context.Context, conn *websocket.Conn, state *wsConnState, msg []byte) {
 	var in struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
 	if err := json.Unmarshal(msg, &in); err != nil {
-		this.mutex.Lock()
-		defer this.mutex.Unlock()
-		this.writeErrorLocked(ctx, connection, wsCodeWriteForbidden, wsMsgWriteForbidden)
+		this.replyError(ctx, conn, wsCodeWriteForbidden, wsMsgWriteForbidden)
 		return
 	}
 	switch in.Type {
 	case wsTypeAuth:
-		this.handleAuth(ctx, connection, in.Payload)
+		this.handleAuth(ctx, conn, in.Payload)
+	case wsTypeJoin:
+		this.handleJoin(ctx, conn, state, in.Payload)
+	case wsTypeLeave:
+		this.handleLeave(ctx, conn, state)
 	case wsTypePing:
-		this.mutex.Lock()
-		defer this.mutex.Unlock()
-		this.writeEnvelopeLocked(ctx, connection, wsEnvelope{Type: wsTypePong, Payload: nil})
+		this.reply(ctx, conn, wsEnvelope{Type: wsTypePong, Payload: nil})
 	default:
-		this.mutex.Lock()
-		defer this.mutex.Unlock()
-		this.writeErrorLocked(ctx, connection, wsCodeWriteForbidden, wsMsgWriteForbidden)
+		this.replyError(ctx, conn, wsCodeWriteForbidden, wsMsgWriteForbidden)
 	}
+}
+
+// 回一個 envelope 給這條連線（內部拿鎖）
+func (this *WebsocketHandler) reply(ctx context.Context, conn *websocket.Conn, env wsEnvelope) {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	this.writeEnvelopeLocked(ctx, conn, env)
+}
+
+// 回一個 error frame 給這條連線（內部拿鎖）
+func (this *WebsocketHandler) replyError(ctx context.Context, conn *websocket.Conn, code, message string) {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	this.writeErrorLocked(ctx, conn, code, message)
+}
+
+// 處理 join frame。DB 查詢和 JoinRoom 都在鎖外做（Redis / DB 可能慢，不能擋住廣播和其他連線），
+// 只有「更新 wsClient.room + 回 frame」才拿鎖
+// payload 壞掉 / room 空 → 一律回 ws_room_not_found（跟 auth 壞 payload 回 ws_auth_failed 同一個做法）
+func (this *WebsocketHandler) handleJoin(ctx context.Context, conn *websocket.Conn, state *wsConnState, raw json.RawMessage) {
+	if state.room != "" {
+		this.replyError(ctx, conn, wsCodeAlreadyInRoom, wsMsgAlreadyInRoom)
+		return
+	}
+	roomID, wsErr := this.enterRoom(ctx, raw)
+	if wsErr != nil {
+		this.replyError(ctx, conn, wsErr.Code, wsErr.Message)
+		return
+	}
+	// JoinRoom 成功：從這一刻起，斷線清理要負責 LeaveRoom
+	state.room = roomID
+
+	this.applyJoin(ctx, conn, roomID)
+}
+
+// 解析 payload、確認房間存在、向 Redis JoinRoom。不碰鎖。
+// 成功回傳 room 的 public_id；失敗回傳要給 client 的 error（nil = 成功）
+func (this *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage) (string, *wsError) {
+	var p wsRoomPayload
+	if err := json.Unmarshal(raw, &p); err != nil || p.Room == "" {
+		this.logger.InfoContext(ctx, "ws join rejected", "reason", "malformed payload")
+		return "", &wsError{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
+	}
+	if wsErr := this.lookupRoom(ctx, p.Room); wsErr != nil {
+		return "", wsErr
+	}
+	if wsErr := this.subscribeRoom(ctx, p.Room); wsErr != nil {
+		return "", wsErr
+	}
+	return p.Room, nil
+}
+
+// 查 DB 確認房間存在，包 wsJoinTimeout。不碰鎖。nil = 房間存在
+func (this *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *wsError {
+	dbCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
+	defer cancel()
+	if _, err := this.db.GetRoomByPublicID(dbCtx, roomID); err != nil {
+		if errors.Is(err, store.ErrRoomNotFound) {
+			this.logger.InfoContext(ctx, "ws join rejected", "reason", "room not found", "room", roomID)
+			return &wsError{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
+		}
+		this.logger.ErrorContext(ctx, "ws join get room failed", "error", err, "room", roomID)
+		return &wsError{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
+	}
+	return nil
+}
+
+// 對 Redis 做 JoinRoom，包 wsJoinTimeout。不碰鎖。nil = 成功
+func (this *WebsocketHandler) subscribeRoom(ctx context.Context, roomID string) *wsError {
+	joinCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
+	defer cancel()
+	if err := this.redis.JoinRoom(joinCtx, roomID); err != nil {
+		this.logger.ErrorContext(ctx, "ws join room failed", "error", err, "room", roomID)
+		return &wsError{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
+	}
+	return nil
+}
+
+// JoinRoom 成功後拿鎖更新 wsClient.room 並回 join_ok
+func (this *WebsocketHandler) applyJoin(ctx context.Context, conn *websocket.Conn, roomID string) {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	c, exists := this.clients[conn]
+	if !exists {
+		// 期間連線已被移除（廣播寫失敗），讀取迴圈之後會 LeaveRoom
+		return
+	}
+	c.room = roomID
+	this.writeEnvelopeLocked(ctx, conn, wsEnvelope{Type: wsTypeJoinOK, Payload: wsRoomPayload{Room: roomID}})
+}
+
+// 處理 leave frame。對 client 來說 leave 一定成功：先改 wsClient.room 並回 leave_ok，
+// 再到鎖外做 LeaveRoom（失敗只記 log，由 roomSubscriptions 處理）
+func (this *WebsocketHandler) handleLeave(ctx context.Context, conn *websocket.Conn, state *wsConnState) {
+	if state.room == "" {
+		this.replyError(ctx, conn, wsCodeNotInRoom, wsMsgNotInRoom)
+		return
+	}
+	roomID := state.room
+
+	this.mutex.Lock()
+	if c, exists := this.clients[conn]; exists {
+		c.room = ""
+		this.writeEnvelopeLocked(ctx, conn, wsEnvelope{Type: wsTypeLeaveOK, Payload: wsRoomPayload{Room: roomID}})
+	}
+	this.mutex.Unlock()
+
+	this.leaveRoom(ctx, roomID)
+	state.room = ""
+}
+
+// 對 Redis 做 LeaveRoom（呼叫時不能持有 this.mutex），包 wsJoinTimeout
+func (this *WebsocketHandler) leaveRoom(ctx context.Context, roomID string) {
+	leaveCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
+	defer cancel()
+	this.redis.LeaveRoom(leaveCtx, roomID)
 }
 
 // 處理 auth frame。token 解析和 DB 查詢都在鎖外做（DB 可能慢，不能擋住廣播和其他連線），
 // 只有「套用身分變更 + 回 frame」才拿鎖
 // 任何失敗一律降回匿名並回 ws_auth_failed（即使原本是 member），連線不關
-func (this *WebsocketHandler) handleAuth(ctx context.Context, connection *websocket.Conn, raw json.RawMessage) {
+func (this *WebsocketHandler) handleAuth(ctx context.Context, conn *websocket.Conn, raw json.RawMessage) {
 	user, exp, ok := this.verifyAuthPayload(ctx, raw)
 
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
-	c, exists := this.clients[connection]
+	c, exists := this.clients[conn]
 	if !exists {
 		// 驗證期間連線已被移除（斷線 / 廣播寫失敗），沒有人可以回了
 		return
 	}
 	if !ok {
 		this.downgradeLocked(ctx, c, wsReasonAuthFailed)
-		this.writeErrorLocked(ctx, connection, wsCodeAuthFailed, wsMsgAuthFailed)
+		this.writeErrorLocked(ctx, conn, wsCodeAuthFailed, wsMsgAuthFailed)
 		return
 	}
 	this.applyAuthLocked(ctx, c, user.ID, user.Username, exp)
@@ -518,26 +700,38 @@ func (this *WebsocketHandler) writeEnvelopeLocked(ctx context.Context, conn *web
 func (this *WebsocketHandler) StartBroadcast() {
 	// Redis subscribe 是 server 層級的長期任務，不屬於任何 request
 	// 所以要用context.Background()
-	this.redis.Subscribe(context.Background(), func(msg string) {
+	this.redis.Subscribe(context.Background(), func(roomID, msg string) {
 		this.mutex.Lock()
 		defer this.mutex.Unlock()
-		for client := range this.clients {
-			maxWaitingTime := time.Now().Add(writeWait)
-			if err := client.SetWriteDeadline(maxWaitingTime); err != nil {
-				// 為了避免有機率影響到其他用戶，移除該client
-				client.Close()
-				this.removeClientLocked(client)
-				continue
-			}
-			if err := client.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
-				/// for loop check other client is alive, if not
-				/// remove it from client list due to write failed
-				client.Close()
-				this.removeClientLocked(client)
-				continue
-			}
-		}
+		this.broadcastToRoomLocked(roomID, msg)
 	})
+}
+
+// 把 msg 送給所有在 roomID 的連線（呼叫時要持有 this.mutex）
+// 命名慣例：結尾是 Locked 的 function 都要求呼叫端已經持有 this.mutex
+func (this *WebsocketHandler) broadcastToRoomLocked(roomID, msg string) {
+	for conn, c := range this.clients {
+		// 只送給在這個房間的連線
+		if c.room != roomID {
+			continue
+		}
+		if err := this.writeRawLocked(conn, []byte(msg)); err != nil {
+			// 寫失敗：為了避免有機率影響到其他用戶，移除該 client（其他 client 照送）
+			conn.Close()
+			this.removeClientLocked(conn)
+			continue
+		}
+	}
+}
+
+// 寫一則原始文字訊息給這條連線（呼叫時要持有 this.mutex）
+// SetWriteDeadline 或 WriteMessage 任一失敗就回傳 error，由呼叫端負責 Close + removeClientLocked
+func (this *WebsocketHandler) writeRawLocked(conn *websocket.Conn, msg []byte) error {
+	maxWaitingTime := time.Now().Add(writeWait)
+	if err := conn.SetWriteDeadline(maxWaitingTime); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, msg)
 }
 
 // 新連線一律是匿名：這裡只加進 clients、總連線數 +1，refcount 不動（auth 成功才 memberJoinedLocked）

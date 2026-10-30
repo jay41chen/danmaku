@@ -4,24 +4,24 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"time"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	channel       = "danmaku:messages"
-	retryMaxDelay = 30 * time.Second
-)
-
 type RedisStoreInterface interface {
-	Publish(ctx context.Context, msg string) error
-	Subscribe(ctx context.Context, handler func(string)) error
+	Publish(ctx context.Context, roomID, msg string) error // 發到 roomChannel(roomID)
+	Subscribe(ctx context.Context, handler func(roomID, msg string)) error
+	JoinRoom(ctx context.Context, roomID string) error // 委派給 roomSubscriptions.Join
+	LeaveRoom(ctx context.Context, roomID string)      // 委派給 roomSubscriptions.Leave
 	CheckHealth(ctx context.Context) error
 }
 
 type RedisStore struct {
 	client *redis.Client
+	// 整台 server 只有一個長期存活的 PubSub，建立時不訂任何 channel，房間的 channel 之後動態 SUBSCRIBE / UNSUBSCRIBE
+	pubsub *redis.PubSub
+	rooms  *roomSubscriptions
 	logger *slog.Logger
 }
 
@@ -43,7 +43,16 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	}
 	logger.Info("connected")
 
+	pubsub := client.Subscribe(ctx)
+	rooms := newRoomSubscriptions(
+		func(ctx context.Context, ch string) error { return pubsub.Subscribe(ctx, ch) },
+		func(ctx context.Context, ch string) error { return pubsub.Unsubscribe(ctx, ch) },
+		logger,
+	)
+
 	return &RedisStore{client: client,
+		pubsub: pubsub,
+		rooms:  rooms,
 		logger: logger,
 	}, nil
 }
@@ -52,27 +61,33 @@ func (this *RedisStore) CheckHealth(ctx context.Context) error {
 	return this.client.Ping(ctx).Err()
 }
 
-func (this *RedisStore) Publish(ctx context.Context, msg string) error {
-	return this.client.Publish(ctx, channel, msg).Err()
+func (this *RedisStore) Publish(ctx context.Context, roomID, msg string) error {
+	return this.client.Publish(ctx, roomChannel(roomID), msg).Err()
 }
 
-func (this *RedisStore) Subscribe(ctx context.Context, handler func(string)) error {
-	var delayTime time.Duration
-	for {
-		subscription := this.client.Subscribe(ctx, channel)
-		// 成功連上redis，重設delayTime
-		delayTime = 1 * time.Second
-		ch := subscription.Channel()
-		for msg := range ch {
-			handler(msg.Payload)
+func (this *RedisStore) JoinRoom(ctx context.Context, roomID string) error {
+	return this.rooms.Join(ctx, roomID)
+}
+
+func (this *RedisStore) LeaveRoom(ctx context.Context, roomID string) {
+	this.rooms.Leave(ctx, roomID)
+}
+
+// 不做外層 retry / backoff：go-redis 的 Channel() 只有在 PubSub 被 Close 時才會關閉
+// （go-redis v9.23 pubsub.go initMsgChan：只有遇到 pool.ErrClosed 才 close msgCh）；
+// 網路斷線時 go-redis 會自己重連，並重新訂閱它記住的 channel。
+// 如果在這裡另外建一個新的 PubSub，所有動態訂閱的房間都會遺失
+//
+// 已知問題（既有行為）：Channel() 的 buffer 滿了（我們消費太慢）時，
+// go-redis 會直接丟掉那則訊息、只記 log（pubsub.go 約 787-796）
+func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg string)) error {
+	for msg := range this.pubsub.Channel() {
+		roomID, ok := strings.CutPrefix(msg.Channel, roomChannel("")) // 去掉 "room:" 前綴
+		if !ok {
+			this.logger.WarnContext(ctx, "unexpected channel, skipped", "channel", msg.Channel)
+			continue
 		}
-		subscription.Close()
-		this.logger.WarnContext(ctx, "redis subscription lost", "retryIn", delayTime)
-		time.Sleep(delayTime)
-		// backoff retry
-		delayTime *= 2
-		if delayTime >= retryMaxDelay {
-			delayTime = retryMaxDelay
-		}
+		handler(roomID, msg.Payload)
 	}
+	return nil
 }
