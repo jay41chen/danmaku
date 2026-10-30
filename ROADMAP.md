@@ -104,6 +104,7 @@
     - 連線目前在哪間房由讀取迴圈的 goroutine 自己記（join / leave / 斷線清理都在它身上），結束時在鎖外 `Leave`；`wsClient.room` 另存一份給廣播過濾
     - 部署分兩次 push：先上前端（舊 backend 對 `join` 回 `ws_write_forbidden`，前端要當無害忽略），再上 backend；backend 上線後還開著舊頁面的人要重新整理
   - [x] Pub/Sub flapping debounce（`unsubscribeDelay` 30 秒，generation check 擋過期 timer；fakeClock 測情境 A / B）：冷門房 `viewers` 在 0↔1 之間跳，每次都送 SUBSCRIBE / UNSUBSCRIBE；20,000 間房 × 10 台 server 會超過單台 Redis。做法：延遲 UNSUBSCRIBE（例如 30 秒，SUBSCRIBE 不延遲）；timer 觸發時要重新上鎖再檢查 `viewers == 0`（`timer.Stop()` 回 `false` 時取消不了）；有 timer 在等的 entry 不能刪；test 要能注入時間
+  - [x] `join_ok` 等 Redis 確認 SUBSCRIBE 才回（`ChannelWithSubscriptions` 的 `*redis.Subscription` → entry 的 `ready` channel，鎖外等）：補「join_ok 之後補撈歷史」的洞（JoinRoom 原本只寫出指令就回傳，緊接著的訊息可能兩邊都漏）；順便修好 `TestRoomPubSub` 的 flaky（30 次 fail 5 次 → 50/50）
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403

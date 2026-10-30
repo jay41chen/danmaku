@@ -117,7 +117,7 @@ npm run dev
   - `join_ok` / `leave_ok`：進房 / 離房成功，payload `{"room": "<public_id>"}`
   - `pong`：回應 client 的 `ping`
 - WS keepalive：client 每 25 秒送 `{"type": "ping"}`，server 回 `{"type": "pong"}`；server 也每 25 秒送 WebSocket protocol ping（瀏覽器自動回 pong），75 秒沒收到任何東西就斷線。目的是讓閒置連線不被 nginx `proxy_read_timeout`（60s）切掉，並偵測半開連線
-- WS 進房：client 送 `{"type": "join", "payload": {"room": "<public_id>"}}`，收到 `join_ok` 之後才會收到該房間的 `message`。一條連線同時最多在一個房間；換房 = 先送 `{"type": "leave"}` 再 `join`。斷線時 server 自動離房。`join_ok` 之前發出的彈幕不會補送（Redis Pub/Sub 不存訊息），client 收到 `join_ok` 後要再抓一次歷史訊息
+- WS 進房：client 送 `{"type": "join", "payload": {"room": "<public_id>"}}`，收到 `join_ok` 之後才會收到該房間的 `message`。一條連線同時最多在一個房間；換房 = 先送 `{"type": "leave"}` 再 `join`。斷線時 server 自動離房。`join_ok` 之前發出的彈幕不會補送（Redis Pub/Sub 不存訊息），client 收到 `join_ok` 後要再抓一次歷史訊息（server 等 Redis 確認訂閱好了才回 `join_ok`，所以兩者中間不會有漏掉的訊息）
 - WS 登入：client 送 `{"type": "auth", "payload": {"token": "<access token>"}}`。快到期時在同一條連線再送一次新的 token 續期；送別人的 token 會直接換身分
 
 ## Request ID & Log 追蹤
