@@ -92,7 +92,7 @@ npm run dev
 |---|---|---|---|
 | `GET` | `/rooms/{public_id}/messages` | | 該房間的歷史訊息；房間不存在或已刪除回 `404`，沒有訊息回 `[]`。發送者已刪除的訊息 `username` 是 `null` |
 | `POST` | `/rooms/{public_id}/messages` | ✓ | 在該房間發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。房間不存在或已刪除回 `404`。成功回 `201` + 訊息，並廣播給已 `join` 這個房間的 WS 連線 |
-| `GET`、`POST` | `/messages` | POST ✓ | **已棄用**：固定讀寫 legacy 房間（`legacy00000`），行為同上，之後移除 |
+| 任何 method | `/messages` | | **已移除**：回 `410 Gone`，請改用 `/rooms/{public_id}/messages` |
 | `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：trim 後 1～30 字；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上後要送 `join` 進房才收得到該房間的彈幕；連上是匿名，可在連線內送 auth frame 登入（見下方） |
@@ -151,7 +151,7 @@ CORS middleware 依 `CORS_ORIGINS` 決定哪些網站的前端可以讀取 API r
 GitHub Pages 前端的 origin 是 `https://jay41chen.github.io`（不含 `/danmaku/` 路徑）。
 
 ```bash
-curl -si -X OPTIONS localhost:5388/messages \
+curl -si -X OPTIONS localhost:5388/rooms/legacy00000/messages \
   -H 'Origin: https://a.com' -H 'Access-Control-Request-Method: POST'   # 204 + Access-Control-Allow-* headers
 ```
 

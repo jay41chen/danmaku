@@ -93,7 +93,7 @@
   - 網址 `/{username}/{public_id}`：只用 `public_id`（11 字元 base64url，`randx.URLText(8)` 產生，跟 refresh token 共用，unique index 擋碰撞）找房間，username 對不上就 301 導向；內部 PK / FK 仍用 `BIGINT id`
     - **暫時做法（待改）**：前端先用 `?room={public_id}`，沒帶就進 `legacy00000`。原因：GitHub Pages 是純靜態 hosting，直接開 `/{username}/{public_id}` 這種深層路徑會 404（沒有 SPA fallback）。等有自訂網域 / 換 hosting，或用 `404.html` 轉址做 SPA fallback 時，改回上面的路徑格式
     - ✅ 彈幕 API 改成 `POST` / `GET /rooms/{public_id}/messages`（2c17ac8），前端已換過去（91b3940）
-    - [ ] 移除已棄用的 `/messages`（route、handler、test）：目前固定讀寫 legacy room，暫時保留
+    - [x] 移除已棄用的 `/messages`：改成 tombstone route，任何 method 回 `410 Gone` + 指路（`routes.removed` 不收 handler，避免被拿去開公開 API）
     - ~~Known issue：WS 仍是全站一個 Redis channel，在房間 X 的觀眾會收到所有房間的彈幕~~ → 已由下一項修掉
   - [x] Pub/Sub 每個房間一個 channel（`room:{public_id}`，過濾交給 Redis）+ WS `join` / `leave`：store a33e3f5、前端 c4eedc0、backend e0eac93（含 ws.go 長函式拆小）。本機 2 台 server 實測 NUMSUB / MONITOR 行為符合預期（見 go-notes 3.29）
     - 每台 server 只看自己身上的連線：某房間的 `viewers` 0→1 時 `SUBSCRIBE`、1→0 時 `UNSUBSCRIBE`（lazy subscribe），全部走同一條 Redis Pub/Sub 連線
@@ -133,7 +133,7 @@
 - [ ] Rate limiting（middleware）
   - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
   - Limiter 呼叫加短 timeout（例如 `context.WithTimeout` 100ms）：Redis 網路黑洞時 go-redis 預設 dial timeout 5 秒，一次 login 呼叫 limiter 4 次，fail open 最慢要等約 20 秒
-  - 全域基本限制（每 IP 每秒 N 個 request，nginx `limit_req` 或 middleware）：目前只有個別 endpoint 的嚴格限制。依「被濫用的代價」決定而不是 HTTP method：`GET /messages?limit=10000` 一樣貴
+  - 全域基本限制（每 IP 每秒 N 個 request，nginx `limit_req` 或 middleware）：目前只有個別 endpoint 的嚴格限制。依「被濫用的代價」決定而不是 HTTP method：`GET /rooms/{public_id}/messages?limit=10000` 一樣貴
   - WS 連線數限制：WS 不用登入就能連，現在只有每條連線 5 frame/秒（`listenConnection`），擋不住「開很多條」
     - 開 100 條閒置連線就佔滿 `maxClients`，正常使用者連不上；keepalive 之後閒置連線會回 pong，不會被 read deadline 踢掉
     - 開 100 條、每條每秒送 5 個 → 合計每秒 500 次搶全域鎖回應，廣播變慢
@@ -164,7 +164,7 @@
 - [ ] CI/CD（GitHub Actions）
 - [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
-- [ ] 彈幕非同步保存（量大時）：目前 `POST /messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
+- [ ] 彈幕非同步保存（量大時）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
   - 順便拆 `ws.go`（W4b 已先把長函式拆小，檔案沒拆）：照 Hub 之後的邊界拆（例如 `hub.go` 管連線 / 廣播、`client.go` 管單條連線讀寫），不要先照 auth / room 拆一次再重拆；純搬家和改 code 分兩個 commit，diff 才 review 得了
   - 每條連線改成自己的寫入 goroutine 後，WS 連線的身分（user、exp、timer）改用每條連線各自的 mutex：Step 9 先用全站那把鎖，因為寫 frame 本來就要拿全站鎖，拆身分鎖省不到東西；要拆時上鎖順序固定「全站 → 單條連線」
