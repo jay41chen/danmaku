@@ -111,8 +111,10 @@
       - 3 輪 Judge 通過（mutation 都有 test 擋）。設計過程見 go-notes 3.31
       - Known issue（接受）：部署期間舊版 server 不讀新表；撤銷進行中開始的登入 / rotate，新 token 可能一發出就失效（誤殺、不是繞過）；(a) 查 user_id 與 (b) 拿鎖之間 user 被刪 → invalid 那條沒 test；handler log test 的 fake `rotateUserID` 跟 error 的 UserID 都是 7，分不出 log 用錯變數（改成 0 即可）
       - 之後：`lockUser` 用 `FOR UPDATE` 會擋住這個 user 的 FK INSERT（登入、發彈幕）幾 ms，可改 `FOR NO KEY UPDATE`；token family（RFC 9700：只撤銷同一次登入衍生的那串，不踢掉其他裝置）
-    - [ ] 補 mutation 沒擋住的 test：WS 過期 timer 拿鎖後重查 exp（ws.go）、`handleLeave` 清 `c.room`（leave 後不再收到廣播）、未知帳號的 dummy bcrypt（timing 防列舉）
-    - [ ] `Publish` 改用 `context.WithoutCancel(r.Context())` + 短 timeout：INSERT 成功後 client 斷線 → 已存 DB 但沒廣播
+    - [x] 補 mutation 沒擋住的 test：WS 過期 timer 拿鎖後重查 exp（ws.go）、`handleLeave` 清 `c.room`（leave 後不再收到廣播）、未知帳號的 dummy bcrypt（timing 防列舉；`AuthHandler.checkPassword` 可替換成 spy）
+    - [x] `Publish` 改用 `context.WithoutCancel(r.Context())` + 短 timeout：INSERT 成功後 client 斷線 → 已存 DB 但沒廣播。只改 `broadcast()`（`publishTimeout` 500ms），INSERT 維持 request ctx（INSERT 前 / 中取消 = 沒存也沒廣播，一致）
+      - 同類（低優先，未修）：login 的 `CreateRefreshToken` commit 之後，`limiter.Reset` / `Refund` 還用 `r.Context()` → client 中途斷線時失敗計數沒 reset、IP 沒退還（client 沒拿到 token，說得過去）
+      - Known issue：D1 test 靠 100ms token + 250ms sleep 的時序（沿用既有 race test），CI 很慢時可能誤報失敗（不會假通過）；真的 flaky 再放寬
     - [ ] Redis 出狀況時不要拖垮整台 server（同一個根因：全域鎖底下做網路 I/O + 確認與廣播共用一個 consumer goroutine）
       - `rooms.mu` 底下呼叫 go-redis `Subscribe`：Redis 黑洞時 go-redis 握著自己的鎖重連 → 整台 Join / Leave 卡 5–15 秒（實驗證實）；200ms ctx 管不到等鎖的時間（`room_subscriptions.go` 的 `unsubscribeTimeout` 註解說法要修正）
       - 排隊等鎖時 ctx 已過期 → 寫入 timeout → go-redis 判定 bad conn → 整條 PubSub 重連，所有房間漏訊息（實驗證實）
