@@ -57,6 +57,10 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 		func(d time.Duration, f func()) stopper { return time.AfterFunc(d, f) },
 		logger,
 	)
+	// 送 SUB / UNSUB 的 worker：整台 server 一個，跟 process 活一樣久（main 傳進來的是 context.Background()）
+	// 不能等到 Subscribe 才啟動：Subscribe 是 ws.go 另外起的 goroutine，順序不保證，
+	// 第一個 Join 可能比它早到，標了 dirty 卻沒人處理
+	go rooms.run(ctx)
 
 	return &RedisStore{client: client,
 		pubsub: pubsub,
@@ -114,11 +118,11 @@ func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg 
 // Redis 對 SUBSCRIBE / UNSUBSCRIBE 的確認：只有 subscribe 的確認拿去叫醒在 Join 裡等的人
 // 抽出來是為了 test 能直接餵假的 *redis.Subscription（consumer 迴圈讀的是 go-redis 的 channel，fake 不進去）
 //
-// 一定要過濾 Kind，unsubscribe 的確認不能拿去 close ready：
+// 一定要過濾 Kind，unsubscribe 的確認不能拿去 close ready（confirmSubscribed 只看 state，分不出是哪一種確認）：
 //
-//	t0  expire：寫出 UNSUBSCRIBE room:a、刪 entry、放鎖
-//	t1  X 進房：建新 entry（新的 ready）、寫出 SUBSCRIBE room:a、放鎖、開始等
-//	t2  t0 那個 UNSUBSCRIBE 的確認才到 → 如果不過濾，會 close X 的新 ready
+//	t0  worker：決定 UNSUB（換新的 ready、state=subIdle），寫出 UNSUBSCRIBE room:a
+//	t1  X 進房 → worker 決定 SUB（state=subSent），寫出 SUBSCRIBE room:a，X 開始等
+//	t2  t0 那個 UNSUBSCRIBE 的確認才到 → 如果不過濾，state 剛好是 subSent，會 close X 的新 ready
 //	t3  X 拿到 join_ok，但它的 SUBSCRIBE 還沒被確認 → 又回到「join_ok 之後補撈歷史也補不到」的洞
 func (this *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subscription) {
 	if msg.Kind != "subscribe" {

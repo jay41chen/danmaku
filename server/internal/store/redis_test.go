@@ -111,7 +111,7 @@ func TestRoomPubSub(t *testing.T) {
 	}
 
 	// 時間到：真的 UNSUBSCRIBE，之後收不到
-	// expire 的 UNSUBSCRIBE 一樣只寫出指令、不等確認：等 NUMSUB 變 0 再 PUBLISH，否則 PUBLISH 可能先被處理、還收得到
+	// expire 只標 dirty，背景 worker 才送 UNSUBSCRIBE，而且只寫出指令、不等確認：等 NUMSUB 變 0 再 PUBLISH，否則 PUBLISH 可能先被處理、還收得到
 	clock.fireAll()
 	waitNumSub(t, s, room, 0)
 	if err := s.Publish(t.Context(), room, "after unsubscribe"); err != nil {
