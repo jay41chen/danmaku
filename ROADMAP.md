@@ -115,11 +115,14 @@
     - [x] `Publish` 改用 `context.WithoutCancel(r.Context())` + 短 timeout：INSERT 成功後 client 斷線 → 已存 DB 但沒廣播。只改 `broadcast()`（`publishTimeout` 500ms），INSERT 維持 request ctx（INSERT 前 / 中取消 = 沒存也沒廣播，一致）
       - 同類（低優先，未修）：login 的 `CreateRefreshToken` commit 之後，`limiter.Reset` / `Refund` 還用 `r.Context()` → client 中途斷線時失敗計數沒 reset、IP 沒退還（client 沒拿到 token，說得過去）
       - Known issue：D1 test 靠 100ms token + 250ms sleep 的時序（沿用既有 race test），CI 很慢時可能誤報失敗（不會假通過）；真的 flaky 再放寬
-    - [ ] Redis 出狀況時不要拖垮整台 server（同一個根因：全域鎖底下做網路 I/O + 確認與廣播共用一個 consumer goroutine）
-      - `rooms.mu` 底下呼叫 go-redis `Subscribe`：Redis 黑洞時 go-redis 握著自己的鎖重連 → 整台 Join / Leave 卡 5–15 秒（實驗證實）；200ms ctx 管不到等鎖的時間（`room_subscriptions.go` 的 `unsubscribeTimeout` 註解說法要修正）
-      - 排隊等鎖時 ctx 已過期 → 寫入 timeout → go-redis 判定 bad conn → 整條 PubSub 重連，所有房間漏訊息（實驗證實）
-      - 慢 client 卡住廣播（最多 `writeWait` 10s）→ 同一個 consumer 讀不到 SUBSCRIBE 確認 → 這段時間所有「第一個進房」的 join timeout
-      - 確認遺失（上面那條卡太久 / go-redis buffer 滿丟掉）後，30 秒內持續有人重試 join → 這間房永遠 `ws_join_unavailable`、不會重送 SUBSCRIBE
+    - [x] Redis 出狀況時不要拖垮整台 server（2026-11-02，`roomSubscriptions` 改成 reconciliation loop，見 go-notes 3.32）
+      - 做法：事件端（Join / Leave / expire / confirmSubscribed）在 `mu` 底下只改記憶體、標 dirty；整台 server 一個 worker goroutine 比對 desired（`viewers > 0 || timer != nil`）/ actual（`state`），在鎖外送 SUB / UNSUB。`room_subscriptions.go`（事件端）+ `room_subscriptions_worker.go`（worker）
+      - [x] `rooms.mu` 底下呼叫 go-redis `Subscribe`：Redis 黑洞時整台 Join / Leave 卡 5–15 秒 → I/O 移到 worker、鎖外做；`TestRoomSubscriptionsStuckSubscribeDoesNotBlockJoinLeave` 鎖住
+      - [x] 排隊等鎖時 ctx 已過期 → 寫入 timeout → 整條 PubSub 重連 → worker 送指令當下才建 ctx（`redisCommandTimeout` 500ms），排隊時間不吃 timeout
+      - [x] 確認遺失後這間房永遠 `ws_join_unavailable` → SUB 送出 500ms（`confirmResendDelay`）沒確認就改 `subRetry`、worker 重送（SUBSCRIBE 冪等）；SUB 寫入失敗 backoff 重試（100ms 起、翻倍、上限 5s）
+      - SUB 失敗 / 確認逾時用 `subRetry`，不退回 `subIdle`：go-redis 寫入失敗也會記住 channel、重連時自己重訂 → 「可能有訂」，沒人要時必須 UNSUB，不能直接刪 entry
+    - [ ] 慢 client 卡住廣播（最多 `writeWait` 10s）→ 確認和廣播共用同一個 consumer goroutine，這段時間「第一個進房」的 join 會 timeout（B3）。reconciliation loop 之後不會永久卡住（確認逾時會重送），但 join 仍會失敗一輪
+    - Known limitation（接受）：只有一個 worker，一個 SUB / UNSUB 卡住（最多 `redisCommandTimeout`）時其他房間的指令排在後面（head-of-line blocking）。已有觀眾的房間不受影響，只影響「第一個進房」；go-redis 一條 PubSub 本來就一次處理一個指令，多 worker 換不到平行度
     - [ ] 前端 `ws_room_not_found` 只有 `console.warn`，畫面沒顯示（上面「join 失敗後前端要能顯示」沒做到）
     - Known issue（低優先）：join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout；`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
