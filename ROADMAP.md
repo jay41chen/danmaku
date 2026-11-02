@@ -100,11 +100,26 @@
     - 進房走 WS frame（不用 `?room=`、不用 HTTP API：要改變某條連線的狀態，資訊就要從那條連線進來；只留一套進房機制）：`join` 只負責加入，一條連線最多一間房，已在房間內再 `join` 回 error；成功回 `join_ok`（同 `auth_ok` 模式）；換房 = client 先 `leave` 再 `join`（以後做多房只要放寬這條限制，不改語意，舊前端不受影響）。代價：`join` 失敗後連線不在任何房間，前端要能顯示
     - `join` 查房間存不存在（沿用 `GetRoom` 的 store method）帶 200 ms timeout（含等 DB pool 的時間）；錯誤只分兩種：`ws_room_not_found`（≈ 404，含 soft delete，重試沒用）、`ws_join_unavailable`（≈ 503，DB / Redis 出問題或 timeout，真正原因只寫 log）。前端收到後者用現有的 `equalJitter` backoff 重試
     - channel 名稱 `room:{public_id}`（client 送來的、`createMessage` 手上的都是 public_id，不用轉換）
-    - 一把鎖（`roomSubscriptions.mu`）保護 `viewers map[public_id]int` + 0↔1 時的 SUBSCRIBE / UNSUBSCRIBE，降到 0 直接刪 entry。原本設計的 per-room keyed mutex + refcount 換不到平行度：整台 server 只有一個 go-redis `PubSub`，它的 `Subscribe` / `Unsubscribe` 本來就在內部 `c.mu` 排隊（見 go-notes）。跟 `WebsocketHandler.mutex` 永不巢狀：拿著全域鎖時不呼叫 `Join` / `Leave`
+    - 一把鎖（`roomSubscriptions.mu`）保護 `viewers map[public_id]int` + 0↔1 時的 SUBSCRIBE / UNSUBSCRIBE，降到 0 啟動 `unsubscribeDelay` timer、expire 時才刪 entry（debounce 之後；原本是直接刪）。原本設計的 per-room keyed mutex + refcount 換不到平行度：整台 server 只有一個 go-redis `PubSub`，它的 `Subscribe` / `Unsubscribe` 本來就在內部 `c.mu` 排隊（見 go-notes）。跟 `WebsocketHandler.mutex` 永不巢狀：拿著全域鎖時不呼叫 `Join` / `Leave`
     - 連線目前在哪間房由讀取迴圈的 goroutine 自己記（join / leave / 斷線清理都在它身上），結束時在鎖外 `Leave`；`wsClient.room` 另存一份給廣播過濾
     - 部署分兩次 push：先上前端（舊 backend 對 `join` 回 `ws_write_forbidden`，前端要當無害忽略），再上 backend；backend 上線後還開著舊頁面的人要重新整理
   - [x] Pub/Sub flapping debounce（`unsubscribeDelay` 30 秒，generation check 擋過期 timer；fakeClock 測情境 A / B）：冷門房 `viewers` 在 0↔1 之間跳，每次都送 SUBSCRIBE / UNSUBSCRIBE；20,000 間房 × 10 台 server 會超過單台 Redis。做法：延遲 UNSUBSCRIBE（例如 30 秒，SUBSCRIBE 不延遲）；timer 觸發時要重新上鎖再檢查 `viewers == 0`（`timer.Stop()` 回 `false` 時取消不了）；有 timer 在等的 entry 不能刪；test 要能注入時間
   - [x] `join_ok` 等 Redis 確認 SUBSCRIBE 才回（`ChannelWithSubscriptions` 的 `*redis.Subscription` → entry 的 `ready` channel，鎖外等）：補「join_ok 之後補撈歷史」的洞（JoinRoom 原本只寫出指令就回傳，緊接著的訊息可能兩邊都漏）；順便修好 `TestRoomPubSub` 的 flaky（30 次 fail 5 次 → 50/50）
+  - [ ] W4a + Room 概念 Judge 審查（2026-10-30，3 個 Judge：W4a、Room、時序洞；無 high、無 977b0e6 造成的退步）後的修正
+    - [x] Refresh token：duplicate use 撤銷全部之後，15s grace 內剛 rotate 的 token 仍能換出新的有效 token（撤銷全部沒有立即生效；攻擊者每 14 秒 rotate 一次就能穩定繞過）
+      - 做法：新表 `user_credential_state(user_id, valid_after)`（migration 000012）；撤銷全部 = 寫 `valid_after`（`clock_timestamp()`），`created_at <= valid_after` 的 token 一律無效、**不再觸發撤銷**（攻擊者拿舊 token 不能一直把使用者登出），也不再 UPDATE `refresh_tokens`（不用列舉狀態就不會漏列）。`RotateRefreshToken`：查 user_id → `lockUser`（users 列當同一個 user 的排隊點，`lockOwner` 通用化）→ 鎖之後才檢查（TOCTOU）。舊的 `duplicate_use_detected` 資料 backfill 成 `valid_after`。被撤銷的 token 再出現記 Warn（`RefreshTokenRevokedError`）
+      - 3 輪 Judge 通過（mutation 都有 test 擋）。設計過程見 go-notes 3.31
+      - Known issue（接受）：部署期間舊版 server 不讀新表；撤銷進行中開始的登入 / rotate，新 token 可能一發出就失效（誤殺、不是繞過）；(a) 查 user_id 與 (b) 拿鎖之間 user 被刪 → invalid 那條沒 test；handler log test 的 fake `rotateUserID` 跟 error 的 UserID 都是 7，分不出 log 用錯變數（改成 0 即可）
+      - 之後：`lockUser` 用 `FOR UPDATE` 會擋住這個 user 的 FK INSERT（登入、發彈幕）幾 ms，可改 `FOR NO KEY UPDATE`；token family（RFC 9700：只撤銷同一次登入衍生的那串，不踢掉其他裝置）
+    - [ ] 補 mutation 沒擋住的 test：WS 過期 timer 拿鎖後重查 exp（ws.go）、`handleLeave` 清 `c.room`（leave 後不再收到廣播）、未知帳號的 dummy bcrypt（timing 防列舉）
+    - [ ] `Publish` 改用 `context.WithoutCancel(r.Context())` + 短 timeout：INSERT 成功後 client 斷線 → 已存 DB 但沒廣播
+    - [ ] Redis 出狀況時不要拖垮整台 server（同一個根因：全域鎖底下做網路 I/O + 確認與廣播共用一個 consumer goroutine）
+      - `rooms.mu` 底下呼叫 go-redis `Subscribe`：Redis 黑洞時 go-redis 握著自己的鎖重連 → 整台 Join / Leave 卡 5–15 秒（實驗證實）；200ms ctx 管不到等鎖的時間（`room_subscriptions.go` 的 `unsubscribeTimeout` 註解說法要修正）
+      - 排隊等鎖時 ctx 已過期 → 寫入 timeout → go-redis 判定 bad conn → 整條 PubSub 重連，所有房間漏訊息（實驗證實）
+      - 慢 client 卡住廣播（最多 `writeWait` 10s）→ 同一個 consumer 讀不到 SUBSCRIBE 確認 → 這段時間所有「第一個進房」的 join timeout
+      - 確認遺失（上面那條卡太久 / go-redis buffer 滿丟掉）後，30 秒內持續有人重試 join → 這間房永遠 `ws_join_unavailable`、不會重送 SUBSCRIBE
+    - [ ] 前端 `ws_room_not_found` 只有 `console.warn`，畫面沒顯示（上面「join 失敗後前端要能顯示」沒做到）
+    - Known issue（低優先）：join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout；`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
@@ -122,6 +137,7 @@
 - [ ] 彈幕內容過濾：`POST /rooms/{public_id}/messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理。`room_name` 同樣只 trim 頭尾，中間可以有換行 / 控制字元，一起處理
 - [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
 - [ ] Ban（封鎖使用者，含 shadow ban）
+  - 重用 `user_credential_state`（refresh token 修正時建的）：ban / 強制登出 = `revokeAllCredentials`；access token（JWT）也可以用 `iat <= valid_after` 擋，跟下面的記憶體 ban set 一起考慮
   - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
   - 每台 server 在**記憶體**維護 ban set（人數極少），每個 request 查記憶體即可，不查 DB / Redis
   - 同步：ban / unban 時用 Redis Pub/Sub 廣播。Pub/Sub 是 at-most-once（subscription 斷線、部署中都會掉）→ DB 是 source of truth：啟動時、subscription 重連時、每 60 秒從 DB 全量重新載入
@@ -147,6 +163,9 @@
   - Defense in depth：只有 `RemoteAddr` 是 trusted proxy 的 IP / CIDR 時才信任 header，其他來源退回 `RemoteAddr`（概念同 Gin `SetTrustedProxies`）
 - [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
 - [ ] Metrics path cardinality：`path` label 直接用 `r.URL.Path`，被亂掃 URL 時每個 path 都會產生新的時間序列；改用 route pattern（如 Go 1.23+ 的 `r.Pattern`，mux 路由後才有值）或把未知路徑歸成 `other`
+  - **優先度提高**（2026-10-30 Judge）：prod 的 server 公開，任何人掃隨機 URL 就能讓時間序列無限增加 → 記憶體持續成長、可能 OOM，不只是監控難看；`/metrics` 本身也公開可讀
+- [ ] IPv6 限流 key 改用 /64 前綴（PLAUSIBLE，要看 Railway edge 會不會給 v6）：目前用完整位址，持有一個 /64 就能每次換 IP 繞過 IP 限流，可跟 trusted proxy 收尾一起做
+- [ ] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
 - [ ] Pagination
   - `GET /rooms/{public_id}/messages` 加 `before=<id>`（往上捲載入更舊）/ `after=<id>`（重連補漏），store 跟著加方向參數：`WHERE id < $1 ORDER BY id DESC` / `WHERE id > $1 ORDER BY id ASC`
   - 「選哪 N 則」（store，ORDER BY + LIMIT）跟「回傳順序」（API 契約，handler）是兩件事，不要用一個 order 參數同時控制
@@ -165,6 +184,9 @@
 - [ ] CI/CD（GitHub Actions）
 - [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
+  - 也要涵蓋「server 自己的 PubSub 重連、WS 沒斷」：go-redis 重連那段時間的訊息會漏（本機 kill pubsub 連線實驗每次漏 1–2 則），client 不知道要補撈。server 拿得到訊號（已 ready 的房間又收到 subscribe 確認 = 剛重連過），可對該房 client 送 resync frame 讓它 `GET after=<id>`
+- [ ] PubSub 連線 half-open 偵測：對方消失沒送 RST 時，go-redis 的 health check 只看 PING 寫不寫得出去、`Receive` 沒有 read deadline → 偵測不到，整台 server 所有房間靜默全漏，直到 TCP 自己逾時（可能十幾分鐘；proxy 丟包 10 秒實驗：0/20 收到、沒有重連）。方向：應用層 watchdog（定期 PUBLISH 給自己的 heartbeat channel，N 秒沒收到就拆掉重連），或 dialer 設 `TCP_USER_TIMEOUT` / 較短 keepalive。跟 presence 的 heartbeat 同一套觀念
+- [ ] Store integration test 不能同時跑兩份：共用 `danmaku_test` / Redis db 15，3 個 Judge 同時跑時每次 fail 的 test 都不一樣（單獨跑都過）。CI 平行化時要每個 runner 各自的 DB / Redis db
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
   - 順便拆 `ws.go`（W4b 已先把長函式拆小，檔案沒拆）：照 Hub 之後的邊界拆（例如 `hub.go` 管連線 / 廣播、`client.go` 管單條連線讀寫），不要先照 auth / room 拆一次再重拆；純搬家和改 code 分兩個 commit，diff 才 review 得了

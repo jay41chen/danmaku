@@ -81,24 +81,34 @@ func TestRotateRefreshToken(t *testing.T) {
 		if !errors.As(err, &dupUse) || dupUse.UserID != userID {
 			t.Errorf("Rotate(old) after grace error = %#v, want *RefreshTokenDuplicateUseError{UserID: %d}", err, userID)
 		}
-		// 撤銷有 Commit：忘了 Commit 的話 defer Rollback 會取消它，這幾個會還是 active
-		for _, h := range []string{"new", "other-device"} {
-			if !isRevoked(t, s, h) {
-				t.Errorf("%s still active after duplicate use, want revoked", h)
-			}
-		}
 		if exists(t, s, "attacker-new") {
 			t.Errorf("attacker-new was stored, want not stored")
 		}
-		// 連帶撤銷的寫 duplicate_use_detected；被重送的 old 早就作廢，維持 rotated
-		for h, want := range map[string]string{"old": "rotated", "new": "duplicate_use_detected", "other-device": "duplicate_use_detected"} {
-			if got := revokedReason(t, s, h); got != want {
-				t.Errorf("%s revoked_reason = %q, want %q", h, got, want)
+		// 撤銷有 Commit：忘了 Commit 的話 defer Rollback 會取消 valid_after，這兩顆還能換
+		for _, h := range []string{"new", "other-device"} {
+			_, err := s.RotateRefreshToken(t.Context(), h, h+"-next", testTTL, testGrace)
+			if !errors.Is(err, ErrRefreshTokenInvalid) {
+				t.Errorf("Rotate(%s) after revoke all error = %v, want ErrRefreshTokenInvalid", h, err)
 			}
 		}
-		// WHERE user_id 沒寫錯：別人的 token 不受影響
-		if isRevoked(t, s, "alice-token") {
-			t.Errorf("other user's token revoked, want untouched")
+		// 撤銷全部只寫 valid_after，不改 refresh_tokens（見 tokenState 上方說明）
+		if got := revokedReason(t, s, "old"); got != "rotated" {
+			t.Errorf("revoked_reason(old) = %q, want %q", got, "rotated")
+		}
+		for _, h := range []string{"new", "other-device"} {
+			if got := revokedReason(t, s, h); got != "" {
+				t.Errorf("revoked_reason(%s) = %q, want empty (untouched)", h, got)
+			}
+		}
+		// valid_after 只寫這個 user 的列：別人的 token 不受影響
+		if !hasCredentialState(t, s, userID) {
+			t.Errorf("user_credential_state has no row for user, want one")
+		}
+		if hasCredentialState(t, s, otherID) {
+			t.Errorf("user_credential_state has a row for other user, want none")
+		}
+		if _, err := s.RotateRefreshToken(t.Context(), "alice-token", "alice-new", testTTL, testGrace); err != nil {
+			t.Errorf("other user's Rotate(alice-token) error = %v, want nil", err)
 		}
 	})
 
@@ -120,8 +130,184 @@ func TestRotateRefreshToken(t *testing.T) {
 		if exists(t, s, "attacker-new") {
 			t.Errorf("attacker-new was stored, want not stored")
 		}
-		if !isRevoked(t, s, "laptop") {
-			t.Errorf("laptop still active after duplicate use, want revoked")
+		if _, err := s.RotateRefreshToken(t.Context(), "laptop", "laptop-next", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(laptop) after revoke all error = %v, want ErrRefreshTokenInvalid", err)
+		}
+	})
+
+	// Judge 重現的洞：撤銷全部之後，grace 內的 token 不能再換出新的
+	t.Run("in-grace token cannot refresh after revoke all", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		mustCreateToken(t, s, userID, "t0", testTTL)
+		mustRotate(t, s, "t0", "t1", testGrace)
+		// t0 的作廢時間往前調 1 分鐘：超過 testGrace，不用 sleep
+		backdateRevokedAt(t, s, "t0", time.Minute)
+		mustRotate(t, s, "t1", "t2", testGrace) // t1 現在 revoked_at = now()，在 grace 內
+
+		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("Rotate(t0) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		}
+
+		_, err := s.RotateRefreshToken(t.Context(), "t1", "t3", testTTL, testGrace)
+		if !errors.Is(err, ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(t1) after revoke all error = %v, want ErrRefreshTokenInvalid", err)
+		}
+		if exists(t, s, "t3") {
+			t.Errorf("t3 was stored, want not stored")
+		}
+	})
+
+	t.Run("token issued before revoke does not trigger revoke again", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		mustCreateToken(t, s, userID, "t0", testTTL)
+		mustRotate(t, s, "t0", "t1", testGrace)
+		backdateRevokedAt(t, s, "t0", time.Minute)
+		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("setup Rotate(t0) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		}
+		before := validAfter(t, s, userID)
+
+		_, err := s.RotateRefreshToken(t.Context(), "t0", "y", testTTL, testGrace)
+
+		if !errors.Is(err, ErrRefreshTokenInvalid) || errors.Is(err, ErrRefreshTokenDuplicateUse) {
+			t.Errorf("Rotate(t0) again error = %v, want ErrRefreshTokenInvalid (not duplicate use)", err)
+		}
+		if after := validAfter(t, s, userID); !after.Equal(before) {
+			t.Errorf("valid_after changed %v → %v, want unchanged", before, after)
+		}
+		// handler 的 Warn log 要知道是哪個 user
+		var revoked *RefreshTokenRevokedError
+		if !errors.As(err, &revoked) || revoked.UserID != userID {
+			t.Errorf("Rotate(t0) again error = %#v, want *RefreshTokenRevokedError{UserID: %d}", err, userID)
+		}
+	})
+
+	// 第二次撤銷要把 valid_after 往後推：ON CONFLICT 若是 DO NOTHING，重新登入後的 token 會永遠留在舊的 valid_after 之後
+	t.Run("second revoke moves valid_after forward", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		mustCreateToken(t, s, userID, "a0", testTTL)
+		mustRotate(t, s, "a0", "a1", testGrace)
+		backdateRevokedAt(t, s, "a0", time.Minute)
+		if _, err := s.RotateRefreshToken(t.Context(), "a0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("setup first revoke error = %v, want ErrRefreshTokenDuplicateUse", err)
+		}
+		v1 := validAfter(t, s, userID)
+
+		// 重新登入，之後同樣的外洩再發生一次
+		mustCreateToken(t, s, userID, "b0", testTTL)
+		mustRotate(t, s, "b0", "b1", testGrace)
+		backdateRevokedAt(t, s, "b0", time.Minute)
+		if _, err := s.RotateRefreshToken(t.Context(), "b0", "y", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("second revoke error = %v, want ErrRefreshTokenDuplicateUse", err)
+		}
+
+		if v2 := validAfter(t, s, userID); !v2.After(v1) {
+			t.Errorf("valid_after = %v after second revoke, want later than %v", v2, v1)
+		}
+		_, err := s.RotateRefreshToken(t.Context(), "b1", "b2", testTTL, testGrace)
+		if !errors.Is(err, ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(b1) after second revoke error = %v, want ErrRefreshTokenInvalid", err)
+		}
+		if exists(t, s, "b2") {
+			t.Errorf("b2 was stored, want not stored")
+		}
+	})
+
+	t.Run("login after revoke works", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		mustCreateToken(t, s, userID, "t0", testTTL)
+		mustRotate(t, s, "t0", "t1", testGrace)
+		backdateRevokedAt(t, s, "t0", time.Minute)
+		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("setup Rotate(t0) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		}
+
+		mustCreateToken(t, s, userID, "relogin", testTTL) // 模擬重新登入
+
+		if _, err := s.RotateRefreshToken(t.Context(), "relogin", "relogin-next", testTTL, testGrace); err != nil {
+			t.Errorf("Rotate(relogin) error = %v, want nil", err)
+		}
+	})
+
+	// TOCTOU：Rotate 在等 user 鎖的時候，撤銷全部 commit 了；拿到鎖之後一定要重新檢查
+	t.Run("checks happen after user lock (TOCTOU)", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+		mustCreateToken(t, s, userID, "active", testTTL)
+
+		tx, err := s.dbPool.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("setup Begin: %v", err)
+		}
+		defer tx.Rollback(t.Context()) // 測試中途失敗也要放鎖，不然後面的 Rotate goroutine 會一直卡著
+		if _, err := tx.Exec(t.Context(), `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+			t.Fatalf("setup lock user: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.RotateRefreshToken(t.Context(), "active", "new", testTTL, testGrace)
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			t.Fatalf("Rotate returned %v while user lock was held, want blocked", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		if _, err := tx.Exec(t.Context(),
+			`INSERT INTO user_credential_state(user_id, valid_after) VALUES ($1, clock_timestamp())`, userID); err != nil {
+			t.Fatalf("setup revoke all: %v", err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatalf("setup Commit: %v", err)
+		}
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrRefreshTokenInvalid) {
+				t.Errorf("Rotate error = %v, want ErrRefreshTokenInvalid", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Rotate still blocked 2s after lock released")
+		}
+		if exists(t, s, "new") {
+			t.Errorf("new token stored after revoke all, want not stored")
+		}
+	})
+
+	// now() 是 transaction 開始的時間：用它的話 valid_after 會早於 transaction 中途建立的 token
+	t.Run("revokeAllCredentials uses statement time, not transaction start", func(t *testing.T) {
+		s := newTestDBStore(t)
+		userID := createTestUser(t, s, "jay")
+
+		tx, err := s.dbPool.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("setup Begin: %v", err)
+		}
+		defer tx.Rollback(t.Context())
+		var txNow time.Time
+		if err := tx.QueryRow(t.Context(), `SELECT now()`).Scan(&txNow); err != nil { // 確保 transaction 時間已經定下來
+			t.Fatalf("setup SELECT now(): %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		mustCreateToken(t, s, userID, "later", testTTL) // 用 pool：created_at 晚於 txNow
+
+		if err := revokeAllCredentials(t.Context(), tx, userID); err != nil {
+			t.Fatalf("revokeAllCredentials: %v", err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatalf("setup Commit: %v", err)
+		}
+
+		_, err = s.RotateRefreshToken(t.Context(), "later", "new", testTTL, testGrace)
+		if !errors.Is(err, ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(later) error = %v, want ErrRefreshTokenInvalid", err)
 		}
 	})
 
@@ -290,4 +476,36 @@ func revokedReason(t *testing.T, s *DBStore, hash string) string {
 		return ""
 	}
 	return *reason
+}
+
+// 把 token 的 revoked_at 往前調：模擬「已經作廢超過 grace」，不用 sleep
+func backdateRevokedAt(t *testing.T, s *DBStore, hash string, d time.Duration) {
+	t.Helper()
+	if _, err := s.dbPool.Exec(t.Context(),
+		`UPDATE refresh_tokens SET revoked_at = revoked_at - $2::interval WHERE token_hash = $1`, hash, d,
+	); err != nil {
+		t.Fatalf("backdateRevokedAt(%q): %v", hash, err)
+	}
+}
+
+func hasCredentialState(t *testing.T, s *DBStore, userID int64) bool {
+	t.Helper()
+	var n int
+	if err := s.dbPool.QueryRow(t.Context(),
+		`SELECT count(*) FROM user_credential_state WHERE user_id = $1`, userID,
+	).Scan(&n); err != nil {
+		t.Fatalf("hasCredentialState(%d): %v", userID, err)
+	}
+	return n > 0
+}
+
+func validAfter(t *testing.T, s *DBStore, userID int64) time.Time {
+	t.Helper()
+	var v time.Time
+	if err := s.dbPool.QueryRow(t.Context(),
+		`SELECT valid_after FROM user_credential_state WHERE user_id = $1`, userID,
+	).Scan(&v); err != nil {
+		t.Fatalf("validAfter(%d): %v", userID, err)
+	}
+	return v
 }

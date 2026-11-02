@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -403,6 +405,8 @@ func TestHandleRefresh(t *testing.T) {
 		{"invalid token", http.MethodPost, validBody, store.ErrRefreshTokenInvalid, http.StatusUnauthorized},
 		// duplicate use 對 client 也是 401：不透露「這個 token 曾經有效」
 		{"duplicate use token", http.MethodPost, validBody, &store.RefreshTokenDuplicateUseError{UserID: 7}, http.StatusUnauthorized},
+		// 被撤銷全部之前發的 token：對 client 跟 invalid 一樣是 401（handler 另外記 Warn）
+		{"revoked token", http.MethodPost, validBody, &store.RefreshTokenRevokedError{UserID: 7}, http.StatusUnauthorized},
 		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
@@ -462,6 +466,78 @@ func TestHandleRefresh(t *testing.T) {
 			t.Errorf("Rotate called after rate limited, want not called")
 		}
 	})
+}
+
+// 守住 /refresh 的 log 分支：revoked / duplicate use 要記 Warn（含 user_id、client_ip），
+// invalid 不記；任何情況都不能把明文 token 或它的 hash 寫進 log
+// 另外開 test 而不是塞進上面的表格：表格 test 只看 status，這裡要把 logger 換成寫進 buffer 的
+func TestHandleRefreshLogging(t *testing.T) {
+	const plain = "old-plain"
+	body := `{"refresh_token":"` + plain + `"}`
+
+	cases := []struct {
+		name      string
+		rotateErr error
+		wantMsg   string // 空字串 = 不應該有 WARN
+	}{
+		{"revoked token", &store.RefreshTokenRevokedError{UserID: 7}, "refresh token issued before credentials revoked was used"},
+		{"duplicate use token", &store.RefreshTokenDuplicateUseError{UserID: 7}, "refresh token duplicate use detected, revoked all tokens of user"},
+		{"invalid token", store.ErrRefreshTokenInvalid, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			h := NewAuthHandler(&fakeDBStore{rotateUserID: 7, rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
+			h.logger = slog.New(slog.NewJSONHandler(&buf, nil))
+			req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(body))
+			rec := httptest.NewRecorder()
+
+			h.HandleRefresh(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+
+			var warns []map[string]any
+			dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+			for dec.More() {
+				var entry map[string]any
+				if err := dec.Decode(&entry); err != nil {
+					t.Fatalf("decode log line: %v (log: %s)", err, buf.String())
+				}
+				if entry["level"] == "WARN" {
+					warns = append(warns, entry)
+				}
+			}
+
+			if tc.wantMsg == "" {
+				if len(warns) != 0 {
+					t.Errorf("got %d WARN logs, want none: %s", len(warns), buf.String())
+				}
+			} else {
+				if len(warns) != 1 {
+					t.Fatalf("got %d WARN logs, want 1: %s", len(warns), buf.String())
+				}
+				w := warns[0]
+				if w["msg"] != tc.wantMsg {
+					t.Errorf("msg = %v, want %q", w["msg"], tc.wantMsg)
+				}
+				// JSON 數字 decode 成 float64
+				if w["user_id"] != float64(7) {
+					t.Errorf("user_id = %v, want 7", w["user_id"])
+				}
+				if _, ok := w["client_ip"]; !ok {
+					t.Errorf("log missing client_ip: %s", buf.String())
+				}
+			}
+
+			for _, secret := range []string{plain, auth.HashRefreshToken(plain)} {
+				if strings.Contains(buf.String(), secret) {
+					t.Errorf("log contains secret %q: %s", secret, buf.String())
+				}
+			}
+		})
+	}
 }
 
 func TestHandleLogout(t *testing.T) {

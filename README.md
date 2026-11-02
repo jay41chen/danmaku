@@ -176,6 +176,7 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 | `000009_messages_add_user_id` | `messages` 加 `user_id`（nullable FK → `users.id`，`ON DELETE SET NULL`，訊息保留）+ index |
 | `000010_create_rooms` | `rooms` 表（`public_id` unique、soft delete）；種下系統帳號 `admin`（不能登入）和 `legacy00000` 房間（id 1）；`messages` 加 `room_id`（`DEFAULT 1`，由 000011 拿掉）+ index |
 | `000011_messages_room_id_drop_default` | 拿掉 `messages.room_id` 的 `DEFAULT 1`（expand / contract 的 contract 步驟），INSERT 一定要帶 `room_id`。上線後若要把後端退回 `2c17ac8` 之前的版本（INSERT 不帶 `room_id`），要先手動跑 000011 的 down |
+| `000012_create_user_credential_state` | `user_credential_state` 表（`user_id` PK/FK，`valid_after`）：refresh token 「撤銷全部」改成只寫 `valid_after`，`created_at` 在這之前（含）的 token 一律無效，不再 UPDATE `refresh_tokens`。並依既有的 `duplicate_use_detected` 資料 backfill `valid_after`（每個 user 取最晚的 `revoked_at` / `created_at`），舊 token 部署後再出現不會再觸發撤銷。只新增表，部署一次就好 |
 
 ### 新增 migration
 

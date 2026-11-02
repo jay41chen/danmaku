@@ -206,3 +206,29 @@ func (this *DBStore) GetUserByID(ctx context.Context, id int64) (model.User, err
 	}
 	return user, nil
 }
+
+// 一次做三件事：
+//  1. 確認 user 還在 → 查不到回 ErrUserNotFound
+//  2. 鎖住這個 user 的那一列直到 transaction 結束：同一個 user 的請求在這裡排隊
+//     （CreateRoom 的房間數上限、RotateRefreshToken 的撤銷判斷）；不同 user 不會互相卡住
+//  3. 拿 username
+//
+// 參數是 pgx.Tx 不是 pool：FOR UPDATE 離開 transaction 就沒效（單句自動 commit、鎖馬上放開），
+// 讓 compiler 擋掉傳 pool（鎖要跟後面的動作在同一個 transaction）
+func lockUser(ctx context.Context, tx pgx.Tx, userID int64) (string, error) {
+	var username string
+	err := tx.QueryRow(ctx,
+		`
+			SELECT username
+			FROM users
+			WHERE id = $1
+			FOR UPDATE
+		`, userID).Scan(&username)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrUserNotFound
+		}
+		return "", err
+	}
+	return username, nil
+}

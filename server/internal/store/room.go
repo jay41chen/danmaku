@@ -54,33 +54,8 @@ func (this *DBStore) GetRoomByPublicID(ctx context.Context, publicID string) (mo
 	return room, nil
 }
 
-// 一次做三件事：
-//  1. 確認 owner 還在（user 已刪除、但 access token 還沒過期）→ ErrRoomOwnerNotFound
-//  2. 鎖住 owner 這一列直到 transaction 結束：同一個 user 同時建房會在這裡排隊，
-//     後面的 count 跟 INSERT 之間不會被插隊（否則兩個請求都數到 2、都建成功 → 4 間）；不同 user 不會互相卡住
-//  3. 拿 username 放進回傳的 Room
-//
-// 參數是 pgx.Tx 不是 pool：FOR UPDATE 離開 transaction 就沒效（單句自動 commit、鎖馬上放開），讓 compiler 擋掉「拿 pool 來呼叫」
-func lockOwner(ctx context.Context, tx pgx.Tx, ownerID int64) (string, error) {
-	var username string
-	err := tx.QueryRow(ctx,
-		`
-			SELECT username
-			FROM users
-			WHERE id = $1
-			FOR UPDATE
-		`, ownerID).Scan(&username)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrRoomOwnerNotFound
-		}
-		return "", err
-	}
-	return username, nil
-}
-
 // 數 owner 目前未刪除的房間數（soft delete 的不算額度）
-// 不用再加 FOR UPDATE：lockOwner 已經讓同一個 owner 的請求排隊；
+// 不用再加 FOR UPDATE：lockUser 已經讓同一個 owner 的請求排隊；
 // 預設 Read Committed 下每句 statement 都拿新的 snapshot，所以看得到前一個請求剛 commit 的房間
 // （而且 count(*) 這種聚合函式本來就不能 FOR UPDATE）
 func countActiveRooms(ctx context.Context, tx pgx.Tx, ownerID int64) (int, error) {
@@ -102,7 +77,7 @@ func countActiveRooms(ctx context.Context, tx pgx.Tx, ownerID int64) (int, error
 
 // INSERT 一個新房間，public_id 撞號時換一個重試，最多 maxPublicIDAttempts 次
 // 只負責寫入，不 Commit：transaction 什麼時候結束由 CreateRoom 決定
-// 回傳的 Room 沒有 OwnerUsername（那是 lockOwner 拿到的，由 CreateRoom 補上）
+// 回傳的 Room 沒有 OwnerUsername（那是 lockUser 拿到的，由 CreateRoom 補上）
 func insertRoom(ctx context.Context, tx pgx.Tx, ownerID int64, name string) (model.Room, error) {
 	for range maxPublicIDAttempts {
 		// public_id：跟 refresh token 共用 randx.URLText（crypto/rand，猜不到）
@@ -138,11 +113,15 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string)
 	if err != nil {
 		return model.Room{}, err
 	}
-	// 中途任何一個 return 都會 rollback（也會放開 lockOwner 的鎖）；Commit 成功之後再 Rollback 不會做任何事
+	// 中途任何一個 return 都會 rollback（也會放開 lockUser 的鎖）；Commit 成功之後再 Rollback 不會做任何事
 	// （回傳的 ErrTxClosed 直接忽略），所以不用每個 return 前都手動 rollback
 	defer tx.Rollback(ctx)
-	username, err := lockOwner(ctx, tx, ownerID)
+	username, err := lockUser(ctx, tx, ownerID)
 	if err != nil {
+		// user 已刪除、但 access token 還沒過期：對 room 這一層來說是「owner 不存在」
+		if errors.Is(err, ErrUserNotFound) {
+			return model.Room{}, ErrRoomOwnerNotFound
+		}
 		return model.Room{}, err
 	}
 	count, err := countActiveRooms(ctx, tx, ownerID)
@@ -156,7 +135,7 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string)
 	if err != nil {
 		return model.Room{}, err
 	}
-	// lock → count → insert 全部成功才 Commit：三步一起生效，同時放開 lockOwner 的鎖
+	// lock → count → insert 全部成功才 Commit：三步一起生效，同時放開 lockUser 的鎖
 	if err := tx.Commit(ctx); err != nil {
 		return model.Room{}, err
 	}

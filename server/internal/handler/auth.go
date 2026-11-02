@@ -279,6 +279,16 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	userID, err := this.db.RotateRefreshToken(r.Context(),
 		auth.HashRefreshToken(req.RefreshToken), newHash, refreshTokenTTL, refreshTokenGrace)
 	// invalid 和 duplicate use 對 client 都是 401（重新登入），不讓對方知道「這個 token 曾經有效」
+	// RefreshTokenRevokedError 一定要在 errors.Is(Invalid) 之前判斷：它的 Is 也會對 Invalid 回 true，
+	// 順序反過來的話會被 Is 先接走，log 就不會記
+	var revoked *store.RefreshTokenRevokedError
+	if errors.As(err, &revoked) {
+		// 被撤銷的憑證又出現（多半是攻擊者手上的舊 token）；不記 token 本身
+		this.logger.WarnContext(r.Context(), "refresh token issued before credentials revoked was used",
+			"user_id", revoked.UserID, "client_ip", ip)
+		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+		return
+	}
 	if errors.Is(err, store.ErrRefreshTokenInvalid) {
 		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
 		return
