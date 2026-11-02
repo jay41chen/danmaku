@@ -138,6 +138,48 @@ func TestHandleLogin(t *testing.T) {
 		})
 	}
 
+	// 未知帳號也必須真的跑一次 bcrypt（用 dummyHash），否則回應時間會洩漏帳號存不存在
+	// 用 spy 取代 checkPassword 確認呼叫次數與收到的 hash；回應則照舊
+	t.Run("checkPassword is called once for unknown user with dummyHash", func(t *testing.T) {
+		h := NewAuthHandler(&fakeDBStore{getErr: store.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
+		var gotHashes []string
+		h.checkPassword = func(hash, pw string) (bool, error) {
+			gotHashes = append(gotHashes, hash)
+			return false, nil
+		}
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("nobody", password)))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != msgInvalidCredentials {
+			t.Errorf("response = %d %q, want 400 %q", rec.Code, rec.Body.String(), msgInvalidCredentials)
+		}
+		if len(gotHashes) != 1 || gotHashes[0] != dummyHash {
+			t.Errorf("checkPassword hashes = %q, want exactly [dummyHash]", gotHashes)
+		}
+	})
+
+	t.Run("checkPassword is called once for wrong password with user's hash", func(t *testing.T) {
+		h := NewAuthHandler(&fakeDBStore{user: stored}, &fakeRateLimiter{}, "", testTokens)
+		var gotHashes []string
+		h.checkPassword = func(hash, pw string) (bool, error) {
+			gotHashes = append(gotHashes, hash)
+			return false, nil
+		}
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", "wrong-password")))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != msgInvalidCredentials {
+			t.Errorf("response = %d %q, want 400 %q", rec.Code, rec.Body.String(), msgInvalidCredentials)
+		}
+		if len(gotHashes) != 1 || gotHashes[0] != stored.PasswordHash {
+			t.Errorf("checkPassword hashes = %q, want exactly [user's PasswordHash]", gotHashes)
+		}
+	})
+
 	t.Run("success returns 200 with access token and stored username", func(t *testing.T) {
 		fake := &fakeDBStore{user: stored}
 		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)

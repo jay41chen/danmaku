@@ -20,6 +20,9 @@ import (
 // 訊息長度上限（字元數，不是 bytes：中文一個字 3 bytes）
 const maxMessageRunes = 100
 
+// 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
+const publishTimeout = 500 * time.Millisecond
+
 // 限流規則（機制在 ratelimit.go），key 是 user id
 // 兩條一起用：burst 擋瞬間洗版，sustain 擋持續慢慢刷（每秒 3 則剛好卡在 burst 下面也會被 sustain 擋）
 // 只能擋「單一帳號」：多開帳號的總量擋不住，要靠 W5 的全域限流
@@ -156,7 +159,14 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(msg)
 }
 
+// CreateMessage 維持 request ctx：INSERT 之前 / 之中被取消 → 沒存也沒廣播，結果一致
+// broadcast 不跟著 request 取消：DB 已經 commit（副作用已發生），廣播是在完成這件事，
+// 不該因為發起的人走了就停，否則房間內的觀眾要到重連才看得到這則
+// WithoutCancel 會連 deadline 一起拿掉 → 自己加 publishTimeout，Redis 卡住時不會無限等
+// （client 在等 201，最多多等 500ms）；WithoutCancel 保留 ctx 的 value（request_id 等），log 仍串得起來
 func (this *MessageHandler) broadcast(ctx context.Context, roomPublicID string, env wsEnvelope) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout)
+	defer cancel()
 	data, err := json.Marshal(env)
 	if err != nil {
 		this.logger.ErrorContext(ctx, "marshal ws envelope failed", "error", err)

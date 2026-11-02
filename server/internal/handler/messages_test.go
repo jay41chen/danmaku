@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -99,6 +100,44 @@ func TestCreateMessage(t *testing.T) {
 		}
 		if env.Type != wsTypeMessage || env.Payload.ID != 42 || env.Payload.Content != "哈哈" {
 			t.Errorf("published = %+v, want message envelope with the created message", env)
+		}
+	})
+
+	// INSERT 成功後 client 斷線（request ctx 被 cancel）：已存 DB 的訊息仍要廣播
+	// 廣播收到的 ctx 必須：沒被取消、有 publishTimeout 內的 deadline、保留 request ctx 的 value
+	t.Run("broadcast survives client disconnect after insert", func(t *testing.T) {
+		type ctxKey struct{}
+		base, cancel := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "req-123"))
+		defer cancel()
+		db := &fakeDBStore{createdMsg: created(), onCreateMessage: cancel}
+		redis := &fakeRedis{}
+		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
+		publicID := store.LegacyRoomPublicID
+		req := httptest.NewRequest(http.MethodPost, "/rooms/"+publicID+"/messages", strings.NewReader(contentBody("哈哈"))).WithContext(base)
+		req.SetPathValue("public_id", publicID)
+
+		start := time.Now()
+		rec := serveAuthed(t, http.HandlerFunc(h.HandleCreateRoomMessage), userID, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+		if len(redis.publishCtxs) != 1 {
+			t.Fatalf("Publish called %d times, want 1", len(redis.publishCtxs))
+		}
+		pctx := redis.publishCtxs[0]
+		if err := pctx.err; err != nil {
+			t.Errorf("publish ctx Err() = %v, want nil (should not follow request cancel)", err)
+		}
+		deadline, ok := pctx.deadline, pctx.hasDeadline
+		if !ok {
+			t.Fatalf("publish ctx has no deadline, want one within %v", publishTimeout)
+		}
+		if deadline.After(start.Add(publishTimeout + 100*time.Millisecond)) {
+			t.Errorf("publish deadline = %v after start, want <= ~%v", deadline.Sub(start), publishTimeout)
+		}
+		if got := pctx.ctx.Value(ctxKey{}); got != "req-123" {
+			t.Errorf("publish ctx value = %v, want req-123 (WithoutCancel should keep values)", got)
 		}
 	})
 

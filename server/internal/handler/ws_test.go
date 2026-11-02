@@ -430,6 +430,52 @@ func TestWebsocketExpiryTimerAfterDowngradeToAnonymous(t *testing.T) {
 	}
 }
 
+// 競態：expiry timer 已觸發、callback 卡在等 h.mutex 時，續期剛好成功（c.exp 被推到未來）
+// callback 拿到鎖後必須靠第二個 guard（time.Now().Before(c.exp)）重查 exp 後直接 return，不能把剛續期的會員降級
+func TestWebsocketExpiryTimerAfterRenewal(t *testing.T) {
+	h, url := newAuthTestServer(t)
+	conn := dialWS(t, url)
+	sendAuth(t, conn, "user7@100ms")
+	expectAuthOK(t, conn, 7, "jay")
+
+	// 在 exp 之前搶下全站鎖，讓 timer callback 觸發後卡在 Lock()
+	h.mutex.Lock()
+	time.Sleep(250 * time.Millisecond) // 超過 exp，並確保 callback 已經在等鎖
+
+	var c *wsClient
+	for _, cl := range h.clients {
+		c = cl
+	}
+	if c == nil || c.userID != 7 {
+		h.mutex.Unlock()
+		t.Fatalf("client = %+v, want one member client with userID 7", c)
+	}
+	// 持鎖期間模擬續期成功：exp 推到未來（不能走網路：handleAuth 也要拿鎖；舊 timer 的 Stop 已來不及）
+	c.exp = time.Now().Add(10 * time.Second)
+	h.mutex.Unlock()
+
+	// callback 拿到鎖後不該降級，也就不會送 ws_auth_expired
+	conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+	for {
+		var f wsFrame
+		if err := conn.ReadJSON(&f); err != nil {
+			break // timeout = 沒收到任何 frame，通過
+		}
+		var e wsError
+		if f.Type == wsTypeError && json.Unmarshal(f.Payload, &e) == nil && e.Code == wsCodeAuthExpired {
+			t.Fatalf("got %s after renewal, want none", wsCodeAuthExpired)
+		}
+	}
+
+	// 仍是會員
+	waitGauge(t, memberGauge(), 1)
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	if h.members[7] != 1 || c.userID != 7 {
+		t.Errorf("members = %v, userID = %d, want member 7 kept", h.members, c.userID)
+	}
+}
+
 // 需要 TODO(user) 完成才會過（refcount）
 func TestWebsocketMemberRefcount(t *testing.T) {
 	_, url := newAuthTestServer(t)
@@ -787,6 +833,24 @@ func TestWebsocketBroadcastFilteredByRoom(t *testing.T) {
 	conn2.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	if _, data, err := conn2.ReadMessage(); err == nil {
 		t.Fatalf("conn2 received %q, want nothing", data)
+	}
+}
+
+// leave 之後（handleLeave 把 c.room 清成 ""）不該再收到舊房間的廣播
+func TestWebsocketNoBroadcastAfterLeave(t *testing.T) {
+	redis := &fakeRedis{}
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
+	h.StartBroadcast()
+	conn := dialWS(t, url)
+	joinRoom(t, conn, "a")
+	sendFrame(t, conn, `{"type":"leave"}`)
+	expectRoomFrame(t, conn, wsTypeLeaveOK, "a")
+
+	redis.deliver("a", `{"type":"message","payload":"stale"}`)
+
+	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, data, err := conn.ReadMessage(); err == nil {
+		t.Fatalf("received %q after leave, want nothing", data)
 	}
 }
 

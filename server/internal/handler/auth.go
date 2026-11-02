@@ -44,6 +44,9 @@ type AuthHandler struct {
 	limiter          store.RateLimiterInterface
 	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 clientIP）
 	tokens           tokenIssuer
+	// 可替換只為了 test：要能確認「未知帳號」那條路也真的跑了 bcrypt，
+	// 否則 timing 防帳號列舉沒有回歸保護。正式環境永遠是 auth.CheckPassword
+	checkPassword func(hash, password string) (bool, error)
 }
 
 // handler 只需要「能簽 access token」：定義在使用方，*auth.TokenIssuer 不用宣告就自動符合
@@ -59,6 +62,7 @@ func NewAuthHandler(db store.DBStoreInterface, limiter store.RateLimiterInterfac
 		limiter:          limiter,
 		trustedHeaderKey: trustedHeaderKey,
 		tokens:           tokens,
+		checkPassword:    auth.CheckPassword,
 	}
 }
 
@@ -185,7 +189,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrUserNotFound) {
 		// 結果不重要，目的是花跟「密碼錯」一樣的時間
 		// 借以避免讓攻擊者知道錯誤
-		_, _ = auth.CheckPassword(dummyHash, req.Password)
+		_, _ = this.checkPassword(dummyHash, req.Password)
 		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
 		return
 	}
@@ -196,7 +200,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 有user，檢查密碼是不是正確的
-	success, err := auth.CheckPassword(user.PasswordHash, req.Password)
+	success, err := this.checkPassword(user.PasswordHash, req.Password)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "check password failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)

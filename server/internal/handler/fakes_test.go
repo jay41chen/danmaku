@@ -28,6 +28,7 @@ type fakeDBStore struct {
 	gotQueryRoomID   int64  // spy：QueryMessage 收到的 room id
 	queryMsgCalled   bool   // spy：QueryMessage 有沒有被呼叫（不能用 gotQueryRoomID == 0 判斷：零值 room 也會傳 0）
 	createMsgCalled  bool
+	onCreateMessage  func() // 不是 nil 時，CreateMessage 在回傳成功前先呼叫（test 用來模擬「INSERT 成功後 client 斷線」）
 
 	// CreateUser 用
 	createID    int64
@@ -77,6 +78,9 @@ func (f *fakeDBStore) QueryMessage(ctx context.Context, roomID int64, limit int)
 func (f *fakeDBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
 	f.createMsgCalled = true
 	f.gotMsgRoomPublic, f.gotMsgUserID, f.gotMsgContent = roomPublicID, userID, content
+	if f.onCreateMessage != nil {
+		f.onCreateMessage()
+	}
 	return f.createdMsg, f.createMsgErr
 }
 
@@ -185,6 +189,9 @@ type fakeRedis struct {
 	published  []string // spy：Publish 收到過的訊息
 	// spy：Publish 收到過的 room id（跟 published 同 index）
 	publishedRooms []string
+	// spy：Publish 呼叫當下 ctx 的狀態（跟 published 同 index）
+	// 不存 ctx 本身：broadcast 一回來就 defer cancel()，事後再看 Err() 一定是 canceled
+	publishCtxs []publishCtxSnapshot
 
 	mu      sync.Mutex
 	handler func(roomID, msg string) // Subscribe 收到的 handler，test 用 deliver 推訊息進去
@@ -198,11 +205,20 @@ type fakeRedis struct {
 	joinBlock   chan struct{}
 }
 
+type publishCtxSnapshot struct {
+	ctx         context.Context // 只拿來讀 Value；Err / Deadline 看下面的快照
+	err         error
+	deadline    time.Time
+	hasDeadline bool
+}
+
 func (f *fakeRedis) Publish(ctx context.Context, roomID, msg string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.published = append(f.published, msg)
 	f.publishedRooms = append(f.publishedRooms, roomID)
+	deadline, hasDeadline := ctx.Deadline()
+	f.publishCtxs = append(f.publishCtxs, publishCtxSnapshot{ctx: ctx, err: ctx.Err(), deadline: deadline, hasDeadline: hasDeadline})
 	return f.publishErr
 }
 
