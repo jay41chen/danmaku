@@ -4,6 +4,7 @@ import { apiFetch } from "../api/client";
 import * as session from "../auth/session";
 import { equalJitter } from "../lib/backoff";
 import * as messages from "./messages";
+import * as room from "./room";
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_CAP_MS = 32_000;
@@ -185,6 +186,7 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       clearAuthRetry();
       break;
     case "join_ok":
+      room.set("joined");
       joinRetryAttempt = 0;
       clearJoinRetry();
       // WS open ≠ 已經在收廣播：open 到 join_ok（server SUBSCRIBE 完成）之間的訊息可能漏掉，
@@ -198,6 +200,7 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       } else if (code === "ws_join_unavailable") {
         scheduleJoinRetry(sock);
       } else if (code === "ws_room_not_found") {
+        room.set("not_found");
         console.warn("ws: room not found, not retrying");
       } else if (code === "ws_already_in_room" || code === "ws_not_in_room") {
         console.warn("ws: join state mismatch (client bug)", code);
@@ -222,6 +225,7 @@ function connect() {
   joinRetryAttempt = 0;
   clearJoinRetry();
   stopHeartbeat();
+  // room 狀態刻意不重設回 pending，否則「房間不存在」每次重連都會閃一下（房間不存在的話這條 socket 還是會收到 not_found）
 
   sock.onopen = () => {
     if (sock !== ws) return;

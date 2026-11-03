@@ -3,11 +3,14 @@ import * as session from "./auth/session";
 import { AuthForm } from "./components/AuthForm";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
+import { ROOM_PUBLIC_ID } from "./config";
+import { useRoomStatus } from "./hooks/useRoomStatus";
 import { useSession } from "./hooks/useSession";
 import * as connection from "./realtime/connection";
 
 function App() {
   const { status, user } = useSession();
+  const roomStatus = useRoomStatus();
   // 登出可能要等進行中的 refresh 結束（最多約 10 秒），期間按鈕停用並顯示「登出中…」
   const [loggingOut, setLoggingOut] = useState(false);
 
@@ -47,8 +50,14 @@ function App() {
       ) : (
         <AuthForm />
       )}
-      <MessageList />
-      <Composer />
+      {roomStatus === "not_found" ? (
+        <div style={{ color: "crimson" }}>房間不存在（{ROOM_PUBLIC_ID}）</div>
+      ) : (
+        <>
+          <MessageList />
+          <Composer />
+        </>
+      )}
     </div>
   );
 }
