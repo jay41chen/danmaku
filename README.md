@@ -120,6 +120,7 @@ npm run dev
 - WS keepalive：client 每 25 秒送 `{"type": "ping"}`，server 回 `{"type": "pong"}`；server 也每 25 秒送 WebSocket protocol ping（瀏覽器自動回 pong），75 秒沒收到任何東西就斷線。目的是讓閒置連線不被 nginx `proxy_read_timeout`（60s）切掉，並偵測半開連線
 - WS 進房：client 送 `{"type": "join", "payload": {"room": "<public_id>"}}`，收到 `join_ok` 之後才會收到該房間的 `message`。一條連線同時最多在一個房間；換房 = 先送 `{"type": "leave"}` 再 `join`。斷線時 server 自動離房。`join_ok` 之前發出的彈幕不會補送（Redis Pub/Sub 不存訊息），client 收到 `join_ok` 後要再抓一次歷史訊息（server 等 Redis 確認訂閱好了才回 `join_ok`，所以兩者中間不會有漏掉的訊息）
 - WS 登入：client 送 `{"type": "auth", "payload": {"token": "<access token>"}}`。快到期時在同一條連線再送一次新的 token 續期；送別人的 token 會直接換身分
+- WS 限流：每條連線每秒最多 5 個 frame（`auth` / `join` / `leave` / `ping` 都算），超過的**直接丟掉、不回應**（回應本身也要佔 server 資源，所以刻意不回）。client 不能假設送出的 frame 一定有回應：送 `join` 後要自己設 timeout（前端是 5 秒），逾時就用 backoff 重送；重送後收到 `ws_already_in_room` 代表第一次的 `join` 其實成功了
 
 ## Request ID & Log 追蹤
 

@@ -127,8 +127,9 @@
       - test：`TestWebsocketSlowClientKickedWithoutBlockingBroadcast`、`TestWebsocketWriteFailureClosesConnection`；mutation 6 個全抓到
       - Known（無害）：被踢 / 正常斷線時可能多一行 `write frame failed` warn（見 `writeLoop` 註解）；突發超過 256 則的爆量，正常 client 也會被踢（設計如此，靠重連補撈）
     - Known limitation（接受）：只有一個 worker，一個 SUB / UNSUB 卡住（最多 `redisCommandTimeout`）時其他房間的指令排在後面（head-of-line blocking）。已有觀眾的房間不受影響，只影響「第一個進房」；go-redis 一條 PubSub 本來就一次處理一個指令，多 worker 換不到平行度
-    - [ ] 前端 `ws_room_not_found` 只有 `console.warn`，畫面沒顯示（上面「join 失敗後前端要能顯示」沒做到）
-    - Known issue（低優先）：join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout；`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
+    - [x] 前端 `ws_room_not_found` 只有 `console.warn`，畫面沒顯示（2026-11-03：`realtime/room.ts` store + `useRoomStatus`，not_found 時只顯示「房間不存在」、隱藏列表和 Composer；只看 WS，GET 404 不算；重連不重設狀態避免閃爍）
+    - [x] join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout（2026-11-03：後端不改，限流靜默丟是刻意的（回應也要拿 Hub 鎖）；前端 `JOIN_TIMEOUT_MS` 5 秒逾時 → 走既有 `scheduleJoinRetry` 退避；重送後晚到的 `ws_already_in_room` 不當 client bug。auth 不做 timeout：WS 唯讀，auth 只影響觀眾數統計。Known：舊版 backend 回 `ws_write_forbidden` 時每 ≤30 秒重送一次 join，只在部署空窗）
+    - Known issue（低優先）：`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
