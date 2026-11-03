@@ -144,7 +144,9 @@
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
   - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
   - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /rooms/{public_id}/messages`，WS 寫入一律回 error）
-- [ ] 彈幕內容過濾：`POST /rooms/{public_id}/messages` 只用 `strings.TrimSpace` 擋全空白（含全形空白），零寬空白（U+200B 等）仍可送出看不見的彈幕；之後跟內容審核一起處理。`room_name` 同樣只 trim 頭尾，中間可以有換行 / 控制字元，一起處理
+- [x] 彈幕內容過濾（C1，2026-11-03）：輸入層用 PRECIS Freeform（`golang.org/x/text/secure/precis`，RFC 8264）擋控制字元、零寬字元、雙向控制字元（RLO 等）；**只檢查不改寫**（拿 precis 的 error、丟掉輸出，存原樣）。profile 另外設定：檢查前先移除 VS15 / VS16（U+FE0E / U+FE0F，手機鍵盤送的 ❤️ 帶 U+FE0F，PRECIS 預設會拒絕）+ `DisallowEmpty`（只有選擇符的字串變空 → 拒絕），都是 PRECIS 自己的擴充點（AdditionalMapping），不在 validator 裡加特例。房名比彈幕嚴：頭尾空白直接拒絕（不再 trim）、不可連續空白、combining mark（Mn + Me）最多連續 2 個。驗證集中在 `handler/text_validation.go`，回傳的 sentinel 文字直接給 client。輸出層：前端 `<bdi>` 隔離 + `overflow: hidden` 擋 Zalgo（見 go-notes 3.36）
+  - Known：ZWJ emoji 序列（👨‍👩‍👧、👩‍💻）會被拒（PRECIS 的 contextual rule）；PRECIS 拒絕未指派碼位 → Unicode 新增的 emoji 要等 `x/text` 升級才收；舊資料沒有回頭清理；「看起來是空白、但不是 Unicode 空白」的字元擋不到：U+2800（點字空白）、U+1D159、`"\uFE0F "`（選擇符 + 空白，彈幕會通過）；VS15 / VS16 是**任何位置**都移除後才檢查，不限 emoji 後面 → 彈幕可以夾帶最多約 99 個看不見的 U+FE0F（房名受 mark 上限擋，最多連 2 個），選擇符也能插在 PRECIS contextual rule 檢查的兩個字之間讓檢查看不到它（Judge 全掃 U+0000–U+2FFFF：不含選擇符的輸入 0 個行為改變）→ 之後跟內容審核一起處理（要一份「視覺空白」清單）
+  - 之後：關鍵字過濾 / 內容審核要「先正規化再比對」（防零寬字元或全形字繞過），正規化只用在比對，不改存的資料
 - [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
 - [ ] Ban（封鎖使用者，含 shadow ban）
   - 重用 `user_credential_state`（refresh token 修正時建的）：ban / 強制登出 = `revokeAllCredentials`；access token（JWT）也可以用 `iat <= valid_after` 擋，跟下面的記憶體 ban set 一起考慮

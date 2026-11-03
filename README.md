@@ -92,9 +92,9 @@ npm run dev
 | Method | Path | 要登入 | 說明 |
 |---|---|---|---|
 | `GET` | `/rooms/{public_id}/messages` | | 該房間的歷史訊息；房間不存在或已刪除回 `404`，沒有訊息回 `[]`。發送者已刪除的訊息 `username` 是 `null` |
-| `POST` | `/rooms/{public_id}/messages` | ✓ | 在該房間發彈幕 `{"content": "..."}`：最多 100 字、不可全空白；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。房間不存在或已刪除回 `404`。成功回 `201` + 訊息，並廣播給已 `join` 這個房間的 WS 連線 |
+| `POST` | `/rooms/{public_id}/messages` | ✓ | 在該房間發彈幕 `{"content": "..."}`：最多 100 字、不可全空白、不可含控制字元 / 零寬字元 / 雙向控制字元（PRECIS Freeform，RFC 8264；換行也不行）。只檢查不改寫：存的是原樣；按 user 限流（3 則 / 1 秒 + 20 則 / 10 秒）。房間不存在或已刪除回 `404`。成功回 `201` + 訊息，並廣播給已 `join` 這個房間的 WS 連線 |
 | 任何 method | `/messages` | | **已移除**：回 `410 Gone`，請改用 `/rooms/{public_id}/messages` |
-| `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：trim 後 1～30 字；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
+| `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：1～30 字（彈幕的 100 字也一樣：以 Unicode code point 計，❤️ = U+2764 + U+FE0F 算 2 個），字元規則同彈幕，另外**頭尾不可有空白**（不幫忙 trim，直接回 `400`）、不可有連續空白、不可有超過 2 個連續的 combining mark；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上後要送 `join` 進房才收得到該房間的彈幕；連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
