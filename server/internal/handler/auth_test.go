@@ -705,5 +705,9 @@ func TestHandleMe(t *testing.T) {
 		if fake.gotByIDCall != 0 {
 			t.Error("queried DB without a user id")
 		}
+		// 錯誤回應也不能被快取：Cache-Control 要在 requireUserID 之前設
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
 	})
 }
