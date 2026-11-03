@@ -12,6 +12,8 @@ const AUTH_RETRY_BASE_MS = 1000;
 const AUTH_RETRY_CAP_MS = 60_000;
 const JOIN_RETRY_BASE_MS = 1000;
 const JOIN_RETRY_CAP_MS = 30_000;
+// 送出 join 後等回應的上限：server 限流會把超量的 frame 靜默丟掉（不回應），逾時就當作丟了、走 join 重試。server 最慢約 400ms（DB + Redis 各 200ms），5 秒不會誤判
+const JOIN_TIMEOUT_MS = 5_000;
 // 要跟 server wsPingPeriod（server/internal/handler/ws.go）一致，範圍檢查在 server/internal/handler/ws_test.go
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const PONG_TIMEOUT_MS = 20_000;
@@ -26,6 +28,9 @@ let authRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authRetryAttempt = 0;
 let joinRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let joinRetryAttempt = 0;
+let joinTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+// 這條 socket 的 join 是否逾時過；是的話晚到的 ws_already_in_room 是預期中的，不是 client bug
+let joinTimedOut = false;
 let unsubscribeSession: (() => void) | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let pongTimer: ReturnType<typeof setTimeout> | null = null;
@@ -70,19 +75,33 @@ function clearAuthRetry() {
   }
 }
 
+// join 的兩個 timer（等回應的 timeout、等重送的 retry）一起清
 function clearJoinRetry() {
   if (joinRetryTimer !== null) {
     clearTimeout(joinRetryTimer);
     joinRetryTimer = null;
   }
+  if (joinTimeoutTimer !== null) {
+    clearTimeout(joinTimeoutTimer);
+    joinTimeoutTimer = null;
+  }
 }
 
-// server 要求先 join 才會收到房間廣播；每條 socket（含重連、recycle）都在 onopen 送一次
+// server 要求先 join 才會收到房間廣播；每條 socket（含重連、recycle）都在 onopen 送一次。
+// 送出後同時啟動回應逾時計時器（逾時走 scheduleJoinRetry）
 function sendJoin(sock: WebSocket) {
   sock.send(JSON.stringify({ type: "join", payload: { room: ROOM_PUBLIC_ID } }));
+  if (joinTimeoutTimer !== null) clearTimeout(joinTimeoutTimer);
+  joinTimeoutTimer = setTimeout(() => {
+    joinTimeoutTimer = null;
+    if (sock !== ws) return;
+    joinTimedOut = true;
+    console.warn("ws: join timeout, retrying");
+    scheduleJoinRetry(sock);
+  }, JOIN_TIMEOUT_MS);
 }
 
-// server 暫時無法 join（ws_join_unavailable）→ 退避重送，直到 join_ok 或連線換掉
+// server 暫時無法 join（ws_join_unavailable）或 join 逾時 → 退避重送，直到 join_ok 或連線換掉
 function scheduleJoinRetry(sock: WebSocket) {
   clearJoinRetry();
   const wait = equalJitter(joinRetryAttempt++, JOIN_RETRY_BASE_MS, JOIN_RETRY_CAP_MS);
@@ -200,9 +219,14 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       } else if (code === "ws_join_unavailable") {
         scheduleJoinRetry(sock);
       } else if (code === "ws_room_not_found") {
+        clearJoinRetry();
         room.set("not_found");
         console.warn("ws: room not found, not retrying");
-      } else if (code === "ws_already_in_room" || code === "ws_not_in_room") {
+      } else if (code === "ws_already_in_room") {
+        clearJoinRetry();
+        // 逾時重送過 join 的話，這是第一個 join 晚到的結果（其實已經在房間裡），無害；沒重送過才是 client bug
+        if (!joinTimedOut) console.warn("ws: join state mismatch (client bug)", code);
+      } else if (code === "ws_not_in_room") {
         console.warn("ws: join state mismatch (client bug)", code);
       } else if (code === "ws_write_forbidden") {
         // 舊版 backend 不認得 join frame 時會回這個，無害
@@ -223,6 +247,7 @@ function connect() {
   authRetryAttempt = 0;
   clearAuthRetry();
   joinRetryAttempt = 0;
+  joinTimedOut = false;
   clearJoinRetry();
   stopHeartbeat();
   // room 狀態刻意不重設回 pending，否則「房間不存在」每次重連都會閃一下（房間不存在的話這條 socket 還是會收到 not_found）
