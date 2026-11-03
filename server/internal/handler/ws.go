@@ -44,7 +44,7 @@ type AccessTokenClaimsParser interface {
 //	HandleWebsocket       → r.Context()           這條 WS 連線的生命週期，帶 request_id
 //	  ├ PingLoop / WriteLoop（ws.Client）→ 沿用上層 ctx（只拿來記 log）
 //	  └ listenConnection（ReadLoop）/ hub.Unregister → 沿用上層 ctx
-//	    └ processRemoteMessage → 沿用上層 ctx
+//	    └ session.onMessage → dispatch → 沿用上層 ctx
 //	      ├ handleAuth → 沿用上層 ctx，但 GetUserByID 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
 //	      ├ handleJoin（enterRoom → lookupRoom / subscribeRoom）→ 沿用上層 ctx，但 GetRoomByPublicID、JoinRoom 各自另外包 wsJoinTimeout
 //	      ├ handleLeave → 沿用上層 ctx，但 LeaveRoom 另外包 wsJoinTimeout
@@ -135,41 +135,10 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	this.listenConnection(r.Context(), client)
 }
 
-// 每條連線的 frame 限流：固定視窗，視窗內最多 rateLimit 個 frame
-// 只有讀取迴圈那個 goroutine 會用，所以不需要鎖
-type frameRateLimiter struct {
-	msgCount    int
-	windowStart time.Time
-}
-
-func newFrameRateLimiter() *frameRateLimiter {
-	return &frameRateLimiter{windowStart: time.Now()}
-}
-
-// 回傳 false = 這個 frame 超過限流，要丟掉
-func (this *frameRateLimiter) allow(now time.Time) bool {
-	if now.Sub(this.windowStart) > time.Second {
-		this.msgCount = 0
-		this.windowStart = now
-	}
-	this.msgCount++
-	return this.msgCount <= rateLimit
-}
-
 func (this *WebsocketHandler) listenConnection(ctx context.Context, client *ws.Client) {
-	limiter := newFrameRateLimiter()
+	session := newWsSession(this, client)
 
-	client.ReadLoop(ctx, func(msg []byte) {
-		// WS 收到的 frame（auth / ping / 其他）每條連線每秒最多 rateLimit 個，超過的直接丟掉（不驗、不查、不回）
-		// 跟 POST /rooms/{public_id}/messages 的限流無關：WS 連線不用登入就能連，任何人都能送 frame 逼 server 做事
-		// （每個 frame 都要拿 Hub 的鎖回應；用自己合法 token 狂送 auth 還會每次查 DB）
-		if !limiter.allow(time.Now()) {
-			this.logger.WarnContext(ctx, "too many msgs sent", "limit", rateLimit)
-			return
-		}
-
-		this.processRemoteMessage(ctx, client, msg)
-	})
+	client.ReadLoop(ctx, func(msg []byte) { session.onMessage(ctx, msg) })
 	// ReadMessage 失敗（conn遇到錯誤）：把該連線從 Hub 移除
 	// 還在房間裡就要 LeaveRoom（Hub 外做）；被踢（outbox 滿）、WriteLoop / PingLoop 寫失敗也都是 Close 之後走到這裡清理
 	if room := this.hub.Unregister(ctx, client); room != "" {
@@ -193,74 +162,6 @@ func (this *WebsocketHandler) errorFrame(ctx context.Context, code, message stri
 		Type:    wsTypeError,
 		Payload: wsError{Code: code, Message: message},
 	})
-}
-
-// 收到 client 一個 frame 後的分派：
-//   - type = "auth" → handleAuth（連線內登入 / 續期，失敗只降回訪客，不斷線）
-//   - type = "ping" → 回 pong（應用層心跳，payload 忽略；一樣算進每條連線的 5 則/秒限流）
-//   - type = "join" → handleJoin（進入房間，一條連線同時只能在一個房間）
-//   - type = "leave" → handleLeave（離開房間）
-//   - 其他（含不是合法 JSON）→ 回 ws_write_forbidden
-//
-// WS 不能寫入：發訊息要走 POST /rooms/{public_id}/messages（那裡才驗得了身分、存得進 DB 並帶 user_id）
-// 這裡只回一個 error envelope 給「這條連線」，不存 DB、不 Publish、不關連線
-// 目前對所有人一律拒絕，直到 W4b 有角色（房主 / curator）才會有人能透過 WS 寫
-//
-// 每條連線的 5 則/秒限流（listenConnection）同時也限制了 error frame 的數量（auth frame 也算），
-// 不用另外擋「狂送訊息逼 server 狂回錯誤」
-func (this *WebsocketHandler) processRemoteMessage(ctx context.Context, c *ws.Client, msg []byte) {
-	var in struct {
-		Type    string          `json:"type"`
-		Payload json.RawMessage `json:"payload"`
-	}
-	if err := json.Unmarshal(msg, &in); err != nil {
-		this.replyError(ctx, c, wsCodeWriteForbidden, wsMsgWriteForbidden)
-		return
-	}
-	switch in.Type {
-	case wsTypeAuth:
-		this.handleAuth(ctx, c, in.Payload)
-	case wsTypeJoin:
-		this.handleJoin(ctx, c, in.Payload)
-	case wsTypeLeave:
-		this.handleLeave(ctx, c)
-	case wsTypePing:
-		this.reply(ctx, c, wsEnvelope{Type: wsTypePong, Payload: nil})
-	default:
-		this.replyError(ctx, c, wsCodeWriteForbidden, wsMsgWriteForbidden)
-	}
-}
-
-// 回一個 envelope 給這條連線
-func (this *WebsocketHandler) reply(ctx context.Context, c *ws.Client, env wsEnvelope) {
-	this.hub.Send(ctx, c, this.encodeEnvelope(ctx, env))
-}
-
-// 回一個 error frame 給這條連線
-func (this *WebsocketHandler) replyError(ctx context.Context, c *ws.Client, code, message string) {
-	this.hub.Send(ctx, c, this.errorFrame(ctx, code, message))
-}
-
-// 處理 join frame。DB 查詢和 JoinRoom 都在 Hub 外做（Redis / DB 可能慢，不能擋住廣播和其他連線），
-// 只有「記房間 + 回 frame」才呼叫 Hub
-// payload 壞掉 / room 空 → 一律回 ws_room_not_found（跟 auth 壞 payload 回 ws_auth_failed 同一個做法）
-func (this *WebsocketHandler) handleJoin(ctx context.Context, c *ws.Client, raw json.RawMessage) {
-	if this.hub.Room(c) != "" {
-		this.replyError(ctx, c, wsCodeAlreadyInRoom, wsMsgAlreadyInRoom)
-		return
-	}
-	roomID, wsErr := this.enterRoom(ctx, raw)
-	if wsErr != nil {
-		this.replyError(ctx, c, wsErr.Code, wsErr.Message)
-		return
-	}
-	// JoinRoom 成功：從這一刻起，斷線清理（hub.Unregister 回傳的房間）要負責 LeaveRoom
-	joinOK := this.encodeEnvelope(ctx, wsEnvelope{Type: wsTypeJoinOK, Payload: wsRoomPayload{Room: roomID}})
-	if !this.hub.Join(ctx, c, roomID, joinOK) {
-		// 防禦用：現在只有讀取迴圈（就是呼叫我們的這個 goroutine）會 Unregister，照理不會發生
-		// 真的發生的話，JoinRoom 已經成功了，而且沒有別人會 LeaveRoom，所以這裡要自己補
-		this.leaveRoom(ctx, roomID)
-	}
 }
 
 // 解析 payload、確認房間存在、向 Redis JoinRoom。不碰鎖。
@@ -306,45 +207,11 @@ func (this *WebsocketHandler) subscribeRoom(ctx context.Context, roomID string) 
 	return nil
 }
 
-// 處理 leave frame。對 client 來說 leave 一定成功：先改 Hub 裡的房間並回 leave_ok，
-// 再到 Hub 外做 LeaveRoom（失敗只記 log，由 roomSubscriptions 處理）
-func (this *WebsocketHandler) handleLeave(ctx context.Context, c *ws.Client) {
-	roomID := this.hub.Room(c)
-	if roomID == "" {
-		this.replyError(ctx, c, wsCodeNotInRoom, wsMsgNotInRoom)
-		return
-	}
-
-	this.hub.Leave(ctx, c, this.encodeEnvelope(ctx, wsEnvelope{Type: wsTypeLeaveOK, Payload: wsRoomPayload{Room: roomID}}))
-
-	this.leaveRoom(ctx, roomID)
-}
-
 // 對 Redis 做 LeaveRoom（絕不能在 Hub 的鎖裡呼叫），包 wsJoinTimeout
 func (this *WebsocketHandler) leaveRoom(ctx context.Context, roomID string) {
 	leaveCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
 	this.redis.LeaveRoom(leaveCtx, roomID)
-}
-
-// 處理 auth frame。token 解析和 DB 查詢都在 Hub 外做（DB 可能慢，不能擋住廣播和其他連線），
-// 只有「套用身分變更 + 回 frame」才呼叫 Hub
-// 任何失敗一律降回匿名並回 ws_auth_failed（即使原本是 member），連線不關
-func (this *WebsocketHandler) handleAuth(ctx context.Context, c *ws.Client, raw json.RawMessage) {
-	user, exp, ok := this.verifyAuthPayload(ctx, raw)
-	if !ok {
-		this.hub.Downgrade(ctx, c, ws.ReasonAuthFailed, this.errorFrame(ctx, wsCodeAuthFailed, wsMsgAuthFailed))
-		return
-	}
-	authOK := this.encodeEnvelope(ctx, wsEnvelope{
-		Type: wsTypeAuthOK,
-		Payload: wsAuthOKPayload{
-			User:      userResponse{ID: user.ID, Username: user.Username},
-			ExpiresIn: int(time.Until(exp).Seconds()),
-		},
-	})
-	expired := this.errorFrame(ctx, wsCodeAuthExpired, wsMsgAuthExpired)
-	this.hub.Authenticate(ctx, c, user.ID, user.Username, exp, authOK, expired)
 }
 
 // 解析 payload、驗 token、確認 user 還在。不碰 Hub。
