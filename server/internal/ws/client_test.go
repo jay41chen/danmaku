@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ type hubServer struct {
 	url    string
 	opened chan *Client    // 每條連線 Register + Join 完成後送出
 	closed chan closedConn // 每條連線清理完成後送出
+	wg     sync.WaitGroup  // 每個 server 端 handler（含清理）結束才 Done
 }
 
 func newHubServer(t *testing.T, room string) *hubServer {
@@ -32,6 +34,8 @@ func newHubServer(t *testing.T, room string) *hubServer {
 	s := &hubServer{hub: NewHub(10), opened: make(chan *Client, 8), closed: make(chan closedConn, 8)}
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.wg.Add(1)
+		defer s.wg.Done()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -46,9 +50,26 @@ func newHubServer(t *testing.T, room string) *hubServer {
 		go c.WriteLoop(ctx)
 		s.opened <- c
 		c.ReadLoop(ctx, func([]byte) {})
-		s.closed <- closedConn{client: c, room: s.hub.Unregister(ctx, c)}
+		cc := closedConn{client: c, room: s.hub.Unregister(ctx, c)}
+		select {
+		case s.closed <- cc:
+		default: // 沒人收就丟掉，不能讓 handler 卡住
+		}
 	}))
 	t.Cleanup(srv.Close)
+	// 等所有 server 端 handler 清理完（Unregister 跑完）才結束測試：
+	// prom.WebsocketConnections 是全域 gauge，handler 晚一步 Dec 會落進下一個測試
+	// （例如 TestUnregisterTwice）的 before/after 區間造成偶發失敗。
+	// t.Cleanup 是 LIFO：dial 之後註冊的「關 client conn」會先跑，handler 的 ReadLoop 才會醒來結束
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { s.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("server handlers did not finish")
+		}
+	})
 	s.url = "ws" + strings.TrimPrefix(srv.URL, "http")
 	return s
 }
