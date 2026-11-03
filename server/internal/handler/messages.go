@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
-	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -95,11 +94,8 @@ func (this *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *ht
 // 發到 Redis 廣播
 // 回 201
 func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request, roomPublicID string) {
-	userID, ok := middleware.UserIDFromContext(r.Context())
+	userID, ok := requireUserID(w, r, this.logger)
 	if !ok {
-		// 走到這裡是 server 設定錯誤、不是 client 的錯：這個 route 忘了用 post 註冊（誤用 publicPost）
-		this.logger.ErrorContext(r.Context(), "no user id in context, route must be registered with post, not publicPost")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 

@@ -7,7 +7,6 @@ import (
 	"net/http"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
-	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -35,11 +34,8 @@ type createRoomRequest struct {
 // 存 DB（額度檢查在 store 的 transaction 裡）
 // 回 201
 func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
-	userID, ok := middleware.UserIDFromContext(r.Context())
+	userID, ok := requireUserID(w, r, this.logger)
 	if !ok {
-		// 走到這裡是 server 設定錯誤、不是 client 的錯：這個 route 忘了用 post 註冊（誤用 publicPost）
-		this.logger.ErrorContext(r.Context(), "no user id in context, route must be registered with post, not publicPost")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 

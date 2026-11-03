@@ -10,7 +10,6 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
-	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -352,11 +351,8 @@ func (this *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 	// 放在最前面：錯誤回應也不該被快取
 	w.Header().Set("Cache-Control", "no-store")
 
-	userID, ok := middleware.UserIDFromContext(r.Context())
+	userID, ok := requireUserID(w, r, this.logger)
 	if !ok {
-		// 走到這裡是 server 設定錯誤、不是 client 的錯：這個 route 忘了用 get 註冊（誤用 publicGet）
-		this.logger.ErrorContext(r.Context(), "no user id in context, route must be registered with get, not publicGet")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
