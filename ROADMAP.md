@@ -1,5 +1,21 @@
 # Roadmap
 
+## Milestones（2026-11-03 訂，暫定）
+
+> 主軸：application + architecture。從 2026-11-03 起估 5 ～ 7 週。估計假設投入時間跟前一個月差不多，沒算做的過程中新長出來的項目 → 實際偏後半段。細項見下方 W4b / W6
+
+| Milestone | 內容 | 估計（週） | 預計完成（快 ～ 慢） |
+|---|---|---|---|
+| M1 房間可瀏覽 | 房間列表（`GET /rooms` cursor 分頁、`/me/rooms`）+ 選房間 UI | 0.5 ～ 0.75 | 11/6 ～ 11/8 |
+| M2 房間有人氣 | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
+| M3 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/19 ～ 11/27 |
+| M4 最小 CI | GitHub Actions 跑 `go vet` / `go test` + multi-stage Dockerfile | 0.25 ～ 0.5 | 11/21 ～ 11/30 |
+| M5 不漏訊息 | replay + auto-reconnect（含 `after`）+ half-open watchdog + 證明它有效的 SLI metrics（漏訊息數、重連 / 補撈次數、送達延遲） | 1 ～ 1.5 | 11/28 ～ 12/11 |
+| M6 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗） | 1 ～ 1.25 | 12/5 ～ 12/19 |
+| M7 驗收 | 輕量 chaos：本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞），檢查不漏訊息、人數恢復、重連成功 | 0.5 | 12/8 ～ 12/23 |
+
+選做（infra 向）：Railway multi-replica metrics / service discovery、alerts、trusted proxy + IPv6 /64、全域限流、測試 DB 隔離、Hub + SSE。其餘見最下方 Backlog
+
 ## W1 — 基礎彈幕系統 ✅
 
 - [x] Go HTTP server（net/http）
@@ -131,6 +147,9 @@
     - [x] join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout（2026-11-03：後端不改，限流靜默丟是刻意的（回應也要拿 Hub 鎖）；前端 `JOIN_TIMEOUT_MS` 5 秒逾時 → 走既有 `scheduleJoinRetry` 退避；重送後晚到的 `ws_already_in_room` 不當 client bug。auth 不做 timeout：WS 唯讀，auth 只影響觀眾數統計。Known：舊版 backend 回 `ws_write_forbidden` 時每 ≤30 秒重送一次 join，只在部署空窗）
     - Known issue（低優先）：`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
   - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
+    - Pagination（2026-11-03 從 W5 併入）：`GET /rooms` 沒有上限 → cursor pagination 跟 A 一起設計（cursor 格式在這裡第一次決定）
+    - `GET /me/rooms` 現在不分頁（`maxRoomsPerUser = 3`，未刪除的最多 3 筆），但回應格式預留 cursor pagination 的空間，之後要列出已刪除房間（恢復功能）時加分頁不破壞舊 client
+    - 彈幕分頁不在 A：`after` → W6 replay，`before` → Backlog（Q167）
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403
   - 彈幕綁房間：`messages.room_id BIGINT NOT NULL REFERENCES rooms(id)`；舊彈幕歸進 legacy room（`public_id = 'legacy00000'`、名稱 `Legacy`，owner 是 migration 建的系統帳號 `admin`，`password_hash = '!'` 不能登入）。**部署前確認 prod 沒人註冊 `admin`**
@@ -140,6 +159,7 @@
     - 之後再做：房主看自己已刪除的房間要能分辨「已刪除」（例如之後的恢復功能），觀眾一律只看到 404
   - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
   - 房間人數（presence，設計已定案，見 go-notes 3.27）：每個房間一個 Redis Sorted Set `room:R:members`，member = `conn_id:user_id`（綁連線不綁 user；訪客用唯一值，不能留空），score = 最後續期時間。每台 server 每 10 秒用 pipeline 續期自己的連線 + 對 key 下 `EXPIRE 30`；正常斷線直接刪。算人數：先刪 score < now − 30s → 讀出 member 依 user_id 去重；每台各自每 5 秒算一次推給自己的觀眾，算不到就沿用上一次的數字
+- [ ] HTTP 錯誤格式統一（2026-11-03 從 W5 併入，排在 RBAC 前）：目前 `http.Error` 只回純文字，同一個 status 分不出原因（例如 403 可能是「被 ban」或「房間數到上限」）。改成 status + 機器判斷用的 `code` + 給人看的 `message`（WS 已經是 `{code, message}`；可參考 RFC 9457 Problem Details），所有 endpoint 一次換
 - [ ] Authorization（RBAC）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
   - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
@@ -156,49 +176,26 @@
   - 三層保險：Pub/Sub（秒級）→ 定期同步（≤ 60 秒）→ refresh token 已撤銷，access token 過期後換不到新的（≤ access token 效期）
   - WS：連線建立時才驗 token，之後的訊息不經過 middleware → 收到 ban 時要主動關掉該 user 的連線，或在每則訊息檢查 ban set
 
-## W5 — API 設計強化
+## W5 — 已拆分（2026-11-03）
 
-- [ ] HTTP 錯誤格式統一：目前 `http.Error` 只回純文字，同一個 status 分不出原因（例如 403 可能是「被 ban」或「房間數到上限」）。改成 status + 機器判斷用的 `code` + 給人看的 `message`（WS 已經是 `{code, message}`；可參考 RFC 9457 Problem Details），所有 endpoint 一次換
-- [ ] Rate limiting（middleware）
-  - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
-  - Limiter 呼叫加短 timeout（例如 `context.WithTimeout` 100ms）：Redis 網路黑洞時 go-redis 預設 dial timeout 5 秒，一次 login 呼叫 limiter 4 次，fail open 最慢要等約 20 秒
-  - 全域基本限制（每 IP 每秒 N 個 request，nginx `limit_req` 或 middleware）：目前只有個別 endpoint 的嚴格限制。依「被濫用的代價」決定而不是 HTTP method：`GET /rooms/{public_id}/messages?limit=10000` 一樣貴
-  - WS 連線數限制：WS 不用登入就能連，現在只有每條連線 5 frame/秒（`listenConnection`），擋不住「開很多條」
-    - 開 100 條閒置連線就佔滿 `maxClients`，正常使用者連不上；keepalive 之後閒置連線會回 pong，不會被 read deadline 踢掉
-    - 開 100 條、每條每秒送 5 個 → 合計每秒 500 次搶全域鎖回應，廣播變慢
-    - 方向：每 IP 最多 N 條 WS（nginx `limit_conn` 或 upgrade 前在 middleware 擋），多台 server 時要跨 instance 計數（Redis）
-- [ ] Login CAPTCHA（reCAPTCHA / Turnstile 等，接外部服務前先討論選型）
-  - 補限流擋不到的兩個洞：攻擊者分散到大量 IP（每個 IP 都低於上限、credential stuffing 每個帳號只試一次）；per-username 限流可被拿來故意鎖別人的帳號（DoS）
-  - 失敗超過門檻時改成要求驗證，而不是直接 429：真人解完照樣登入，bot 每次嘗試都要付成本
-- [ ] Trusted proxy 收尾（client IP 不可偽造的前提）
-  - 本機 server-1/2 直接開 port（5388/5389）可繞過 nginx 偽造 `X-Real-IP`：拿掉 docker-compose 的 `ports:`，只留 nginx 對外（代價：不能再繞過 nginx 直接 curl 單台 server）
-  - Defense in depth：只有 `RemoteAddr` 是 trusted proxy 的 IP / CIDR 時才信任 header，其他來源退回 `RemoteAddr`（概念同 Gin `SetTrustedProxies`）
-- [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
+> 錯誤格式統一、Pagination → W4b（RBAC 前、房間列表內）；Rate limiting、Trusted proxy、IPv6 /64 → W6；其餘 → Backlog
+
 - [x] Metrics path cardinality：`path` label 直接用 `r.URL.Path`，被亂掃 URL 時每個 path 都會產生新的時間序列；改用 route pattern（如 Go 1.23+ 的 `r.Pattern`，mux 路由後才有值）或把未知路徑歸成 `other`
   - **優先度提高**（2026-10-30 Judge）：prod 的 server 公開，任何人掃隨機 URL 就能讓時間序列無限增加 → 記憶體持續成長、可能 OOM，不只是監控難看；`/metrics` 本身也公開可讀
   - ✅ 2026-11-03：`path` = `r.Pattern` 去掉 method（沒比對到 → `unmatched`，404 / 405 / preflight 靠 `status_code` 區分）；Judge 另外抓到 `method` 也是 client 決定的（`FOOBAR123` 一樣能撐爆）→ 白名單：HTTP 標準九個照原樣，其他 `other`。middleware chain 抽成 `serviceHandler`，`main_test` 走同一條 chain 守住「HttpMetrics 和 mux 中間不能複製 request」
   - Known（info）：stdlib 在 CONNECT + 結尾 `/` 的 route 遇到 redirect 時會把 `r.Pattern` 設成 client 的路徑；目前沒有這種 route，新增 subtree route 時要重看
   - `/metrics` 本身仍公開可讀（另議）
-- [ ] IPv6 限流 key 改用 /64 前綴（PLAUSIBLE，要看 Railway edge 會不會給 v6）：目前用完整位址，持有一個 /64 就能每次換 IP 繞過 IP 限流，可跟 trusted proxy 收尾一起做
-- [ ] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
-- [ ] Pagination
-  - `GET /rooms/{public_id}/messages` 加 `before=<id>`（往上捲載入更舊）/ `after=<id>`（重連補漏），store 跟著加方向參數：`WHERE id < $1 ORDER BY id DESC` / `WHERE id > $1 ORDER BY id ASC`
-  - 「選哪 N 則」（store，ORDER BY + LIMIT）跟「回傳順序」（API 契約，handler）是兩件事，不要用一個 order 參數同時控制
-  - 方向不能用 `$1` 傳（placeholder 只能放值），用 typed enum + switch 對應到寫死的 `ASC` / `DESC`
-- [ ] 密碼外洩檢查：register 時查 HIBP Pwned Passwords API（取代 / 補強 W4-3 embed 的常見密碼清單）
-  - k-anonymity：只送 SHA-1 前 5 碼，比對在本機做，原密碼與完整 hash 都不離開 server
-  - 要決定外部服務慢 / 掛掉時 fail open（放行）還是 fail closed（擋下），並加 timeout
-  - 順帶評估 NFKC 正規化（`golang.org/x/text/unicode/norm`，新套件），避免同字不同編碼登不進去
-- [ ] API versioning
-- [ ] 評估引入 OpenTelemetry（W4 結束後決定）
-  - metrics 改走 vendor-neutral API，backend 可替換
-  - 評估 tracing 的 trace ID 是否取代 W4a 的 request ID
 
 ## W6 — CI/CD + 進階穩定性
+
+> 順序（2026-11-03，對應上方 M2、M4–M7）：跨 server 人數（提前到 M2）→ 最小 CI + multi-stage → replay + auto-reconnect + half-open watchdog → 非同步保存 → 輕量 chaos 驗收；其餘 W6 項目為選做（見上方 Milestones）
 
 - [ ] CI/CD（GitHub Actions）
 - [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
+  - 補漏的 API 候選：`GET /rooms/{public_id}/messages?after=<id>`（2026-11-03 從 W5 Pagination 移來）跟 Redis List replay 二選一或並用，這裡一起決定
+    - store 加方向參數：`WHERE id > $1 ORDER BY id ASC`；方向不能用 `$1` 傳（placeholder 只能放值），用 typed enum + switch 對應到寫死的 `ASC` / `DESC`
+    - 「選哪 N 則」（store，ORDER BY + LIMIT）跟「回傳順序」（API 契約，handler）是兩件事，不要用一個 order 參數同時控制
   - 也要涵蓋「server 自己的 PubSub 重連、WS 沒斷」：go-redis 重連那段時間的訊息會漏（本機 kill pubsub 連線實驗每次漏 1–2 則），client 不知道要補撈。server 拿得到訊號（已 ready 的房間又收到 subscribe 確認 = 剛重連過），可對該房 client 送 resync frame 讓它 `GET after=<id>`
 - [ ] PubSub 連線 half-open 偵測：對方消失沒送 RST 時，go-redis 的 health check 只看 PING 寫不寫得出去、`Receive` 沒有 read deadline → 偵測不到，整台 server 所有房間靜默全漏，直到 TCP 自己逾時（可能十幾分鐘；proxy 丟包 10 秒實驗：0/20 收到、沒有重連）。方向：應用層 watchdog（定期 PUBLISH 給自己的 heartbeat channel，N 秒沒收到就拆掉重連），或 dialer 設 `TCP_USER_TIMEOUT` / 較短 keepalive。跟 presence 的 heartbeat 同一套觀念
 - [ ] Store integration test 不能同時跑兩份：共用 `danmaku_test` / Redis db 15，3 個 Judge 同時跑時每次 fail 的 test 都不一樣（單獨跑都過）。CI 平行化時要每個 runner 各自的 DB / Redis db
@@ -226,3 +223,34 @@
 - [ ] 大表加 index 改用 `CREATE INDEX CONCURRENTLY`：一般的 `CREATE INDEX`（如 000009 的 `messages_user_id_idx`）建立期間會擋住該表的寫入，表小時一瞬間，量大時彈幕會卡住。`CONCURRENTLY` 不能放在 transaction 裡 → 獨立一份 migration、不包 `BEGIN` / `COMMIT`；失敗會留下 `INVALID` 的 index，要先 `DROP INDEX` 再重跑
 - [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
 - [ ] Chaos testing
+- [ ] Rate limiting（middleware）
+  - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
+  - Limiter 呼叫加短 timeout（例如 `context.WithTimeout` 100ms）：Redis 網路黑洞時 go-redis 預設 dial timeout 5 秒，一次 login 呼叫 limiter 4 次，fail open 最慢要等約 20 秒
+  - 全域基本限制（每 IP 每秒 N 個 request，nginx `limit_req` 或 middleware）：目前只有個別 endpoint 的嚴格限制。依「被濫用的代價」決定而不是 HTTP method：`GET /rooms/{public_id}/messages?limit=10000` 一樣貴
+  - WS 連線數限制：WS 不用登入就能連，現在只有每條連線 5 frame/秒（`listenConnection`），擋不住「開很多條」
+    - 開 100 條閒置連線就佔滿 `maxClients`，正常使用者連不上；keepalive 之後閒置連線會回 pong，不會被 read deadline 踢掉
+    - 開 100 條、每條每秒送 5 個 → 合計每秒 500 次搶全域鎖回應，廣播變慢
+    - 方向：每 IP 最多 N 條 WS（nginx `limit_conn` 或 upgrade 前在 middleware 擋），多台 server 時要跨 instance 計數（Redis）
+- [ ] Trusted proxy 收尾（client IP 不可偽造的前提）
+  - 本機 server-1/2 直接開 port（5388/5389）可繞過 nginx 偽造 `X-Real-IP`：拿掉 docker-compose 的 `ports:`，只留 nginx 對外（代價：不能再繞過 nginx 直接 curl 單台 server）
+  - Defense in depth：只有 `RemoteAddr` 是 trusted proxy 的 IP / CIDR 時才信任 header，其他來源退回 `RemoteAddr`（概念同 Gin `SetTrustedProxies`）
+- [ ] IPv6 限流 key 改用 /64 前綴（PLAUSIBLE，要看 Railway edge 會不會給 v6）：目前用完整位址，持有一個 /64 就能每次換 IP 繞過 IP 限流，可跟 trusted proxy 收尾一起做
+
+## Backlog
+
+> 知道、刻意先不做（2026-11-03 從 W5 移入）
+
+- [ ] 彈幕往上捲載入更舊的（`GET /rooms/{public_id}/messages?before=<id>`，`WHERE id < $1 ORDER BY id DESC`）：直播彈幕很少往回翻；前端要處理往上插入時固定捲動位置。若之後做回放（彈幕綁影片時間軸），翻頁依據會變成時間點而不是 id，到時再設計
+- [ ] Login CAPTCHA（reCAPTCHA / Turnstile 等，接外部服務前先討論選型）
+  - 補限流擋不到的兩個洞：攻擊者分散到大量 IP（每個 IP 都低於上限、credential stuffing 每個帳號只試一次）；per-username 限流可被拿來故意鎖別人的帳號（DoS）
+  - 失敗超過門檻時改成要求驗證，而不是直接 429：真人解完照樣登入，bot 每次嘗試都要付成本
+- [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
+- [ ] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
+- [ ] 密碼外洩檢查：register 時查 HIBP Pwned Passwords API（取代 / 補強 W4-3 embed 的常見密碼清單）
+  - k-anonymity：只送 SHA-1 前 5 碼，比對在本機做，原密碼與完整 hash 都不離開 server
+  - 要決定外部服務慢 / 掛掉時 fail open（放行）還是 fail closed（擋下），並加 timeout
+  - 順帶評估 NFKC 正規化（`golang.org/x/text/unicode/norm`，新套件），避免同字不同編碼登不進去
+- [ ] API versioning
+- [ ] 評估引入 OpenTelemetry（W4 結束後決定）
+  - metrics 改走 vendor-neutral API，backend 可替換
+  - 評估 tracing 的 trace ID 是否取代 W4a 的 request ID
