@@ -28,7 +28,7 @@ const (
 // 每連線的鎖留到 W6（見 ROADMAP），到時的鎖順序是 全域 → 每連線
 //
 // 鎖規則：絕不在持有 mu 時做 I/O 或呼叫外面的程式碼 —— Redis、DB、寫 conn 都不行
-// 能做的只有改 map / 欄位、Client.Enqueue（非阻塞）、Client.Close（踢人，只關 conn）
+// 能做的只有改 map / 欄位、Client.Enqueue（非阻塞）、Client.Close（踢人：close(done) + 關 conn，不阻塞、可重複呼叫）
 // 這也是為什麼 Hub 的方法收的是已經編碼好的 []byte，而不是 callback / func：
 // 在鎖裡面呼叫外面的 method，一來 sync.Mutex 不可重入（外面的程式碼又回頭呼叫 Hub 就死鎖），
 // 二來可能在鎖裡做 I/O，三來外面的程式碼可以在鎖裡破壞 Hub 的不變量
@@ -252,7 +252,7 @@ func (h *Hub) sendLocked(ctx context.Context, c *Client, st *clientState, frame 
 }
 
 // 把一則已編碼的 frame 交給這條連線的 WriteLoop（呼叫時要持有 h.mu）
-// 絕不等：滿了 = 慢 client → Close 踢掉（只叫醒讀取迴圈，清理交給它）
+// 絕不等：滿了 = 慢 client → Close 踢掉（關連線、叫醒讀取迴圈，清理交給它）
 // 廣播和讀取迴圈（join_ok、pong、error）都走這裡，規則只有一條
 // 被踢之後、讀取迴圈 Unregister 之前，新的訊息還是會排不進去 → 再記一行 log、再 Close 一次（重複 Close 無害）
 func (h *Hub) enqueueLocked(ctx context.Context, c *Client, room string, msg []byte) {

@@ -87,7 +87,7 @@ func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterf
 // 一條連線的生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
 //
 //	各種原因 → ReadMessage 失敗 → ReadLoop return → hub.Unregister + LeaveRoom → HandleWebsocket return
-//	                                                                          └ defer client.Shutdown() → close(done)（PingLoop、WriteLoop 結束）+ conn.Close()
+//	                                                                          └ defer client.Close() → close(done)（PingLoop、WriteLoop 結束）+ conn.Close()（已經被 Close 過就什麼都不做）
 //
 // 其他人發現連線壞了只 Close() 叫醒讀取迴圈，不自己 Unregister / LeaveRoom：
 //   - PingLoop：送 ping 失敗
@@ -120,14 +120,14 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 		return
 	}
 	client := ws.NewClient(conn, this.pingPeriod, this.pongWait)
-	// 取代原本的 defer conn.Close() 和 defer close(done)：close(done) 再 conn.Close()
-	// 早退（連線數滿）時 done 沒人在聽，無所謂
-	defer client.Shutdown()
+	// 不管從哪裡 return 都要關：close(done) 讓 PingLoop、WriteLoop 結束，再關 conn
+	// 已經被別人 Close 過（被踢、寫入失敗）也沒關係，Close 可以重複呼叫；早退（連線數滿）時 done 沒人在聽，無所謂
+	defer client.Close()
 
 	if !this.hub.Register(r.Context(), client) {
 		return
 	}
-	// 兩個goroutine共用 client 內的 `done`，Shutdown 可以一次叫醒兩個goroutine
+	// 兩個goroutine共用 client 內的 `done`，Close 可以一次叫醒兩個goroutine
 	// 類似在kotlin裡面呼叫 `job.cancel()`的感覺
 	go client.PingLoop(r.Context())
 	go client.WriteLoop(r.Context())

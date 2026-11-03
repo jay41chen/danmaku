@@ -1,10 +1,11 @@
-// Package ws 是 WebSocket 的傳輸層：只管 conn、outbox、keepalive，只處理 []byte，
-// 不認識 JSON protocol（envelope），也不知道任何 registry / Hub
+// Package ws 是 WebSocket 的傳輸層（Client）和連線註冊表（Hub）：只處理 []byte，不認識 JSON protocol（envelope）
+// Client 只管 conn、outbox、keepalive，不知道 Hub 的存在；Hub 管連線在哪間房、身分與到期
 package ws
 
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,12 +27,14 @@ type Client struct {
 	// outbox：要寫給這條連線的 frame（已經編碼好的 bytes），只有 WriteLoop 會讀出來寫進 conn
 	// 不 close：往裡面送的有好幾個人（廣播、讀取迴圈），close 了別人再送會 panic；WriteLoop 靠 done 結束
 	send chan []byte
-	// 由 Shutdown close 一次，同時叫醒 WriteLoop 和 PingLoop
+	// 由 Close close（closeOnce 保證只一次），同時叫醒 WriteLoop 和 PingLoop
 	// 類似在kotlin裡面呼叫 `job.cancel()`的感覺
 	done       chan struct{}
 	pingPeriod time.Duration
 	pongWait   time.Duration
 	logger     *slog.Logger
+	// 讓 Close 重複呼叫也只 close(done) 一次（第二次 close 會 panic）；每個 Client 一份，跟著它保護的 done 走
+	closeOnce sync.Once
 }
 
 // 不碰 conn（只是存起來）：keepalive 的設定在 ReadLoop 開頭做
@@ -55,8 +58,8 @@ func (c *Client) ReadLoop(ctx context.Context, onMessage func(msg []byte)) {
 	c.conn.SetReadLimit(maxMessageBytes)
 	// 加上pingpong的keepalive mechanism
 	if err := c.addPongReadDeadline(); err != nil {
-		// 不 return：addPongReadDeadline 失敗時已經 Close，讓下面的 ReadMessage 失敗後 return，呼叫端才會去 removeClient
-		// 在這裡 return 一樣會讓呼叫端走清理，但維持跟原本一樣的流程
+		// 不 return：addPongReadDeadline 失敗時已經 Close，下面的 ReadMessage 會失敗後 return，呼叫端接著 Unregister
+		// 在這裡 return 一樣會讓呼叫端走清理，只是讓 ReadLoop 維持只有一個 return 出口
 		c.logger.WarnContext(ctx, "set read deadline failed", "error", err)
 	}
 
@@ -85,7 +88,7 @@ func (c *Client) addPongReadDeadline() error {
 	t := time.Now().Add(c.pongWait)
 	err := c.conn.SetReadDeadline(t)
 	if err != nil {
-		c.conn.Close()
+		c.Close()
 		return err
 	}
 	return nil
@@ -97,23 +100,26 @@ func (c *Client) PingLoop(ctx context.Context) {
 	for {
 		select {
 		case <-c.done:
-			// 直接結束goroutine，
-			// 因為done是在Shutdown中被close的
-			// 也就是說會進到這狀況，大家都知道connection已經死了
-			// 所以不需要再次handle
+			// done 被 close = 有人呼叫了 Close（連線已經或正在關掉），直接結束，不需要再處理
 			return
 		case <-ticker.C:
 			// 送ping
 			deadline := time.Now().Add(writeWait)
 			if err := c.conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
-				// 送ping的時候遇到錯誤，代表該connection遇到問題
-				// 也可能是等 gorilla 內部寫入鎖逾時（WriteLoop 正卡在寫這條慢 client，最多 writeWait）：一律視為連線不健康、關掉
-				c.logger.WarnContext(ctx, "write ping failed", "error", err)
-				// 特別注意，因為PingLoop跟ReadLoop在不同go routine
-				// 所以這邊要特別指定close，不然ReadLoop要等到timeout
-				// 才會繼續走
-				c.Close()
-				return
+				// 送失敗先看 done（跟 WriteLoop 同一個模式）
+				select {
+				case <-c.done:
+					// 別人先 Close 了（done 和 ticker 同時就緒時 select 隨機選，可能選到 ticker）
+					// 失敗是預期中的，不log
+					return
+				default:
+					// 真的出錯：連線有問題，或等 gorilla 內部寫入鎖逾時（WriteLoop 正卡在寫這條慢 client，最多 writeWait）
+					// 一律視為不健康、關掉
+					// PingLoop 跟 ReadLoop 在不同 goroutine，要主動 Close，不然 ReadLoop 要等到 pongWait 逾時才醒
+					c.logger.WarnContext(ctx, "write ping failed", "error", err)
+					c.Close()
+					return
+				}
 			}
 		}
 
@@ -121,12 +127,10 @@ func (c *Client) PingLoop(ctx context.Context) {
 }
 
 // 每條連線一個：唯一會把資料 frame 寫進 conn 的 goroutine
-// 結束條件：done 被 close（讀取迴圈結束、Shutdown 被呼叫），或寫入失敗
-// 失敗時只 Close 叫醒讀取迴圈，不自己 removeClient（清理 owner 是讀取迴圈）
-//
-// 已知、無害的多餘 warn log（"write frame failed"）：
-//   - 被踢時：WriteLoop 正卡在寫入，conn 一被 Close 這次寫入就失敗 → 跟 "outbox full" 各一行
-//   - 正常斷線時：done 被 close 的同時 send 裡還有東西，select 是隨機選 → 可能選到 send、寫已關閉的 conn
+// 結束條件：done 被 close（有人呼叫 Close），或寫入失敗
+// 失敗時只 Close 叫醒讀取迴圈，不自己 Unregister（清理 owner 是讀取迴圈）
+// 寫入失敗時先看 done：已經 close = 別人先關的（被踢、正常斷線），失敗是預期中的 → 不 log
+// 這要靠 Close 先 close(done) 再關 conn：conn 一關寫入就失敗，那時 done 必須已經 close
 func (c *Client) WriteLoop(ctx context.Context) {
 	for {
 		select {
@@ -137,9 +141,17 @@ func (c *Client) WriteLoop(ctx context.Context) {
 			// 收到send過來的訊息，寫入msg
 			err := c.writeRaw(msg)
 			if err != nil {
-				c.logger.WarnContext(ctx, "write frame failed", "error", err)
-				c.Close()
-				return
+				// 沒辦法預測writeRaw會花多少時間，所以還是要判斷client的狀況
+				select {
+				case <-c.done:
+					// 能馬上讀到 = done 已經 close
+					return
+				default:
+					// 讀不到 = done 還沒 close
+					c.logger.WarnContext(ctx, "write frame failed", "error", err)
+					c.Close()
+					return
+				}
 			}
 		}
 	}
@@ -159,6 +171,7 @@ func (c *Client) writeRaw(msg []byte) error {
 // true = 已排進去；false = outbox 滿了（慢 client），由呼叫端記 log 並呼叫 Close 踢掉
 // 這裡不 log、不 close
 func (c *Client) Enqueue(msg []byte) bool {
+	// Enqueue：「send 能不能馬上塞進去？能就塞，不能就走 default」
 	select {
 	case c.send <- msg:
 		return true
@@ -167,14 +180,15 @@ func (c *Client) Enqueue(msg []byte) bool {
 	}
 }
 
-// 只關底層 conn（重複呼叫無害）：用來踢人或叫醒讀取迴圈
-// 不能 close done：這時讀取迴圈還在跑，之後的 Shutdown 會 double close 而 panic
+// 關掉這條連線：重複呼叫、多個 goroutine 同時呼叫都安全（closeOnce）
+// 踢人、叫醒讀取迴圈、HandleWebsocket 的 defer 都用這個
+// 順序：先 close(done)（叫醒 PingLoop、閒置的 WriteLoop），再關 conn（叫醒卡在讀寫的 ReadLoop / WriteLoop）
+// 不能反過來：WriteLoop 寫入失敗時靠 done 判斷是不是別人關的，conn 先關的話它會看到 done 還開著 → 多印一行 warn
 func (c *Client) Close() {
-	c.conn.Close()
-}
-
-// 讀取迴圈 return 之後由 HandleWebsocket 用 defer 呼叫，只能呼叫一次：close(done)（讓 PingLoop、WriteLoop 結束）再 conn.Close()
-func (c *Client) Shutdown() {
-	close(c.done)
-	c.conn.Close()
+	c.closeOnce.Do(func() {
+		// 關閉c.done，會停止[WriteLoop]跟[PingLoop]
+		close(c.done)
+		// 關閉websocket連線
+		c.conn.Close()
+	})
 }

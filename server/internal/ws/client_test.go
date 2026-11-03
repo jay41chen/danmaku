@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -42,7 +43,7 @@ func newHubServer(t *testing.T, room string) *hubServer {
 		}
 		ctx := context.Background()
 		c := NewClient(conn, time.Hour, time.Hour)
-		defer c.Shutdown()
+		defer c.Close()
 		if !s.hub.Register(ctx, c) {
 			return
 		}
@@ -108,8 +109,7 @@ func (s *hubServer) waitClosed(t *testing.T, wait time.Duration) closedConn {
 // 「LeaveRoom == [a]」的部分由 handler 的 TestWebsocketDisconnectLeavesRoom 涵蓋；這裡只驗 Unregister 回傳 "a"（欠的 LeaveRoom）
 func TestWriteFailureClosesConnection(t *testing.T) {
 	s := newHubServer(t, "a")
-	conn1, failing := s.dial(t)
-	_ = conn1
+	_, failing := s.dial(t)
 	conn2, healthy := s.dial(t)
 
 	tcp, ok := failing.conn.NetConn().(*net.TCPConn)
@@ -139,6 +139,40 @@ func TestWriteFailureClosesConnection(t *testing.T) {
 	}
 	if got := s.hub.Room(healthy); got != "a" {
 		t.Errorf("healthy room = %q, want still registered in a", got)
+	}
+}
+
+// Close 可以重複呼叫：done 只關一次、底層 conn 照樣被關，第二次不 panic
+// 一定要在 test goroutine 呼叫：在 handler goroutine 裡 panic 會被 net/http recover 吞掉，測不出來
+func TestCloseIsIdempotent(t *testing.T) {
+	s := newHubServer(t, "a")
+	conn, c := s.dial(t)
+
+	// 沒有 Once 的話第二次會在 test goroutine panic，test 直接 fail，不會被 net/http recover 吞掉
+	c.Close()
+	c.Close()
+
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("done is not closed after Close")
+	}
+
+	// client 端要看到連線被關：讀到錯誤；如果是 timeout 代表 server 根本沒關
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatal("client read succeeded, want connection closed")
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatal("connection was not closed")
+	}
+
+	// server 端讀取迴圈醒來、清理完成；之後 handler 的 defer c.Close() 會是第三次 Close，同樣不能 panic
+	cc := s.waitClosed(t, 2*time.Second)
+	if cc.client != c || cc.room != "a" {
+		t.Errorf("cleaned up client is c = %v, room = %q, want c and room a", cc.client == c, cc.room)
 	}
 }
 
