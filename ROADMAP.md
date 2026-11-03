@@ -121,7 +121,11 @@
       - [x] 排隊等鎖時 ctx 已過期 → 寫入 timeout → 整條 PubSub 重連 → worker 送指令當下才建 ctx（`redisCommandTimeout` 500ms），排隊時間不吃 timeout
       - [x] 確認遺失後這間房永遠 `ws_join_unavailable` → SUB 送出 500ms（`confirmResendDelay`）沒確認就改 `subRetry`、worker 重送（SUBSCRIBE 冪等）；SUB 寫入失敗 backoff 重試（100ms 起、翻倍、上限 5s）
       - SUB 失敗 / 確認逾時用 `subRetry`，不退回 `subIdle`：go-redis 寫入失敗也會記住 channel、重連時自己重訂 → 「可能有訂」，沒人要時必須 UNSUB，不能直接刪 entry
-    - [ ] 慢 client 卡住廣播（最多 `writeWait` 10s）→ 確認和廣播共用同一個 consumer goroutine，這段時間「第一個進房」的 join 會 timeout（B3）。reconciliation loop 之後不會永久卡住（確認逾時會重送），但 join 仍會失敗一輪
+    - [x] 慢 client 卡住廣播（B3，2026-11-03，見 go-notes 3.33）：原本 consumer goroutine 在全域鎖底下同步寫每個 client（最多 `writeWait` 10s）→ 其他房間的廣播、SUB 確認、所有回覆一起卡，「第一個進房」的 join timeout
+      - 做法：每條連線一個 `writeLoop`（唯一寫 conn 的 goroutine）+ outbox `send chan []byte`（`wsSendBuffer` 256）。廣播和回覆都只在鎖底下非阻塞排進 outbox（`enqueueLocked`），滿了就 `Close` 踢掉、讓 client 重連補撈；全域鎖底下不再寫 conn
+      - 清理 owner 仍是讀取迴圈：writeLoop 寫失敗 / outbox 滿 / ping 失敗都只 Close；outbox 不 close（多個 sender），writeLoop 跟 pingLoop 共用 `done` 結束
+      - test：`TestWebsocketSlowClientKickedWithoutBlockingBroadcast`、`TestWebsocketWriteFailureClosesConnection`；mutation 6 個全抓到
+      - Known（無害）：被踢 / 正常斷線時可能多一行 `write frame failed` warn（見 `writeLoop` 註解）；突發超過 256 則的爆量，正常 client 也會被踢（設計如此，靠重連補撈）
     - Known limitation（接受）：只有一個 worker，一個 SUB / UNSUB 卡住（最多 `redisCommandTimeout`）時其他房間的指令排在後面（head-of-line blocking）。已有觀眾的房間不受影響，只影響「第一個進房」；go-redis 一條 PubSub 本來就一次處理一個指令，多 worker 換不到平行度
     - [ ] 前端 `ws_room_not_found` 只有 `console.warn`，畫面沒顯示（上面「join 失敗後前端要能顯示」沒做到）
     - Known issue（低優先）：join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout；`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
@@ -195,7 +199,8 @@
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
   - 順便拆 `ws.go`（W4b 已先把長函式拆小，檔案沒拆）：照 Hub 之後的邊界拆（例如 `hub.go` 管連線 / 廣播、`client.go` 管單條連線讀寫），不要先照 auth / room 拆一次再重拆；純搬家和改 code 分兩個 commit，diff 才 review 得了
-  - 每條連線改成自己的寫入 goroutine 後，WS 連線的身分（user、exp、timer）改用每條連線各自的 mutex：Step 9 先用全站那把鎖，因為寫 frame 本來就要拿全站鎖，拆身分鎖省不到東西；要拆時上鎖順序固定「全站 → 單條連線」
+    - 2026-11-03：決定 B3 之後**先做這個拆分**（提前，不等 W6 其他項；SSE 仍留在 W6）。B3 寫完時觀察到的亂：`WebsocketHandler` 一個 struct 裡擠了四層職責 —— 連線傳輸（`conn` / `send` / `writeLoop` / `writeRaw` / `enqueueLocked`）、協定編碼（`writeEnvelopeLocked` / `reply`）、路由與成員（`clients` / `broadcastToRoomLocked`）、身分（`userID` / `exp` / `timer` / `handleAuth`）；而且函式有的吃 `conn`、有的吃 `*wsClient`，中間靠 `this.clients[conn]` 轉換。方向：gorilla chat 的 Hub / Client，函式一律傳 `*Client`
+  - 每條連線自己的寫入 goroutine 已在 B3 做好；WS 連線的身分（user、exp、timer）之後可改用每條連線各自的 mutex：目前仍用全站那把鎖（B3 之後鎖底下已不做 I/O，拿著的時間很短，拆鎖省不到多少）；要拆時上鎖順序固定「全站 → 單條連線」
 - [ ] 跨 server 的「不同會員數」：Step 9 的 gauge 只有單台 server 的數字，同一個 user 連到 server-1、server-2 加總會算 2。要共用的地方（Redis）合併，server 被 kill -9 時沒機會清 → 靠 TTL + heartbeat（活著的 server 定期續命，死掉的自然過期），不能靠 server 自己起的 timer。待討論：TTL / heartbeat 間隔（server 死掉後數字錯多久 vs Redis 寫入量）、資料結構、誰來加總、要不要改成獨立的 health checker service（它本身也要被監控，Redis TTL 等於免費的 checker）；要「每個直播間」統計的話等 W4b Room
   - 2026-10-29：TTL / 續期間隔 / 資料結構 / 誰來加總已在 W4b presence 定案（見上方 W4b「Room 概念」）。剩下的 known issue：去重要讀出整個房間的 member，成本 ∝ 房間人數，超大房間（5 萬人）時改用 per-user Sorted Set / HyperLogLog / 分片等（比較見 go-notes 3.27）
   - lock 內不做 I/O：每個 client 一個 struct（帶 per-client logger + send channel），由自己的 goroutine 寫入；目前的 write deadline 只是減輕，不是根治
