@@ -171,8 +171,11 @@
   - 本機 server-1/2 直接開 port（5388/5389）可繞過 nginx 偽造 `X-Real-IP`：拿掉 docker-compose 的 `ports:`，只留 nginx 對外（代價：不能再繞過 nginx 直接 curl 單台 server）
   - Defense in depth：只有 `RemoteAddr` 是 trusted proxy 的 IP / CIDR 時才信任 header，其他來源退回 `RemoteAddr`（概念同 Gin `SetTrustedProxies`）
 - [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
-- [ ] Metrics path cardinality：`path` label 直接用 `r.URL.Path`，被亂掃 URL 時每個 path 都會產生新的時間序列；改用 route pattern（如 Go 1.23+ 的 `r.Pattern`，mux 路由後才有值）或把未知路徑歸成 `other`
+- [x] Metrics path cardinality：`path` label 直接用 `r.URL.Path`，被亂掃 URL 時每個 path 都會產生新的時間序列；改用 route pattern（如 Go 1.23+ 的 `r.Pattern`，mux 路由後才有值）或把未知路徑歸成 `other`
   - **優先度提高**（2026-10-30 Judge）：prod 的 server 公開，任何人掃隨機 URL 就能讓時間序列無限增加 → 記憶體持續成長、可能 OOM，不只是監控難看；`/metrics` 本身也公開可讀
+  - ✅ 2026-11-03：`path` = `r.Pattern` 去掉 method（沒比對到 → `unmatched`，404 / 405 / preflight 靠 `status_code` 區分）；Judge 另外抓到 `method` 也是 client 決定的（`FOOBAR123` 一樣能撐爆）→ 白名單：HTTP 標準九個照原樣，其他 `other`。middleware chain 抽成 `serviceHandler`，`main_test` 走同一條 chain 守住「HttpMetrics 和 mux 中間不能複製 request」
+  - Known（info）：stdlib 在 CONNECT + 結尾 `/` 的 route 遇到 redirect 時會把 `r.Pattern` 設成 client 的路徑；目前沒有這種 route，新增 subtree route 時要重看
+  - `/metrics` 本身仍公開可讀（另議）
 - [ ] IPv6 限流 key 改用 /64 前綴（PLAUSIBLE，要看 Railway edge 會不會給 v6）：目前用完整位址，持有一個 /64 就能每次換 IP 繞過 IP 限流，可跟 trusted proxy 收尾一起做
 - [ ] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
 - [ ] Pagination

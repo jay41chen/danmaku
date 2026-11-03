@@ -14,6 +14,7 @@
 - **Infrastructure**: Docker Compose
 - **Observability (local dev)**: Promtail → Loki → Grafana, Prometheus → Grafana
 - **Middleware**: Request ID → Request logging → Metrics → Panic recovery → CORS（`net/http` + 自製 chain）
+- **Metrics labels**：`http_requests_total` / `http_request_duration_seconds` 的 `path` 是 route pattern（如 `/rooms/{public_id}`，沒比對到 route 記成 `unmatched`），`method` 只收 HTTP 標準的九個（其他記成 `other`）；label 值不由 client 決定，避免被亂打 URL 撐爆 time series
 - **Logging**: slog JSON，透過 context 自動帶 `request_id`
 - **Reliability**: Panic recovery middleware, graceful shutdown (SIGTERM/SIGINT)
 - **Schema Migration**: golang-migrate，server 啟動時自動套用，SQL embed 進 binary
