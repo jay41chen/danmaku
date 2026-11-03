@@ -1,8 +1,11 @@
 package httpx
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -41,4 +44,45 @@ func TestClientIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteJSON(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/x", nil)
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+		WriteJSON(rec, r, logger, http.StatusCreated, map[string]int{"id": 1})
+
+		if rec.Code != http.StatusCreated {
+			t.Errorf("status = %d, want 201", rec.Code)
+		}
+		// 用 Result()：header 如果是在 WriteHeader 之後才設，這裡會讀不到
+		if got := rec.Result().Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if want := "{\"id\":1}\n"; rec.Body.String() != want {
+			t.Errorf("body = %q, want %q", rec.Body.String(), want)
+		}
+	})
+
+	t.Run("marshal failure", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/x", nil)
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+		WriteJSON(rec, r, logger, http.StatusOK, make(chan int))
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want 500", rec.Code)
+		}
+		if got := rec.Result().Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+			t.Errorf("Content-Type = %q, want text/plain prefix", got)
+		}
+		if !strings.Contains(buf.String(), `"level":"ERROR"`) || !strings.Contains(buf.String(), `"msg":"marshal json response failed"`) {
+			t.Errorf("log = %s, want ERROR entry 'marshal json response failed'", buf.String())
+		}
+	})
 }

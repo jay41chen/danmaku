@@ -56,8 +56,6 @@ func (this *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http
 // 因為這個 API 每次進房才打一次；兩步之間房間剛好被刪的 race，
 // 只會多回一次剛刪房間的歷史訊息，無害
 func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, roomPublicID string) {
-	httpx.SetContentType(w)
-
 	room, err := this.db.GetRoomByPublicID(r.Context(), roomPublicID)
 	if errors.Is(err, store.ErrRoomNotFound) {
 		// 已刪除的房間也回 404（跟 HandleGetRoom 一樣）
@@ -78,7 +76,7 @@ func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, 
 
 	// DB query出來的是新到舊
 	slices.Reverse(msgs)
-	json.NewEncoder(w).Encode(msgs)
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, msgs)
 }
 
 // 要登入（RequireAuth）；訊息存進 path 指定的房間
@@ -139,10 +137,8 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	// 沒收到即時廣播的人下次載入歷史訊息時還是看得到
 	this.broadcast(r.Context(), roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
 
-	httpx.SetContentType(w)
-	w.WriteHeader(http.StatusCreated)
 	// body 是 msg 本身，不是 envelope：envelope 是 WS 的格式
-	json.NewEncoder(w).Encode(msg)
+	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, msg)
 }
 
 // CreateMessage 維持 request ctx：INSERT 之前 / 之中被取消 → 沒存也沒廣播，結果一致

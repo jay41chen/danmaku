@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -71,9 +70,7 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	httpx.SetContentType(w)
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(room)
+	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, room)
 }
 
 // 公開：知道 public_id 的人都能查
@@ -90,6 +87,5 @@ func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.SetContentType(w)
-	json.NewEncoder(w).Encode(room)
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, room)
 }

@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -32,7 +31,6 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 	// method 由 router 限定（main.go 的 publicGet）；Go 1.22 的 "GET /x" 也會比對 HEAD，
 	// 所以跟原本手寫的 GET + HEAD 行為一樣
 	/// no need check cors since its just a health check api
-	httpx.SetContentType(w)
 
 	/// setting timeout
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -61,12 +59,10 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 		if redisError != nil {
 			errorMsg["redis"] = "error"
 		}
-		w.WriteHeader(http.StatusInternalServerError)
 		this.logger.ErrorContext(r.Context(), "health check failed", "dbError", dbError, "redisError", redisError)
-		json.NewEncoder(w).Encode(errorMsg)
+		httpx.WriteJSON(w, r, this.logger, http.StatusInternalServerError, errorMsg)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, map[string]string{"status": "ok"})
 }

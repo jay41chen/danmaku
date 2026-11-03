@@ -2,14 +2,32 @@ package httpx
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 )
 
 // 跨 package 共用的 HTTP helper（handler、middleware 都會用）
 
-func SetContentType(w http.ResponseWriter) {
+// 所有回 JSON 的 handler 都走這裡
+// logger 由呼叫端傳入（照 checkRate 慣例）：各 handler 的 component 不同，log 才分得出是哪來的
+func WriteJSON(w http.ResponseWriter, r *http.Request, logger *slog.Logger, status int, v any) {
+	// marshal 在 WriteHeader 之前做，失敗時還能改回 500；這是程式寫錯，記 Error
+	data, err := json.Marshal(v)
+	if err != nil {
+		logger.ErrorContext(r.Context(), "marshal json response failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	// header 要在 WriteHeader 之前設，之後設會被忽略
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	// 跟原本 json.Encoder.Encode 的輸出一樣（Encode 會在最後補換行）
+	data = append(data, '\n')
+	if _, err := w.Write(data); err != nil {
+		// 通常是 client 已經斷線；status 已經送出，只能記 log
+		logger.WarnContext(r.Context(), "write json response failed", "error", err)
+	}
 }
 
 // 限制 body 大小（1 MB）再 decode JSON 到 dst；dst 要傳 pointer

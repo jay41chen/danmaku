@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -148,10 +147,7 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// header 要在 WriteHeader 之前設，之後設會被忽略
-	httpx.SetContentType(w)
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(userResponse{ID: id, Username: req.Username})
+	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, userResponse{ID: id, Username: req.Username})
 }
 
 func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
@@ -210,11 +206,27 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
-	tokens, err := this.issueTokens(r, user.ID)
+	tokens, err := this.completeLogin(r, user.ID, username, ip)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, loginResponse{
+		tokenResponse: tokens,
+		User:          userResponse{ID: user.ID, Username: user.Username},
+	})
+}
+
+// 密碼比對成功之後呼叫：簽 token + 調整限流計數
+// username 是轉小寫的那個（限流 key 用的），不是 req.Username
+// 失敗時已經記了 log，呼叫端只要回 500
+func (this *AuthHandler) completeLogin(r *http.Request, userID int64, username, ip string) (tokenResponse, error) {
+	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
+	tokens, err := this.issueTokens(r, userID)
+	if err != nil {
+		return tokenResponse{}, err
 	}
 
 	// 成功登入，reset 這個帳號的計數（使用者自己打錯幾次不該被鎖）
@@ -229,14 +241,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		this.logger.WarnContext(r.Context(), "rate limit refund failed",
 			"rule", loginIPRule.name, "error", err)
 	}
-
-	httpx.SetContentType(w)
-	w.WriteHeader(http.StatusOK)
-	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
-	json.NewEncoder(w).Encode(loginResponse{
-		tokenResponse: tokens,
-		User:          userResponse{ID: user.ID, Username: user.Username},
-	})
+	return tokens, nil
 }
 
 // login 用：簽 access token + 存一個新的 refresh token
@@ -281,6 +286,23 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	newPlain, newHash := auth.NewRefreshToken()
 	userID, err := this.db.RotateRefreshToken(r.Context(),
 		auth.HashRefreshToken(req.RefreshToken), newHash, refreshTokenTTL, refreshTokenGrace)
+	if err != nil {
+		this.writeRotateError(w, r, err, ip)
+		return
+	}
+
+	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
+	tokens, err := this.withAccessToken(r, userID, newPlain)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, tokens)
+}
+
+// 只在 RotateRefreshToken 回 err 時呼叫
+func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request, err error, ip string) {
 	// invalid 和 duplicate use 對 client 都是 401（重新登入），不讓對方知道「這個 token 曾經有效」
 	// RefreshTokenRevokedError 一定要在 errors.Is(Invalid) 之前判斷：它的 Is 也會對 Invalid 回 true，
 	// 順序反過來的話會被 Is 先接走，log 就不會記
@@ -305,22 +327,8 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
 		return
 	}
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "rotate refresh token failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
-	tokens, err := this.withAccessToken(r, userID, newPlain)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	httpx.SetContentType(w)
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(tokens)
+	this.logger.ErrorContext(r.Context(), "rotate refresh token failed", "error", err)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 // 只作廢這一個 refresh token（這台裝置登出）
@@ -369,7 +377,5 @@ func (this *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.SetContentType(w)
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(userResponse{ID: user.ID, Username: user.Username})
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, userResponse{ID: user.ID, Username: user.Username})
 }
