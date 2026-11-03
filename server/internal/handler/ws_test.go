@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -22,7 +21,6 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/store"
-	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
 // 讀出 gauge 目前的值（/metrics 輸出背後就是這個 dto.Metric 結構）
@@ -33,20 +31,6 @@ func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
 		t.Fatalf("read gauge: %v", err)
 	}
 	return m.GetGauge().GetValue()
-}
-
-func TestRemoveClientTwice(t *testing.T) {
-	handler := NewWebsocketHandler(nil, nil, nil)
-	conn := &websocket.Conn{}
-	before := gaugeValue(t, prom.WebsocketConnections)
-	handler.addClientLocked(conn, ws.NewClient(conn, wsPingPeriod, wsPongWait))
-	handler.removeClientLocked(conn)
-	handler.removeClientLocked(conn)
-
-	after := gaugeValue(t, prom.WebsocketConnections)
-	if before != after {
-		t.Errorf("before gauge %v, after gauge %v", before, after)
-	}
 }
 
 // WS 寫入一律被拒絕：回 error envelope 給這條連線，連線保持開著，不 Publish
@@ -275,21 +259,17 @@ func TestWebsocketAuthMalformedPayload(t *testing.T) {
 }
 
 func TestWebsocketAuthMemberThenBadTokenBecomesAnonymous(t *testing.T) {
-	h, url := newAuthTestServer(t)
+	_, url := newAuthTestServer(t)
 	conn := dialWS(t, url)
 	sendAuth(t, conn, "user7")
 	expectAuthOK(t, conn, 7, "jay")
+	waitGauge(t, memberGauge(), 1)
 
 	sendAuth(t, conn, "bad")
 
 	expectErrorCode(t, conn, 2*time.Second, wsCodeAuthFailed)
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	for _, c := range h.clients {
-		if c.userID != 0 {
-			t.Errorf("userID = %d, want 0 (anonymous)", c.userID)
-		}
-	}
+	// 變回匿名 = 不再算 member（改用 gauge 觀察，不看 Hub 內部狀態）
+	waitGauge(t, memberGauge(), 0)
 }
 
 func TestWebsocketAuthSwitchUser(t *testing.T) {
@@ -385,97 +365,7 @@ func TestWebsocketAuthRenewalBeforeExpiry(t *testing.T) {
 	}
 }
 
-// 競態：expiry timer 已觸發、callback 卡在等 h.mutex 時，連線因壞掉的 auth frame 被降級成匿名（收到 ws_auth_failed）
-// callback 拿到鎖後必須靠第三個 guard（c.userID == 0）直接 return，不能再送 ws_auth_expired
-func TestWebsocketExpiryTimerAfterDowngradeToAnonymous(t *testing.T) {
-	h, url := newAuthTestServer(t)
-	conn := dialWS(t, url)
-	sendAuth(t, conn, "user7@100ms")
-	expectAuthOK(t, conn, 7, "jay")
-
-	// 在 exp 之前搶下全站鎖，讓 timer callback 觸發後卡在 Lock()
-	h.mutex.Lock()
-	time.Sleep(250 * time.Millisecond) // 超過 exp，並確保 callback 已經在等鎖
-
-	// 持鎖期間模擬壞 auth frame 造成的降級（不能走網路：handleAuth 也要拿鎖）
-	var c *wsClient
-	for _, cl := range h.clients {
-		c = cl
-	}
-	if c == nil || c.userID != 7 {
-		h.mutex.Unlock()
-		t.Fatalf("client = %+v, want one member client with userID 7", c)
-	}
-	h.downgradeLocked(context.Background(), c, wsReasonAuthFailed)
-	h.mutex.Unlock()
-
-	// callback 拿到鎖後不該再送 ws_auth_expired
-	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-	for {
-		var f wsFrame
-		if err := conn.ReadJSON(&f); err != nil {
-			break // timeout = 沒收到任何 frame，通過
-		}
-		var e wsError
-		if f.Type == wsTypeError && json.Unmarshal(f.Payload, &e) == nil && e.Code == wsCodeAuthExpired {
-			t.Fatalf("got %s after downgrade to anonymous, want none", wsCodeAuthExpired)
-		}
-	}
-
-	waitGauge(t, memberGauge(), 0)
-	waitGauge(t, prom.WebsocketViewers.WithLabelValues("anonymous"), 1)
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	if len(h.members) != 0 {
-		t.Errorf("members = %v, want empty", h.members)
-	}
-}
-
-// 競態：expiry timer 已觸發、callback 卡在等 h.mutex 時，續期剛好成功（c.exp 被推到未來）
-// callback 拿到鎖後必須靠第二個 guard（time.Now().Before(c.exp)）重查 exp 後直接 return，不能把剛續期的會員降級
-func TestWebsocketExpiryTimerAfterRenewal(t *testing.T) {
-	h, url := newAuthTestServer(t)
-	conn := dialWS(t, url)
-	sendAuth(t, conn, "user7@100ms")
-	expectAuthOK(t, conn, 7, "jay")
-
-	// 在 exp 之前搶下全站鎖，讓 timer callback 觸發後卡在 Lock()
-	h.mutex.Lock()
-	time.Sleep(250 * time.Millisecond) // 超過 exp，並確保 callback 已經在等鎖
-
-	var c *wsClient
-	for _, cl := range h.clients {
-		c = cl
-	}
-	if c == nil || c.userID != 7 {
-		h.mutex.Unlock()
-		t.Fatalf("client = %+v, want one member client with userID 7", c)
-	}
-	// 持鎖期間模擬續期成功：exp 推到未來（不能走網路：handleAuth 也要拿鎖；舊 timer 的 Stop 已來不及）
-	c.exp = time.Now().Add(10 * time.Second)
-	h.mutex.Unlock()
-
-	// callback 拿到鎖後不該降級，也就不會送 ws_auth_expired
-	conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
-	for {
-		var f wsFrame
-		if err := conn.ReadJSON(&f); err != nil {
-			break // timeout = 沒收到任何 frame，通過
-		}
-		var e wsError
-		if f.Type == wsTypeError && json.Unmarshal(f.Payload, &e) == nil && e.Code == wsCodeAuthExpired {
-			t.Fatalf("got %s after renewal, want none", wsCodeAuthExpired)
-		}
-	}
-
-	// 仍是會員
-	waitGauge(t, memberGauge(), 1)
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	if h.members[7] != 1 || c.userID != 7 {
-		t.Errorf("members = %v, userID = %d, want member 7 kept", h.members, c.userID)
-	}
-}
+// 兩個 expiry timer 競態 test（降級 / 續期）已移到 internal/ws/hub_test.go：它們要在持鎖期間改 Hub 內部狀態
 
 // 需要 TODO(user) 完成才會過（refcount）
 func TestWebsocketMemberRefcount(t *testing.T) {
@@ -511,26 +401,21 @@ func newKeepaliveTestServer(t *testing.T, pingPeriod, pongWait time.Duration) (*
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
-func clientCount(h *WebsocketHandler) int {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	return len(h.clients)
-}
-
-// 輪詢等 clients 數量變成預期值：連線的建立 / 移除在 server 端的 goroutine 做
-func waitForClientCount(t *testing.T, h *WebsocketHandler, want int, timeout time.Duration) {
+// 等「連線總數 gauge」穩定後回傳目前值，當作 test 的基準
+// gauge 是全域的，前一個 test 的連線可能還在 server 端 goroutine 清理中，所以要等連續兩次讀到一樣的值
+func baselineConnections(t *testing.T) float64 {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		got := clientCount(h)
-		if got == want {
-			return
+	prev := gaugeValue(t, prom.WebsocketConnections)
+	for range 100 {
+		time.Sleep(30 * time.Millisecond)
+		cur := gaugeValue(t, prom.WebsocketConnections)
+		if cur == prev {
+			return cur
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("clients = %d, want %d (waited %v)", got, want, timeout)
-		}
-		time.Sleep(10 * time.Millisecond)
+		prev = cur
 	}
+	t.Fatal("connections gauge never settled")
+	return 0
 }
 
 // 背景一直讀：gorilla 的 ping / pong handler 只有在 ReadMessage 時才會被呼叫
@@ -568,32 +453,35 @@ func TestWebsocketServerSendsPing(t *testing.T) {
 
 func TestWebsocketDeadClientRemoved(t *testing.T) {
 	// ping 設 1h：不會有 protocol ping，只有初始 read deadline 能踢掉它
-	h, url := newKeepaliveTestServer(t, time.Hour, 150*time.Millisecond)
+	_, url := newKeepaliveTestServer(t, time.Hour, 150*time.Millisecond)
+	base := baselineConnections(t)
 	dialWS(t, url) // 連上之後什麼都不做（不讀、不寫）
 
-	waitForClientCount(t, h, 1, time.Second)
-	waitForClientCount(t, h, 0, time.Second)
+	waitGauge(t, prom.WebsocketConnections, base+1)
+	waitGauge(t, prom.WebsocketConnections, base)
 }
 
 func TestWebsocketPongExtendsDeadline(t *testing.T) {
-	h, url := newKeepaliveTestServer(t, 50*time.Millisecond, 150*time.Millisecond)
+	_, url := newKeepaliveTestServer(t, 50*time.Millisecond, 150*time.Millisecond)
+	base := baselineConnections(t)
 	conn := dialWS(t, url)
 	drainInBackground(conn) // 預設 ping handler 會自動回 pong
 
-	waitForClientCount(t, h, 1, time.Second)
+	waitGauge(t, prom.WebsocketConnections, base+1)
 	time.Sleep(500 * time.Millisecond) // > 3 倍 pongWait：沒有 pong 延長 deadline 早就被踢了
-	if got := clientCount(h); got != 1 {
-		t.Fatalf("clients = %d, want 1 (pong should extend the read deadline)", got)
+	if got := gaugeValue(t, prom.WebsocketConnections); got != base+1 {
+		t.Fatalf("connections = %v, want %v (pong should extend the read deadline)", got, base+1)
 	}
 }
 
 func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 	// ping 設 1h → 沒有 protocol pong，能活著只可能是「收到訊息就延長 deadline」
-	h, url := newKeepaliveTestServer(t, time.Hour, 150*time.Millisecond)
+	_, url := newKeepaliveTestServer(t, time.Hour, 150*time.Millisecond)
+	base := baselineConnections(t)
 	conn := dialWS(t, url)
 	drainInBackground(conn) // 讀掉 server 回的 pong envelope
 
-	waitForClientCount(t, h, 1, time.Second)
+	waitGauge(t, prom.WebsocketConnections, base+1)
 	// 50ms 一則 = 20 則/秒，超過每條連線 5 則/秒的限流；
 	// 但 ReadLoop 是在限流判斷之前就延長 deadline，被丟掉的 frame 一樣算「活著」
 	for range 10 {
@@ -602,8 +490,8 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if got := clientCount(h); got != 1 {
-		t.Fatalf("clients = %d, want 1 (incoming messages should extend the read deadline)", got)
+	if got := gaugeValue(t, prom.WebsocketConnections); got != base+1 {
+		t.Fatalf("connections = %v, want %v (incoming messages should extend the read deadline)", got, base+1)
 	}
 }
 
@@ -773,15 +661,16 @@ func TestWebsocketDisconnectLeavesRoom(t *testing.T) {
 	}
 }
 
-// JoinRoom 成功、但 client 在 applyJoin 拿鎖之前就被移除：讀取迴圈結束時仍要 LeaveRoom，Join / Leave 才會成對
-// B3 之後只有讀取迴圈自己會 removeClient，這個情況正常流程不會發生；保留來守住 applyJoin 的防禦分支
-func TestWebsocketJoinThenRemovedBeforeApplyLeavesRoom(t *testing.T) {
+// 使用者按下 join 之後馬上關分頁：讀取迴圈還卡在 handleJoin 的 JoinRoom（Redis I/O）裡，
+// JoinRoom 一回來 hub.Join 成功（連線還註冊著），接著 ReadLoop 讀到錯誤，hub.Unregister 回傳 "abc"，
+// 清理 LeaveRoom 恰好一次 —— Join / Leave 才會成對（不能漏，也不能重複）
+func TestWebsocketDisconnectDuringJoinLeavesRoomOnce(t *testing.T) {
 	redis := &fakeRedis{joinEntered: make(chan struct{}, 1), joinBlock: make(chan struct{})}
 	// 用 Once 包住 close：test 中途失敗時 cleanup 也會放行卡住的 JoinRoom，正常流程再 close 一次不會 panic
 	var releaseOnce sync.Once
 	releaseJoin := func() { releaseOnce.Do(func() { close(redis.joinBlock) }) }
 	t.Cleanup(releaseJoin)
-	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
 	conn := dialWS(t, url)
 
 	sendJoin(t, conn, "abc")
@@ -791,25 +680,17 @@ func TestWebsocketJoinThenRemovedBeforeApplyLeavesRoom(t *testing.T) {
 		t.Fatal("JoinRoom was not entered")
 	}
 
-	// JoinRoom 還卡著：直接把唯一的 server 端連線 Close + 移除（模擬「被別人移除」）
-	h.mutex.Lock()
-	if len(h.clients) != 1 {
-		h.mutex.Unlock()
-		t.Fatalf("clients = %d, want 1", len(h.clients))
-	}
-	for serverConn := range h.clients {
-		serverConn.Close()
-		h.removeClientLocked(serverConn)
-	}
-	h.mutex.Unlock()
+	// JoinRoom 還卡著：client 先斷線，再放行 JoinRoom
+	conn.Close()
 	releaseJoin()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "abc" {
+		t.Fatalf("LeaveRoom calls = %v, want [abc]", got)
 	}
+	// 再等一下，確認不會有第二次 LeaveRoom（恰好一次）
+	time.Sleep(200 * time.Millisecond)
 	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
-		t.Errorf("LeaveRoom calls = %v, want [abc]", got)
+		t.Errorf("LeaveRoom calls = %v, want exactly [abc]", got)
 	}
 }
 
@@ -885,17 +766,10 @@ func TestFrameRateLimiterWindowBoundaries(t *testing.T) {
 	}
 }
 
-// ---- 寫失敗 / 慢 client（B3：每條連線自己的 outbox + WriteLoop）----
-
-// 找出 client 端 conn 對應的 server 端連線（呼叫時要持有 h.mutex）：server 端的 RemoteAddr 就是 client 端的 LocalAddr
-func serverConnForLocked(h *WebsocketHandler, client *websocket.Conn) *websocket.Conn {
-	for serverConn := range h.clients {
-		if serverConn.RemoteAddr().String() == client.LocalAddr().String() {
-			return serverConn
-		}
-	}
-	return nil
-}
+// 寫失敗 / 慢 client（B3）的 test 已移到 internal/ws（TestWriteFailureClosesConnection、
+// TestSlowClientKickedWithoutBlockingBroadcast），改用真的 websocket 連線直接測 Hub + Client
+// 它們原本順便驗的「被關掉的連線 LeaveRoom == [a]」由 TestWebsocketDisconnectLeavesRoom 涵蓋
+// （任何原因的 Close 都是同一條路：ReadLoop return → hub.Unregister → LeaveRoom）
 
 // 輪詢等 LeaveRoom 被呼叫：讀取迴圈的清理在 server 端 goroutine 做
 func waitForLeftRooms(t *testing.T, redis *fakeRedis, timeout time.Duration) []string {
@@ -905,121 +779,4 @@ func waitForLeftRooms(t *testing.T, redis *fakeRedis, timeout time.Duration) []s
 		time.Sleep(5 * time.Millisecond)
 	}
 	return redis.leftRooms()
-}
-
-// WriteLoop 對某條連線寫失敗：Close 它 → 讀取迴圈醒來清理（removeClient + LeaveRoom），其他連線照收
-// 用 CloseWrite 只關 server 端的寫入方向：寫會失敗，但讀取方向還活著，
-// 讀取迴圈自己不會發現異常，所以它會醒來只可能是 WriteLoop 的 Close 造成的
-func TestWebsocketWriteFailureClosesConnection(t *testing.T) {
-	redis := &fakeRedis{}
-	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
-	h.StartBroadcast()
-	conn1 := dialWS(t, url)
-	conn2 := dialWS(t, url)
-	joinRoom(t, conn1, "a")
-	joinRoom(t, conn2, "a")
-
-	h.mutex.Lock()
-	failing := serverConnForLocked(h, conn1)
-	healthy := serverConnForLocked(h, conn2)
-	if failing == nil || healthy == nil || len(h.clients) != 2 {
-		h.mutex.Unlock()
-		t.Fatalf("setup: failing=%v healthy=%v clients=%d, want both found and 2 clients", failing != nil, healthy != nil, len(h.clients))
-	}
-	tcp, ok := failing.NetConn().(*net.TCPConn)
-	if !ok {
-		h.mutex.Unlock()
-		t.Fatalf("server conn is %T, want *net.TCPConn", failing.NetConn())
-	}
-	err := tcp.CloseWrite()
-	h.mutex.Unlock()
-	if err != nil {
-		t.Fatalf("CloseWrite: %v", err)
-	}
-
-	const msg = `{"type":"message","payload":"hi"}`
-	redis.deliver("a", msg)
-
-	// 另一條連線照樣收到
-	conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, data, err := conn2.ReadMessage(); err != nil || string(data) != msg {
-		t.Fatalf("conn2 read = %q, %v, want the broadcast", data, err)
-	}
-
-	// 廣播本身不再移除 client（只排進 outbox）：移除是 WriteLoop Close → 讀取迴圈清理，要輪詢
-	waitForClientCount(t, h, 1, 2*time.Second)
-	h.mutex.Lock()
-	_, failingStill := h.clients[failing]
-	_, healthyStill := h.clients[healthy]
-	h.mutex.Unlock()
-	if failingStill || !healthyStill {
-		t.Errorf("failing still in clients = %v, healthy still in clients = %v, want false and true", failingStill, healthyStill)
-	}
-	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "a" {
-		t.Errorf("LeaveRoom calls = %v, want [a]", got)
-	}
-}
-
-// 慢 client（一直不讀）：廣播不能被它卡住；它的 outbox 滿了就被踢，同房的正常 client 照收
-//
-// 讓 slow 的 WriteLoop 卡住：client 端從不讀 → TCP buffer 滿 → WriteMessage 卡在 writeWait（10 秒）
-// → 後面的訊息全堆在 outbox。buffer 多大看 OS，所以不算「剛好第幾則會滿」，而是一直送到它被踢為止（有上限）
-//
-// 每送一則都等 fast 讀到才送下一則：fast 的 outbox 最多只有 1 則，不會也被踢
-// （不等的話 deliver 只是排進 outbox、非常快，一口氣送超過 ws.SendBuffer 則，正常 client 也會被踢 —— 這是設計）
-func TestWebsocketSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
-	redis := &fakeRedis{}
-	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
-	h.StartBroadcast()
-	slow := dialWS(t, url)
-	fast := dialWS(t, url)
-	joinRoom(t, slow, "a")
-	joinRoom(t, fast, "a")
-
-	h.mutex.Lock()
-	slowServer := serverConnForLocked(h, slow)
-	h.mutex.Unlock()
-	if slowServer == nil {
-		t.Fatal("setup: server conn for slow client not found")
-	}
-
-	// 大訊息：少送幾則就能塞滿 TCP buffer
-	msg := `{"type":"message","payload":"` + strings.Repeat("x", 64<<10) + `"}`
-	// 上限：TCP buffer（OS 自動調整，loopback 通常幾 MB）+ outbox（ws.SendBuffer 則）還綽綽有餘
-	const maxDeliveries = 2000
-	// 舊設計裡廣播會同步寫 slow、卡滿 writeWait（10 秒）；新設計 deliver 只排進 outbox，應該遠低於這個值
-	const maxDeliverTime = 500 * time.Millisecond
-
-	kicked := false
-	var slowest time.Duration
-	for i := 0; i < maxDeliveries && !kicked; i++ {
-		start := time.Now()
-		redis.deliver("a", msg)
-		slowest = max(slowest, time.Since(start))
-
-		fast.SetReadDeadline(time.Now().Add(2 * time.Second))
-		if _, data, err := fast.ReadMessage(); err != nil || len(data) != len(msg) {
-			t.Fatalf("delivery #%d: fast read len = %d, %v, want the broadcast", i+1, len(data), err)
-		}
-
-		h.mutex.Lock()
-		_, slowStill := h.clients[slowServer]
-		h.mutex.Unlock()
-		kicked = !slowStill
-	}
-
-	if slowest > maxDeliverTime {
-		t.Errorf("slowest deliver took %v, want < %v (broadcast must not wait on a slow client)", slowest, maxDeliverTime)
-	}
-	if !kicked {
-		t.Fatalf("slow client still connected after %d deliveries, want kicked when its outbox (%d) is full", maxDeliveries, ws.SendBuffer)
-	}
-	// 被踢 = Close → 讀取迴圈清理 → LeaveRoom
-	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "a" {
-		t.Errorf("LeaveRoom calls = %v, want [a]", got)
-	}
-	// fast 沒被波及
-	if got := clientCount(h); got != 1 {
-		t.Errorf("clients = %d, want 1 (only fast)", got)
-	}
 }
