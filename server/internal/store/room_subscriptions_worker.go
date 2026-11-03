@@ -19,7 +19,8 @@ const (
 	// 卡住的只有 worker 自己，Join 有自己的 200ms（ws.go），不受這個值影響
 	redisCommandTimeout = 500 * time.Millisecond
 	// SUB 送出後多久還沒收到確認，就當作沒訂、讓 worker 重送（SUBSCRIBE 是冪等的，Redis 會再回一次確認）
-	// 確認可能被延遲或丟掉：consumer 卡在廣播慢 client（B3）、go-redis 的 channel 滿了直接丟
+	// 確認可能被丟掉：go-redis 的 channel 滿了（consumer 消費太慢）會直接丟，確認也一樣
+	// B3 之後 consumer 只排 outbox、不寫 conn，不會再被慢 client 卡住，但訊息量極大時 channel 仍可能滿 → 這個重送還是需要
 	confirmResendDelay = 500 * time.Millisecond
 	// SUB 失敗的 backoff：retryBaseDelay × 2^(failures-1)，最多 retryMaxDelay
 	// Redis 掛掉時不會每 100ms 送一次、寫一行 log

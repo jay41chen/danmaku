@@ -772,8 +772,8 @@ func TestWebsocketDisconnectLeavesRoom(t *testing.T) {
 	}
 }
 
-// JoinRoom 成功、但 client 在 applyJoin 拿鎖之前就被移除（例如廣播寫失敗）：
-// 讀取迴圈結束時仍要 LeaveRoom，Join / Leave 才會成對
+// JoinRoom 成功、但 client 在 applyJoin 拿鎖之前就被移除：讀取迴圈結束時仍要 LeaveRoom，Join / Leave 才會成對
+// B3 之後只有讀取迴圈自己會 removeClient，這個情況正常流程不會發生；保留來守住 applyJoin 的防禦分支
 func TestWebsocketJoinThenRemovedBeforeApplyLeavesRoom(t *testing.T) {
 	redis := &fakeRedis{joinEntered: make(chan struct{}, 1), joinBlock: make(chan struct{})}
 	// 用 Once 包住 close：test 中途失敗時 cleanup 也會放行卡住的 JoinRoom，正常流程再 close 一次不會 panic
@@ -790,7 +790,7 @@ func TestWebsocketJoinThenRemovedBeforeApplyLeavesRoom(t *testing.T) {
 		t.Fatal("JoinRoom was not entered")
 	}
 
-	// JoinRoom 還卡著：模擬廣播寫失敗，把唯一的 server 端連線 Close + 移除
+	// JoinRoom 還卡著：直接把唯一的 server 端連線 Close + 移除（模擬「被別人移除」）
 	h.mutex.Lock()
 	if len(h.clients) != 1 {
 		h.mutex.Unlock()
@@ -884,7 +884,7 @@ func TestFrameRateLimiterWindowBoundaries(t *testing.T) {
 	}
 }
 
-// ---- 廣播寫失敗 ----
+// ---- 寫失敗 / 慢 client（B3：每條連線自己的 outbox + writeLoop）----
 
 // 找出 client 端 conn 對應的 server 端連線（呼叫時要持有 h.mutex）：server 端的 RemoteAddr 就是 client 端的 LocalAddr
 func serverConnForLocked(h *WebsocketHandler, client *websocket.Conn) *websocket.Conn {
@@ -896,10 +896,20 @@ func serverConnForLocked(h *WebsocketHandler, client *websocket.Conn) *websocket
 	return nil
 }
 
-// 廣播時對某條連線寫失敗：廣播要把它 Close + 從 clients 移除，其他連線照收
+// 輪詢等 LeaveRoom 被呼叫：讀取迴圈的清理在 server 端 goroutine 做
+func waitForLeftRooms(t *testing.T, redis *fakeRedis, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	return redis.leftRooms()
+}
+
+// writeLoop 對某條連線寫失敗：Close 它 → 讀取迴圈醒來清理（removeClient + LeaveRoom），其他連線照收
 // 用 CloseWrite 只關 server 端的寫入方向：寫會失敗，但讀取方向還活著，
-// 讀取迴圈不會發現異常，所以「移除」只可能是廣播做的，不會被讀取迴圈的清理蓋掉
-func TestWebsocketBroadcastWriteFailureRemovesClient(t *testing.T) {
+// 讀取迴圈自己不會發現異常，所以它會醒來只可能是 writeLoop 的 Close 造成的
+func TestWebsocketWriteFailureClosesConnection(t *testing.T) {
 	redis := &fakeRedis{}
 	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
 	h.StartBroadcast()
@@ -927,20 +937,7 @@ func TestWebsocketBroadcastWriteFailureRemovesClient(t *testing.T) {
 	}
 
 	const msg = `{"type":"message","payload":"hi"}`
-	redis.deliver("a", msg) // 同步：廣播在 mutex 下跑完才返回
-
-	// 立刻檢查（不輪詢）：移除一定是這次廣播做的
-	h.mutex.Lock()
-	_, failingStill := h.clients[failing]
-	_, healthyStill := h.clients[healthy]
-	n := len(h.clients)
-	h.mutex.Unlock()
-	if failingStill {
-		t.Error("寫失敗的 client 還在 h.clients，廣播沒有移除它")
-	}
-	if !healthyStill || n != 1 {
-		t.Errorf("healthy client still in clients = %v, clients = %d, want true and 1", healthyStill, n)
-	}
+	redis.deliver("a", msg)
 
 	// 另一條連線照樣收到
 	conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -948,13 +945,80 @@ func TestWebsocketBroadcastWriteFailureRemovesClient(t *testing.T) {
 		t.Fatalf("conn2 read = %q, %v, want the broadcast", data, err)
 	}
 
-	// 廣播有 Close 失敗的連線 → 它的讀取迴圈結束 → LeaveRoom
-	// （client 端的 conn1 沒有關，所以這只能是廣播 Close 造成的）
-	deadline := time.Now().Add(2 * time.Second)
-	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	// 廣播本身不再移除 client（只排進 outbox）：移除是 writeLoop Close → 讀取迴圈清理，要輪詢
+	waitForClientCount(t, h, 1, 2*time.Second)
+	h.mutex.Lock()
+	_, failingStill := h.clients[failing]
+	_, healthyStill := h.clients[healthy]
+	h.mutex.Unlock()
+	if failingStill || !healthyStill {
+		t.Errorf("failing still in clients = %v, healthy still in clients = %v, want false and true", failingStill, healthyStill)
 	}
-	if got := redis.leftRooms(); len(got) != 1 || got[0] != "a" {
+	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "a" {
 		t.Errorf("LeaveRoom calls = %v, want [a]", got)
+	}
+}
+
+// 慢 client（一直不讀）：廣播不能被它卡住；它的 outbox 滿了就被踢，同房的正常 client 照收
+//
+// 讓 slow 的 writeLoop 卡住：client 端從不讀 → TCP buffer 滿 → WriteMessage 卡在 writeWait（10 秒）
+// → 後面的訊息全堆在 outbox。buffer 多大看 OS，所以不算「剛好第幾則會滿」，而是一直送到它被踢為止（有上限）
+//
+// 每送一則都等 fast 讀到才送下一則：fast 的 outbox 最多只有 1 則，不會也被踢
+// （不等的話 deliver 只是排進 outbox、非常快，一口氣送超過 wsSendBuffer 則，正常 client 也會被踢 —— 這是設計）
+func TestWebsocketSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
+	redis := &fakeRedis{}
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
+	h.StartBroadcast()
+	slow := dialWS(t, url)
+	fast := dialWS(t, url)
+	joinRoom(t, slow, "a")
+	joinRoom(t, fast, "a")
+
+	h.mutex.Lock()
+	slowServer := serverConnForLocked(h, slow)
+	h.mutex.Unlock()
+	if slowServer == nil {
+		t.Fatal("setup: server conn for slow client not found")
+	}
+
+	// 大訊息：少送幾則就能塞滿 TCP buffer
+	msg := `{"type":"message","payload":"` + strings.Repeat("x", 64<<10) + `"}`
+	// 上限：TCP buffer（OS 自動調整，loopback 通常幾 MB）+ outbox（wsSendBuffer 則）還綽綽有餘
+	const maxDeliveries = 2000
+	// 舊設計裡廣播會同步寫 slow、卡滿 writeWait（10 秒）；新設計 deliver 只排進 outbox，應該遠低於這個值
+	const maxDeliverTime = 500 * time.Millisecond
+
+	kicked := false
+	var slowest time.Duration
+	for i := 0; i < maxDeliveries && !kicked; i++ {
+		start := time.Now()
+		redis.deliver("a", msg)
+		slowest = max(slowest, time.Since(start))
+
+		fast.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, data, err := fast.ReadMessage(); err != nil || len(data) != len(msg) {
+			t.Fatalf("delivery #%d: fast read len = %d, %v, want the broadcast", i+1, len(data), err)
+		}
+
+		h.mutex.Lock()
+		_, slowStill := h.clients[slowServer]
+		h.mutex.Unlock()
+		kicked = !slowStill
+	}
+
+	if slowest > maxDeliverTime {
+		t.Errorf("slowest deliver took %v, want < %v (broadcast must not wait on a slow client)", slowest, maxDeliverTime)
+	}
+	if !kicked {
+		t.Fatalf("slow client still connected after %d deliveries, want kicked when its outbox (%d) is full", maxDeliveries, wsSendBuffer)
+	}
+	// 被踢 = Close → 讀取迴圈清理 → LeaveRoom
+	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "a" {
+		t.Errorf("LeaveRoom calls = %v, want [a]", got)
+	}
+	// fast 沒被波及
+	if got := clientCount(h); got != 1 {
+		t.Errorf("clients = %d, want 1 (only fast)", got)
 	}
 }

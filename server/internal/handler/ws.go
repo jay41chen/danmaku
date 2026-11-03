@@ -23,6 +23,9 @@ const (
 	maxMessageBytes = 500
 	rateLimit       = 5
 	writeWait       = 10 * time.Second
+	// 每條連線 outbox（wsClient.send）的容量：滿了 = 這條連線消化不了 → 踢掉，讓 client 重連後補撈歷史
+	// 不開大：越大代表 client 落後越多才被踢（熱門房每秒 50 則時，256 ≈ 落後 5 秒）
+	wsSendBuffer = 256
 	// auth frame 查 DB（GetUserByID）的上限，卡住時不能一直佔著這條連線的讀取迴圈
 	wsAuthDBTimeout = 3 * time.Second
 	wsTypeMessage   = "message"
@@ -105,10 +108,10 @@ type AccessTokenClaimsParser interface {
 }
 
 // 一條連線的身分狀態。userID == 0 代表匿名（users.id 是 IDENTITY，從 1 開始，不會有 0）
-// 所有欄位（含 timer）都由 WebsocketHandler.mutex 保護，不另外加每連線的鎖：
-// 寫一個 frame 本來就要拿全域鎖（gorilla 同一條連線只能一個 writer，廣播也在這把鎖下寫所有 client），
-// 所以每連線的身分鎖現在省不了任何東西。每連線的鎖留到 W6 Hub 重構（見 ROADMAP），
-// 到時的鎖順序是 全域 → 每連線
+// 所有欄位（含 timer）都由 WebsocketHandler.mutex 保護（send 例外：建立後不會換，writeLoop 不拿鎖直接用）
+// 寫 conn 不用拿鎖：gorilla 同一條連線只能一個 writer，這個 writer 就是 writeLoop，其他人一律排進 send
+// 全域鎖底下只改 map / 欄位、排 outbox，不做任何 I/O，拿著它的時間很短，所以暫時不另外加每連線的鎖
+// 每連線的鎖留到 W6 Hub 重構（見 ROADMAP），到時的鎖順序是 全域 → 每連線
 type wsClient struct {
 	conn     *websocket.Conn
 	userID   int64
@@ -118,6 +121,10 @@ type wsClient struct {
 	// 目前所在房間的 public_id，空字串 = 不在任何房間。只用來過濾廣播
 	// 「當前房間」的權威狀態在讀取迴圈的 wsConnState，這裡只是給廣播看的副本
 	room string
+	// outbox：要寫給這條連線的 frame（已經編碼好的 bytes），只有 writeLoop 會讀出來寫進 conn
+	// 建立後不會換 → writeLoop 不用拿鎖就能用（HandleWebsocket 直接把它傳進去）
+	// 不 close：往裡面送的有好幾個人（廣播、讀取迴圈），close 了別人再送會 panic；writeLoop 靠 done 結束
+	send chan []byte
 }
 
 // 一條連線在讀取迴圈 goroutine 裡的私有狀態：只有 listenConnection 那個 goroutine 讀寫，所以不需要鎖
@@ -130,6 +137,7 @@ type wsConnState struct {
 //
 //	StartBroadcast        → context.Background()  process 生命週期，跟任何 request 無關
 //	HandleWebsocket       → r.Context()           這條 WS 連線的生命週期，帶 request_id
+//	  ├ pingLoop / writeLoop → 沿用上層 ctx（只拿來記 log）
 //	  └ listenConnection / closeConnection / removeClient → 沿用上層 ctx
 //	    └ processRemoteMessage → 沿用上層 ctx
 //	      ├ handleAuth → 沿用上層 ctx，但 GetUserByID 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
@@ -175,16 +183,17 @@ func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterf
 
 // 一條連線的生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
 //
-//	各種原因 → ReadMessage 失敗 → closeConnection（removeClient）→ HandleWebsocket return
-//	                                                               ├ defer close(done) → pingLoop 結束
-//	                                                               └ defer conn.Close()
+//	各種原因 → ReadMessage 失敗 → closeConnection（removeClient + LeaveRoom）→ HandleWebsocket return
+//	                                                                          ├ defer close(done) → pingLoop、writeLoop 結束
+//	                                                                          └ defer conn.Close()
 //
-// 其他 goroutine（pingLoop）發現連線壞了只 Close() 叫醒讀取迴圈，不自己 removeClient
-// 例外：StartBroadcast 持有全域鎖、會立刻 removeClientLocked（重複呼叫是安全的）
-// 但它不能呼叫 LeaveRoom（Redis I/O 不能在鎖內做），離開房間一律由讀取迴圈結束後的清理負責
+// 其他人發現連線壞了只 Close() 叫醒讀取迴圈，不自己 removeClient / LeaveRoom：
+//   - pingLoop：送 ping 失敗
+//   - writeLoop：寫 frame 失敗
+//   - enqueueLocked：outbox 滿了（慢 client，廣播或回覆都可能觸發）
 //
-// 鎖規則：絕不在持有 this.mutex 時呼叫 JoinRoom / LeaveRoom（Redis I/O）或 DB。
-// 一律照 handleAuth 的做法：I/O 在鎖外做完，再拿鎖更新 wsClient、回 frame
+// 鎖規則：絕不在持有 this.mutex 時做 I/O —— JoinRoom / LeaveRoom（Redis）、DB、寫 conn 都不行
+// 一律照 handleAuth 的做法：I/O 在鎖外做完，再拿鎖更新 wsClient、回 frame（回 frame 只是排進 outbox，不寫 conn）
 // 在 listenConnection 之前 return 會跳過 removeClient → clients 裡留一筆，不要這樣寫
 func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
@@ -211,14 +220,18 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	}
 	defer conn.Close()
 
-	if !this.tryAddClient(r.Context(), conn) {
+	client, ok := this.tryAddClient(r.Context(), conn)
+	if !ok {
 		return
 	}
 	this.setupKeepalive(r.Context(), conn)
 	// 加上ping loop
 	done := make(chan struct{})
 	defer close(done)
+	// 兩個goroutine可以共用`done`，可以一次叫醒兩個goroutine
+	// 類似在kotlin裡面呼叫 `job.cancel()`的感覺
 	go this.pingLoop(r.Context(), conn, done)
+	go this.writeLoop(r.Context(), conn, client.send, done)
 
 	this.listenConnection(r.Context(), conn)
 }
@@ -257,7 +270,7 @@ func (this *WebsocketHandler) pingLoop(ctx context.Context, conn *websocket.Conn
 			deadline := time.Now().Add(writeWait)
 			if err := conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
 				// 送ping的時候遇到錯誤，代表該connection遇到問題
-				// 也可能是等 gorilla 內部寫入鎖逾時（StartBroadcast 正卡在寫這條慢 client，最多 writeWait）：一律視為連線不健康、關掉
+				// 也可能是等 gorilla 內部寫入鎖逾時（writeLoop 正卡在寫這條慢 client，最多 writeWait）：一律視為連線不健康、關掉
 				this.logger.WarnContext(ctx, "write ping failed", "error", err)
 				// 特別注意，因為pingLoop跟listenConnection在不同go routine
 				// 所以這邊要特別指定close，不然listenConnection要等到timeout
@@ -281,18 +294,19 @@ func (this *WebsocketHandler) addPongReadDeadline(conn *websocket.Conn) error {
 }
 
 // 回傳 false = 連線數已滿，沒加進去（HandleWebsocket 要直接 return）
+// 回傳 wsClient 是為了讓 HandleWebsocket 拿到 send 交給 writeLoop
 // 抽成獨立 function 是為了用 defer Unlock：HandleWebsocket 後面的 listenConnection 會跑到斷線，不能在那裡 defer
-func (this *WebsocketHandler) tryAddClient(ctx context.Context, conn *websocket.Conn) bool {
+func (this *WebsocketHandler) tryAddClient(ctx context.Context, conn *websocket.Conn) (*wsClient, bool) {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 	if len(this.clients) >= maxClients {
 		this.logger.WarnContext(ctx, "too many connections")
-		return false
+		return nil, false
 	}
-	this.addClientLocked(conn)
+	client := this.addClientLocked(conn)
 	// request_id 在 upgrade 時產生，同一條連線的所有 log 共用，等同 connection ID
 	this.logger.InfoContext(ctx, "new client connected", "total", len(this.clients))
-	return true
+	return client, true
 }
 
 // 每條連線的 frame 限流：固定視窗，視窗內最多 rateLimit 個 frame
@@ -348,7 +362,7 @@ func (this *WebsocketHandler) listenConnection(ctx context.Context, conn *websoc
 // 斷線清理（讀取迴圈結束時呼叫）：先 removeClient，還在房間裡再 LeaveRoom
 func (this *WebsocketHandler) closeConnection(ctx context.Context, conn *websocket.Conn, state *wsConnState) {
 	this.removeClient(ctx, conn)
-	// 還在房間裡就要 LeaveRoom（鎖外做；廣播寫失敗移除 client 時也是靠這裡清理）
+	// 還在房間裡就要 LeaveRoom（鎖外做）；被踢（outbox 滿）、writeLoop / pingLoop 寫失敗也都是 Close 之後走到這裡清理
 	if state.room != "" {
 		this.leaveRoom(ctx, state.room)
 		state.room = ""
@@ -480,7 +494,8 @@ func (this *WebsocketHandler) applyJoin(ctx context.Context, conn *websocket.Con
 	defer this.mutex.Unlock()
 	c, exists := this.clients[conn]
 	if !exists {
-		// 期間連線已被移除（廣播寫失敗），讀取迴圈之後會 LeaveRoom
+		// 防禦用：現在只有讀取迴圈（就是呼叫我們的這個 goroutine）會 removeClient，照理不會發生
+		// 真的發生的話，讀取迴圈之後的 closeConnection 仍會 LeaveRoom
 		return
 	}
 	c.room = roomID
@@ -524,7 +539,7 @@ func (this *WebsocketHandler) handleAuth(ctx context.Context, conn *websocket.Co
 	defer this.mutex.Unlock()
 	c, exists := this.clients[conn]
 	if !exists {
-		// 驗證期間連線已被移除（斷線 / 廣播寫失敗），沒有人可以回了
+		// 防禦用：現在只有讀取迴圈（就是呼叫我們的這個 goroutine）會 removeClient，照理不會發生
 		return
 	}
 	if !ok {
@@ -682,18 +697,61 @@ func (this *WebsocketHandler) writeErrorLocked(ctx context.Context, conn *websoc
 	})
 }
 
-// 寫一個 envelope 給這條連線（呼叫時要持有 this.mutex）
-// gorilla 同一條連線同時只能有一個 writer；StartBroadcast 也是在 this.mutex 下寫所有 client，
-// 所以寫之前一定要拿同一把鎖，不然會跟廣播同時寫同一條連線
-// 已知問題（W6 Hub 重構時處理，見 ROADMAP）：這把是全域鎖，一個慢的 client 寫入卡住會連帶擋住廣播
+// 把一個 envelope 交給這條連線的 writeLoop（呼叫時要持有 this.mutex：要從 clients 找到 wsClient）
+// 不會真的寫 conn，所以不會卡；名字要不要改（例如 sendEnvelopeLocked）由你決定
 func (this *WebsocketHandler) writeEnvelopeLocked(ctx context.Context, conn *websocket.Conn, env wsEnvelope) {
-	if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-		this.logger.WarnContext(ctx, "set write deadline failed", "error", err)
+	client, ok := this.clients[conn]
+	if !ok {
+		// 找不到client，應該被移除了，直接return
 		return
 	}
-	// 寫失敗只記 log：連線真的壞了，下一次 ReadMessage 會失敗並走 removeClient
-	if err := conn.WriteJSON(env); err != nil {
-		this.logger.WarnContext(ctx, "write envelope failed", "error", err, "type", env.Type)
+	msg, err := json.Marshal(env)
+	if err != nil {
+		this.logger.ErrorContext(ctx, "marshal ws envelope failed", "type", env.Type, "error", err)
+		return
+	}
+	this.enqueueLocked(ctx, client, msg)
+}
+
+// 把一則已編碼的 frame 交給這條連線的 writeLoop（呼叫時要持有 this.mutex）
+// 絕不等：滿了 = 慢 client → conn.Close() 踢掉（只叫醒讀取迴圈，清理交給它）
+// 廣播和讀取迴圈（join_ok、pong、error）都走這裡，規則只有一條
+// 被踢之後、讀取迴圈 removeClient 之前，新的訊息還是會排不進去 → 再記一行 log、再 Close 一次（重複 Close 無害）
+func (this *WebsocketHandler) enqueueLocked(ctx context.Context, c *wsClient, msg []byte) {
+	select {
+	case c.send <- msg:
+		// msg可以正常塞，就沒事讓他繼續用
+		return
+	default:
+		// 滿了，要斷線（讓 client 重連後補撈歷史）
+		// 不帶 msg：那是使用者的訊息內容
+		this.logger.WarnContext(ctx, "ws outbox full, kicking slow client", "room", c.room, "buffer", wsSendBuffer)
+		c.conn.Close()
+	}
+}
+
+// 每條連線一個：唯一會把資料 frame 寫進 conn 的 goroutine
+// 結束條件：done 被 close（讀取迴圈結束、HandleWebsocket return），或寫入失敗
+// 失敗時只 Close 叫醒讀取迴圈，不自己 removeClient（清理 owner 是讀取迴圈）
+//
+// 已知、無害的多餘 warn log（"write frame failed"）：
+//   - 被踢時：writeLoop 正卡在寫入，conn 一被 Close 這次寫入就失敗 → 跟 "outbox full" 各一行
+//   - 正常斷線時：done 被 close 的同時 send 裡還有東西，select 是隨機選 → 可能選到 send、寫已關閉的 conn
+func (this *WebsocketHandler) writeLoop(ctx context.Context, conn *websocket.Conn, send <-chan []byte, done <-chan struct{}) {
+	for {
+		select {
+		case <-done:
+			// 收到done，已經完成，直接結束
+			return
+		case msg := <-send:
+			// 收到send過來的訊息，寫入msg
+			err := this.writeRaw(conn, msg)
+			if err != nil {
+				this.logger.WarnContext(ctx, "write frame failed", "error", err)
+				conn.Close()
+				return
+			}
+		}
 	}
 }
 
@@ -703,30 +761,27 @@ func (this *WebsocketHandler) StartBroadcast() {
 	this.redis.Subscribe(context.Background(), func(roomID, msg string) {
 		this.mutex.Lock()
 		defer this.mutex.Unlock()
-		this.broadcastToRoomLocked(roomID, msg)
+		this.broadcastToRoomLocked(context.Background(), roomID, msg)
 	})
 }
 
 // 把 msg 送給所有在 roomID 的連線（呼叫時要持有 this.mutex）
 // 命名慣例：結尾是 Locked 的 function 都要求呼叫端已經持有 this.mutex
-func (this *WebsocketHandler) broadcastToRoomLocked(roomID, msg string) {
-	for conn, c := range this.clients {
-		// 只送給在這個房間的連線
-		if c.room != roomID {
-			continue
-		}
-		if err := this.writeRawLocked(conn, []byte(msg)); err != nil {
-			// 寫失敗：為了避免有機率影響到其他用戶，移除該 client（其他 client 照送）
-			conn.Close()
-			this.removeClientLocked(conn)
-			continue
+// 這裡跑在 consumer goroutine（整台只有一個，SUB 確認也靠它）：只能做不會卡的事，絕不寫 conn
+func (this *WebsocketHandler) broadcastToRoomLocked(ctx context.Context, roomID, msg string) {
+	// 先把rawData轉成string
+	s := []byte(msg)
+	for _, c := range this.clients {
+		if c.room == roomID {
+			// 找到對應的connection
+			this.enqueueLocked(ctx, c, s)
 		}
 	}
 }
 
-// 寫一則原始文字訊息給這條連線（呼叫時要持有 this.mutex）
-// SetWriteDeadline 或 WriteMessage 任一失敗就回傳 error，由呼叫端負責 Close + removeClientLocked
-func (this *WebsocketHandler) writeRawLocked(conn *websocket.Conn, msg []byte) error {
+// 真的把一則訊息寫進 conn（只有 writeLoop 呼叫，不拿鎖）
+// SetWriteDeadline 或 WriteMessage 任一失敗就回傳 error，由 writeLoop 負責 Close
+func (this *WebsocketHandler) writeRaw(conn *websocket.Conn, msg []byte) error {
 	maxWaitingTime := time.Now().Add(writeWait)
 	if err := conn.SetWriteDeadline(maxWaitingTime); err != nil {
 		return err
@@ -740,13 +795,16 @@ func (this *WebsocketHandler) writeRawLocked(conn *websocket.Conn, msg []byte) e
 // 同一個 user 一條連 server-1、一條連 server-2 → 兩台各回報 member=1，Grafana 加總變 2（其實 1 人）
 // 跨 server 去重要放到共用的地方（Redis）+ TTL + heartbeat：server 被 kill -9 時沒機會清，
 // 只能靠「活著的定期續命、死掉的自然過期」，見 ROADMAP W6「跨 server 的不同會員數」
-func (this *WebsocketHandler) addClientLocked(conn *websocket.Conn) {
-	this.clients[conn] = &wsClient{conn: conn}
+func (this *WebsocketHandler) addClientLocked(conn *websocket.Conn) *wsClient {
+	client := &wsClient{conn: conn, send: make(chan []byte, wsSendBuffer)}
+	this.clients[conn] = client
 	prom.WebsocketConnections.Inc()
 	this.updateViewersGaugeLocked()
+	return client
 }
 
-// 斷線：停 timer、是會員就 refcount -1、總連線數 -1；重複呼叫不會重複扣（廣播寫失敗和讀取失敗都可能呼叫）
+// 斷線：停 timer、是會員就 refcount -1、總連線數 -1
+// 現在只有讀取迴圈的 closeConnection 會呼叫；重複呼叫不會重複扣（防禦用，TestRemoveClientTwice 驗）
 //
 // TODO(W6): 同 addClientLocked，只扣得到這台 server 的數字；process 直接死掉時這裡根本不會執行，
 // 換成 Redis 版本後要靠 TTL 清掉死掉那台留下的資料
