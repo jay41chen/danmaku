@@ -22,6 +22,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/store"
+	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
 // 讀出 gauge 目前的值（/metrics 輸出背後就是這個 dto.Metric 結構）
@@ -38,7 +39,7 @@ func TestRemoveClientTwice(t *testing.T) {
 	handler := NewWebsocketHandler(nil, nil, nil)
 	conn := &websocket.Conn{}
 	before := gaugeValue(t, prom.WebsocketConnections)
-	handler.addClientLocked(conn)
+	handler.addClientLocked(conn, ws.NewClient(conn, wsPingPeriod, wsPongWait))
 	handler.removeClientLocked(conn)
 	handler.removeClientLocked(conn)
 
@@ -594,7 +595,7 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 
 	waitForClientCount(t, h, 1, time.Second)
 	// 50ms 一則 = 20 則/秒，超過每條連線 5 則/秒的限流；
-	// 但 listenConnection 是在限流判斷之前就延長 deadline，被丟掉的 frame 一樣算「活著」
+	// 但 ReadLoop 是在限流判斷之前就延長 deadline，被丟掉的 frame 一樣算「活著」
 	for range 10 {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
 			t.Fatalf("write: %v", err)
@@ -884,7 +885,7 @@ func TestFrameRateLimiterWindowBoundaries(t *testing.T) {
 	}
 }
 
-// ---- 寫失敗 / 慢 client（B3：每條連線自己的 outbox + writeLoop）----
+// ---- 寫失敗 / 慢 client（B3：每條連線自己的 outbox + WriteLoop）----
 
 // 找出 client 端 conn 對應的 server 端連線（呼叫時要持有 h.mutex）：server 端的 RemoteAddr 就是 client 端的 LocalAddr
 func serverConnForLocked(h *WebsocketHandler, client *websocket.Conn) *websocket.Conn {
@@ -906,9 +907,9 @@ func waitForLeftRooms(t *testing.T, redis *fakeRedis, timeout time.Duration) []s
 	return redis.leftRooms()
 }
 
-// writeLoop 對某條連線寫失敗：Close 它 → 讀取迴圈醒來清理（removeClient + LeaveRoom），其他連線照收
+// WriteLoop 對某條連線寫失敗：Close 它 → 讀取迴圈醒來清理（removeClient + LeaveRoom），其他連線照收
 // 用 CloseWrite 只關 server 端的寫入方向：寫會失敗，但讀取方向還活著，
-// 讀取迴圈自己不會發現異常，所以它會醒來只可能是 writeLoop 的 Close 造成的
+// 讀取迴圈自己不會發現異常，所以它會醒來只可能是 WriteLoop 的 Close 造成的
 func TestWebsocketWriteFailureClosesConnection(t *testing.T) {
 	redis := &fakeRedis{}
 	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
@@ -945,7 +946,7 @@ func TestWebsocketWriteFailureClosesConnection(t *testing.T) {
 		t.Fatalf("conn2 read = %q, %v, want the broadcast", data, err)
 	}
 
-	// 廣播本身不再移除 client（只排進 outbox）：移除是 writeLoop Close → 讀取迴圈清理，要輪詢
+	// 廣播本身不再移除 client（只排進 outbox）：移除是 WriteLoop Close → 讀取迴圈清理，要輪詢
 	waitForClientCount(t, h, 1, 2*time.Second)
 	h.mutex.Lock()
 	_, failingStill := h.clients[failing]
@@ -961,11 +962,11 @@ func TestWebsocketWriteFailureClosesConnection(t *testing.T) {
 
 // 慢 client（一直不讀）：廣播不能被它卡住；它的 outbox 滿了就被踢，同房的正常 client 照收
 //
-// 讓 slow 的 writeLoop 卡住：client 端從不讀 → TCP buffer 滿 → WriteMessage 卡在 writeWait（10 秒）
+// 讓 slow 的 WriteLoop 卡住：client 端從不讀 → TCP buffer 滿 → WriteMessage 卡在 writeWait（10 秒）
 // → 後面的訊息全堆在 outbox。buffer 多大看 OS，所以不算「剛好第幾則會滿」，而是一直送到它被踢為止（有上限）
 //
 // 每送一則都等 fast 讀到才送下一則：fast 的 outbox 最多只有 1 則，不會也被踢
-// （不等的話 deliver 只是排進 outbox、非常快，一口氣送超過 wsSendBuffer 則，正常 client 也會被踢 —— 這是設計）
+// （不等的話 deliver 只是排進 outbox、非常快，一口氣送超過 ws.SendBuffer 則，正常 client 也會被踢 —— 這是設計）
 func TestWebsocketSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
 	redis := &fakeRedis{}
 	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
@@ -984,7 +985,7 @@ func TestWebsocketSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
 
 	// 大訊息：少送幾則就能塞滿 TCP buffer
 	msg := `{"type":"message","payload":"` + strings.Repeat("x", 64<<10) + `"}`
-	// 上限：TCP buffer（OS 自動調整，loopback 通常幾 MB）+ outbox（wsSendBuffer 則）還綽綽有餘
+	// 上限：TCP buffer（OS 自動調整，loopback 通常幾 MB）+ outbox（ws.SendBuffer 則）還綽綽有餘
 	const maxDeliveries = 2000
 	// 舊設計裡廣播會同步寫 slow、卡滿 writeWait（10 秒）；新設計 deliver 只排進 outbox，應該遠低於這個值
 	const maxDeliverTime = 500 * time.Millisecond
@@ -1011,7 +1012,7 @@ func TestWebsocketSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
 		t.Errorf("slowest deliver took %v, want < %v (broadcast must not wait on a slow client)", slowest, maxDeliverTime)
 	}
 	if !kicked {
-		t.Fatalf("slow client still connected after %d deliveries, want kicked when its outbox (%d) is full", maxDeliveries, wsSendBuffer)
+		t.Fatalf("slow client still connected after %d deliveries, want kicked when its outbox (%d) is full", maxDeliveries, ws.SendBuffer)
 	}
 	// 被踢 = Close → 讀取迴圈清理 → LeaveRoom
 	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "a" {
