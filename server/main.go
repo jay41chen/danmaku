@@ -181,20 +181,27 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	r.get("/me", http.HandlerFunc(h.auth.HandleMe))
 }
 
+// prod 和 test 共用的 middleware chain：test 走這裡，才測得到跟 prod 一樣的順序
+// 順序限制：HttpMetrics 和 mux 中間不能有會複製 request 的 middleware（r.WithContext，例如 RequestID）
+// mux 是把 r.Pattern 寫進「它拿到的那個 *Request」，中間被複製的話 HttpMetrics 讀到的是 ""，全部變成 unmatched
+func serviceHandler(mux *http.ServeMux, origins []string) http.Handler {
+	return middleware.Chain(
+		mux,
+		middleware.RequestID,
+		middleware.Logging(slog.Default()),
+		prom.HttpMetrics,
+		middleware.RecoverPanic,
+		middleware.CORS(origins...),
+	)
+}
+
 // origins 已經由 config.Load 用 middleware.ParseOrigins 解析、檢查過
 func startServer(mux *http.ServeMux, port string, origins []string) {
 
 	// 建立SERVER
 	server := http.Server{
-		Addr: ":" + port,
-		Handler: middleware.Chain(
-			mux,
-			middleware.RequestID,
-			middleware.Logging(slog.Default()),
-			prom.HttpMetrics,
-			middleware.RecoverPanic,
-			middleware.CORS(origins...),
-		),
+		Addr:    ":" + port,
+		Handler: serviceHandler(mux, origins),
 		// net/http 執行期間自己的錯誤（外層 panic、重複 WriteHeader、TLS/accept 失敗）走這裡，
 		// middleware 攔不到。不設的話會經由 slog.SetDefault 以 INFO 輸出，這裡改成 ERROR
 		ErrorLog: slog.NewLogLogger(
