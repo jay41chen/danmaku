@@ -3,19 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
-
-// 房間名稱長度上限（字元數，不是 bytes）
-const maxRoomNameRunes = 30
 
 type RoomHandler struct {
 	db     store.DBStoreInterface
@@ -37,7 +31,7 @@ type createRoomRequest struct {
 
 // flow:
 // 取 user id（RequireAuth 放的）
-// 檢查 body（trim 後 1..30 字元）
+// 檢查 body（validateRoomName：1..30 字元、字元規則、頭尾空白直接拒絕，不 trim）
 // 存 DB（額度檢查在 store 的 transaction 裡）
 // 回 201
 func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
@@ -55,10 +49,10 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 跟訊息不同：房間名稱存的是 trim 後的值（前後空白對名稱沒有意義）
-	name := strings.TrimSpace(req.RoomName)
-	if n := utf8.RuneCountInString(name); n < 1 || n > maxRoomNameRunes {
-		http.Error(w, fmt.Sprintf("room_name must be 1 to %d characters", maxRoomNameRunes), http.StatusBadRequest)
+	// 只檢查、不改寫：存的是原樣（頭尾有空白直接拒絕，不幫忙 trim）
+	name := req.RoomName
+	if err := validateRoomName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

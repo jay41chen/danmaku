@@ -152,6 +152,13 @@ func TestCreateMessage(t *testing.T) {
 		{"whitespace only", contentBody("   \t\n")},
 		{"full-width space only", contentBody("　　")},
 		{"101 runes", contentBody(strings.Repeat("哈", 101))},
+		// precis Freeform 擋掉的字元
+		{"zero-width space only", contentBody("\u200b")},
+		{"zero-width space inside text", contentBody("哈\u200b哈")},
+		{"right-to-left override", contentBody("abc\u202eevil")},
+		{"newline in middle", contentBody("a\nb")},
+		{"tab in middle", contentBody("a\tb")},
+		{"ZWJ family emoji", contentBody("\U0001F468\u200d\U0001F469\u200d\U0001F467")},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name+" returns 400", func(t *testing.T) {
@@ -166,6 +173,36 @@ func TestCreateMessage(t *testing.T) {
 			}
 			if db.createMsgCalled || len(redis.published) != 0 {
 				t.Error("invalid request reached DB or Redis")
+			}
+		})
+	}
+
+	// 合法內容必須原樣存進去（byte-for-byte，不 normalize）
+	// 這張表是防止規則寫太嚴（例如改成白名單）而誤殺正常訊息
+	valid := []struct {
+		name    string
+		content string
+	}{
+		{"full-width punctuation", "好喔！"},
+		{"bopomofo", "ㄏㄏ"},
+		{"kaomoji", "(╯°□°)╯"},
+		{"emoji", "\U0001F602"},
+		{"NFD accent stays un-normalized", "cafe\u0301"},
+		// Zalgo 訊息允許，渲染交給前端處理
+		{"zalgo combining marks", "Z\u0301\u0301\u0301\u0301"},
+	}
+	for _, tc := range valid {
+		t.Run(tc.name+" is stored as-is", func(t *testing.T) {
+			db := &fakeDBStore{createdMsg: created()}
+			h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+			rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody(tc.content))
+
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+			}
+			if db.gotMsgContent != tc.content {
+				t.Errorf("saved content = %q, want %q", db.gotMsgContent, tc.content)
 			}
 		})
 	}

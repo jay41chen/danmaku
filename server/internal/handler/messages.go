@@ -8,17 +8,12 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
-
-// 訊息長度上限（字元數，不是 bytes：中文一個字 3 bytes）
-const maxMessageRunes = 100
 
 // 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
 const publishTimeout = 500 * time.Millisecond
@@ -115,14 +110,9 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	}
 
 	// client 也會檢查，但那只是 UX；server 才是防線（curl 可以繞過 client）
-	// 存的是原始 content，不 trim：只用 trim 判斷「是不是整串空白」
-	// 已知問題：零寬空白（U+200B 等）不算 space，擋不到，見 ROADMAP W4b
-	if strings.TrimSpace(req.Content) == "" {
-		http.Error(w, "content must not be empty", http.StatusBadRequest)
-		return
-	}
-	if utf8.RuneCountInString(req.Content) > maxMessageRunes {
-		http.Error(w, "content too long", http.StatusBadRequest)
+	// 只檢查、不改寫：存的是原始 content（不 trim、不正規化）
+	if err := validateMessageContent(req.Content); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

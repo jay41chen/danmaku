@@ -80,6 +80,21 @@ func TestHandleCreateRoom(t *testing.T) {
 		{"whitespace only", roomNameBody("  \t\n")},
 		{"full-width space only", roomNameBody("　　")},
 		{"31 runes", roomNameBody(strings.Repeat("哈", 31))},
+		// precis Freeform 擋掉的字元
+		{"zero-width space", roomNameBody("\u200b房間")},
+		{"right-to-left override", roomNameBody("abc\u202eevil")},
+		{"newline", roomNameBody("房\n間")},
+		{"ZWJ family emoji", roomNameBody("\U0001F468\u200d\U0001F469\u200d\U0001F467")},
+		// 頭尾不可有空白（不再 trim）
+		{"leading space", roomNameBody(" 房間")},
+		{"trailing space", roomNameBody("房間 ")},
+		{"trailing full-width space", roomNameBody("房間\u3000")},
+		// 相鄰兩個空白
+		{"two adjacent ASCII spaces", roomNameBody("房  間")},
+		{"ASCII space + full-width space", roomNameBody("房 \u3000間")},
+		// 連續超過 2 個組合記號
+		{"3 consecutive combining marks", roomNameBody("Z\u0301\u0301\u0301")},
+		{"3 combining marks at start", roomNameBody("\u0301\u0301\u0301房")},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name+" returns 400", func(t *testing.T) {
@@ -113,20 +128,35 @@ func TestHandleCreateRoom(t *testing.T) {
 		}
 	})
 
-	// 跟訊息不同：存的是 trim 後的名稱；長度也是 trim 後才算
-	t.Run("name is trimmed before saving", func(t *testing.T) {
-		db := &fakeDBStore{createdRoom: created()}
-		h := NewRoomHandler(db)
+	// 合法名稱必須原樣存進去（不 trim、不 normalize）
+	valid := []struct {
+		name string
+		room string
+	}{
+		{"full-width punctuation", "好喔！"},
+		{"bopomofo and kaomoji", "ㄏㄏ (╯°□°)╯"},
+		{"single ASCII space", "房 間"},
+		{"single full-width space", "房\u3000間"},
+		{"exactly 2 combining marks", "e\u0302\u0301"},
+		// 兩組各 2 個記號，中間隔著一般字母：分開計算，所以通過
+		{"two groups of 2 marks separated by a letter", "e\u0301\u0301a\u0301\u0301"},
+		{"NFD accent stays un-normalized", "cafe\u0301"},
+	}
+	for _, tc := range valid {
+		t.Run(tc.name+" is stored as-is", func(t *testing.T) {
+			db := &fakeDBStore{createdRoom: created()}
+			h := NewRoomHandler(db)
 
-		rec := serveCreateRoom(t, h, userID, roomNameBody("  房間 \n"))
+			rec := serveCreateRoom(t, h, userID, roomNameBody(tc.room))
 
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want %d", rec.Code, http.StatusCreated)
-		}
-		if db.gotRoomName != "房間" {
-			t.Errorf("saved name = %q, want %q", db.gotRoomName, "房間")
-		}
-	})
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+			}
+			if db.gotRoomName != tc.room {
+				t.Errorf("saved name = %q, want %q", db.gotRoomName, tc.room)
+			}
+		})
+	}
 
 	t.Run("room limit returns 403", func(t *testing.T) {
 		h := NewRoomHandler(&fakeDBStore{createRoomErr: store.ErrRoomLimitReached})
