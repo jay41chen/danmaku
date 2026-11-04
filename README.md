@@ -18,6 +18,8 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 - **Real-time broadcast** over WebSocket across multiple servers (Redis Pub/Sub, one channel per room)
 - **Accounts**: register / login, JWT access tokens, rotating refresh tokens with theft detection
 - Anonymous viewers can watch; logging in over the open WebSocket upgrades the connection
+- **Viewer count** per room across servers: several tabs count as one person; viewers on a dead server
+  expire on their own
 - **Abuse protection**: rate limits per user, per IP and per username (login); timing-safe login against
   account enumeration; Unicode-aware input validation
 - **Operability**: structured JSON logs with request IDs (also across WebSocket), Prometheus metrics,
@@ -36,6 +38,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | Anyone could make Prometheus run out of memory by requesting random URLs | Metric labels are restricted to known values (route pattern, standard methods), with a test that runs requests through the real middleware chain | [0007](docs/design/0007-metrics-cardinality.md) |
 | Offset pagination repeats or skips rooms when the list changes, and gets slower the deeper you page | Keyset pagination on `(created_at, public_id)` with a partial index; fetch `limit+1` to detect the next page; an opaque page token that the server parses strictly (unknown fields, trailing data, version, id format → 400) | [0008](docs/design/0008-cursor-pagination.md) |
 | One 13-method store interface: every handler depended on methods it never called, test fakes compiled while missing methods, and handlers imported the Postgres package just for its errors | Each handler declares a small interface with only the methods it calls (Go interfaces are satisfied implicitly); domain errors live in a dependency-free `model`; Postgres and Redis code in separate packages, so only `main.go` knows the backends | [0009](docs/design/0009-consumer-side-interfaces.md) |
+| A viewer count across servers has to dedupe people with several tabs and survive a server dying without cleaning up | One Redis sorted set per room with a member per connection; entries expire unless renewed, using Redis time; a single worker per server reconciles the Hub against what it last wrote, so an old snapshot can't overwrite a new one; failed writes favor a brief undercount over a 30 s ghost | [0010](docs/design/0010-room-presence.md) |
 
 ## Architecture
 
@@ -94,8 +97,8 @@ main.go ──→ pgstore ─────→ model
 ## Status
 
 Started 2026-10-08. Done so far: real-time messaging across multiple servers, auth with refresh-token
-rotation, rooms with a paginated room list, rate limiting, observability, and the hardening described
-above. Next: presence (viewer counts), roles and bans, CI, then message replay and async persistence. See the
+rotation, rooms with a paginated room list, cross-server viewer counts, rate limiting, observability, and
+the hardening described above. Next: roles and bans, CI, then message replay and async persistence. See the
 [milestones in ROADMAP.md](ROADMAP.md#milestones2026-11-03-訂暫定) (in Chinese).
 
 ## Getting started

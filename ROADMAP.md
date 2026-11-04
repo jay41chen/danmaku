@@ -7,7 +7,7 @@
 | Milestone | 內容 | 估計（週） | 預計完成（快 ～ 慢） |
 |---|---|---|---|
 | M1 房間可瀏覽 ✅ | 房間列表（`GET /rooms` cursor 分頁、`/me/rooms`）+ 選房間 UI（2026-11-04 完成，[ADR 0008](docs/design/0008-cursor-pagination.md)） | 0.5 ～ 0.75 | 11/6 ～ 11/8 |
-| M2 房間有人氣 | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
+| M2 房間有人氣 ✅ | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前；2026-11-04 完成，[ADR 0010](docs/design/0010-room-presence.md)） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
 | M3 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/19 ～ 11/27 |
 | M4 最小 CI | GitHub Actions 跑 `go vet` / `go test` + multi-stage Dockerfile | 0.25 ～ 0.5 | 11/21 ～ 11/30 |
 | M5 不漏訊息 | replay + auto-reconnect（含 `after`）+ half-open watchdog + 證明它有效的 SLI metrics（漏訊息數、重連 / 補撈次數、送達延遲） | 1 ～ 1.5 | 11/28 ～ 12/11 |
@@ -163,7 +163,7 @@
   - 房間 soft delete（`deleted_at`）：已刪除的不算上限、連結回 404、所有讀取只走會過濾 `deleted_at IS NULL` 的共用 method。Known issue：可無限「建立 → 刪除」累積資料，靠 rate limit
     - 之後再做：房主看自己已刪除的房間要能分辨「已刪除」（例如之後的恢復功能），觀眾一律只看到 404
   - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
-  - 房間人數（presence，設計已定案，見 go-notes 3.27）：每個房間一個 Redis Sorted Set `room:R:members`，member = `conn_id:user_id`（綁連線不綁 user；訪客用唯一值，不能留空），score = 最後續期時間。每台 server 每 10 秒用 pipeline 續期自己的連線 + 對 key 下 `EXPIRE 30`；正常斷線直接刪。算人數：先刪 score < now − 30s → 讀出 member 依 user_id 去重；每台各自每 5 秒算一次推給自己的觀眾，算不到就沿用上一次的數字
+  - [x] 房間人數（M2，2026-11-04，[ADR 0010](docs/design/0010-room-presence.md)、go-notes 3.27）：每個房間一個 Redis Sorted Set `room:<public_id>:members`，member = `conn_id:user_id`（綁連線不綁 user；匿名 user_id = 0，依 conn_id 算），score = 最後續期時間（Redis `TIME`）。每台 server 一個 worker：Hub 有變動只寫 diff，每 10 秒全部續期 + `EXPIRE 30`，每 5 秒算人數推給自己的觀眾；算不到就不推，client 沿用上一次的數字
 - [ ] HTTP 錯誤格式統一（2026-11-03 從 W5 併入，排在 RBAC 前）：目前 `http.Error` 只回純文字，同一個 status 分不出原因（例如 403 可能是「被 ban」或「房間數到上限」）。改成 status + 機器判斷用的 `code` + 給人看的 `message`（WS 已經是 `{code, message}`；可參考 RFC 9457 Problem Details），所有 endpoint 一次換
 - [ ] Authorization（RBAC）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
