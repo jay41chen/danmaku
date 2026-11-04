@@ -53,6 +53,19 @@
 
 每台 server 只訂閱自己身上有人的房間：第一個人進房時 `SUBSCRIBE`，最後一個人離開後**等 30 秒**才 `UNSUBSCRIBE`（這段時間內有人回來就不用重新訂閱，避免冷門房人數在 0↔1 之間跳時一直送指令）。所以用 `redis-cli PUBSUB CHANNELS 'room:*'` 排查時，房間沒人後 channel 還會留約 30 秒，不是訂閱洩漏。
 
+### server 內部
+
+```
+main.go ──→ pgstore ─────→ model
+  │         redisstore
+  └───────→ handler ─────→ model
+```
+
+- `main.go` 是 composition root：只有它知道後端是 Postgres 和 Redis
+- `handler`（HTTP + WebSocket）自己定義需要的小 interface（`roomStore`、`wsPubSub`、`rateLimiter`…），`*pgstore.DBStore`、`*redisstore.RedisStore` 不用宣告就自動符合
+- `model` 放資料型別、domain error（`ErrRoomNotFound`…）和規則（`ValidPublicID`），只依賴標準函式庫。見 [ADR 0009](docs/design/0009-consumer-side-interfaces.md)
+- 其他 package：`ws`（連線 + hub，不含業務邏輯）、`auth`（密碼、JWT、refresh token）、`middleware`、`config`、`httpx`、`logging`、`prometheus`、`randx`
+
 ## 怎麼做的
 
 - 每個改動都走「設計 → 實作 → 獨立審查」；修正用 **mutation testing** 驗證：故意把 code 改壞，確認有 test 會 fail

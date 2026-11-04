@@ -59,6 +59,22 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 - Messages are written through HTTP; the WebSocket is used only for receiving, joining rooms and auth.
 - Verified with two local servers behind Nginx and with 2 replicas on Railway.
 
+### Inside the server
+
+```
+main.go ──→ pgstore ─────→ model
+  │         redisstore
+  └───────→ handler ─────→ model
+```
+
+- `main.go` is the composition root: it is the only place that knows the backends are Postgres and Redis.
+- `handler` (HTTP + WebSocket) defines the small interfaces it needs (`roomStore`, `wsPubSub`,
+  `rateLimiter`, …); `*pgstore.DBStore` and `*redisstore.RedisStore` satisfy them implicitly.
+- `model` holds data types, domain errors (`ErrRoomNotFound`, …) and rules (`ValidPublicID`), and imports
+  only the standard library. See [ADR 0009](docs/design/0009-consumer-side-interfaces.md).
+- Supporting packages: `ws` (connection + hub, no business logic), `auth` (passwords, JWT, refresh
+  tokens), `middleware`, `config`, `httpx`, `logging`, `prometheus`, `randx`.
+
 ## How it was built
 
 - Every change goes through design → implementation → independent review. Fixes are checked with
