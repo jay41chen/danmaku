@@ -15,7 +15,6 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 // 用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx（context key 沒有也不該 export setter）
@@ -65,13 +64,13 @@ func TestCreateMessage(t *testing.T) {
 		redis := &fakeRedis{}
 		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("哈哈"))
+		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("哈哈"))
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
 		}
-		if db.gotMsgRoomPublic != store.LegacyRoomPublicID {
-			t.Errorf("CreateMessage room = %q, want legacy %q", db.gotMsgRoomPublic, store.LegacyRoomPublicID)
+		if db.gotMsgRoomPublic != model.LegacyRoomPublicID {
+			t.Errorf("CreateMessage room = %q, want legacy %q", db.gotMsgRoomPublic, model.LegacyRoomPublicID)
 		}
 		if db.gotMsgUserID != userID || db.gotMsgContent != "哈哈" {
 			t.Errorf("CreateMessage got (%d, %q), want (%d, %q)", db.gotMsgUserID, db.gotMsgContent, userID, "哈哈")
@@ -88,8 +87,8 @@ func TestCreateMessage(t *testing.T) {
 		if len(redis.published) != 1 {
 			t.Fatalf("published %d messages, want 1", len(redis.published))
 		}
-		if redis.publishedRooms[0] != store.LegacyRoomPublicID {
-			t.Errorf("published room = %q, want %q", redis.publishedRooms[0], store.LegacyRoomPublicID)
+		if redis.publishedRooms[0] != model.LegacyRoomPublicID {
+			t.Errorf("published room = %q, want %q", redis.publishedRooms[0], model.LegacyRoomPublicID)
 		}
 		var env struct {
 			Type    string        `json:"type"`
@@ -112,7 +111,7 @@ func TestCreateMessage(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created(), onCreateMessage: cancel}
 		redis := &fakeRedis{}
 		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
-		publicID := store.LegacyRoomPublicID
+		publicID := model.LegacyRoomPublicID
 		req := httptest.NewRequest(http.MethodPost, "/rooms/"+publicID+"/messages", strings.NewReader(contentBody("哈哈"))).WithContext(base)
 		req.SetPathValue("public_id", publicID)
 
@@ -166,7 +165,7 @@ func TestCreateMessage(t *testing.T) {
 			redis := &fakeRedis{}
 			h := NewMessageHandler(db, redis, &fakeRateLimiter{})
 
-			rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, tc.body)
+			rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, tc.body)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -196,7 +195,7 @@ func TestCreateMessage(t *testing.T) {
 			db := &fakeDBStore{createdMsg: created()}
 			h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-			rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody(tc.content))
+			rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody(tc.content))
 
 			if rec.Code != http.StatusCreated {
 				t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
@@ -213,7 +212,7 @@ func TestCreateMessage(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created()}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody(content))
+		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody(content))
 
 		if rec.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
@@ -228,7 +227,7 @@ func TestCreateMessage(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created()}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("哈 "))
+		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("哈 "))
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusCreated)
@@ -239,11 +238,11 @@ func TestCreateMessage(t *testing.T) {
 	})
 
 	t.Run("deleted user returns same 401 as RequireAuth", func(t *testing.T) {
-		db := &fakeDBStore{createMsgErr: store.ErrMessageUserNotFound}
+		db := &fakeDBStore{createMsgErr: model.ErrMessageUserNotFound}
 		redis := &fakeRedis{}
 		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
 		// 期望值直接用 middleware 的 helper 產生：兩邊永遠是同一份
 		want := httptest.NewRecorder()
@@ -266,7 +265,7 @@ func TestCreateMessage(t *testing.T) {
 		redis := &fakeRedis{}
 		h := NewMessageHandler(&fakeDBStore{createMsgErr: errors.New("db down")}, redis, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -280,7 +279,7 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("publish error still returns 201", func(t *testing.T) {
 		h := NewMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
 		if rec.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
@@ -364,7 +363,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		}
 	})
 	t.Run("room not found returns 404", func(t *testing.T) {
-		db := &fakeDBStore{getRoomErr: store.ErrRoomNotFound}
+		db := &fakeDBStore{getRoomErr: model.ErrRoomNotFound}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serve(h, "nope")
@@ -435,7 +434,7 @@ func TestHandleCreateRoomMessage(t *testing.T) {
 	})
 	t.Run("room not found returns 404 and does not publish", func(t *testing.T) {
 		redis := &fakeRedis{}
-		h := NewMessageHandler(&fakeDBStore{createMsgErr: store.ErrRoomNotFound}, redis, &fakeRateLimiter{})
+		h := NewMessageHandler(&fakeDBStore{createMsgErr: model.ErrRoomNotFound}, redis, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, "nope", contentBody("hi"))
 
@@ -472,7 +471,7 @@ func TestCreateMessageRateLimit(t *testing.T) {
 			db := &fakeDBStore{}
 			h := NewMessageHandler(db, &fakeRedis{}, tc.limiter)
 
-			rec := serveCreateRoomMessage(t, h, userID, store.LegacyRoomPublicID, contentBody("hi"))
+			rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)

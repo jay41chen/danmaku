@@ -13,7 +13,6 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 // 同 serveCreateRoomMessage：用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx
@@ -160,7 +159,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	}
 
 	t.Run("room limit returns 403", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{createRoomErr: store.ErrRoomLimitReached})
+		h := NewRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomLimitReached})
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody("房間"))
 
@@ -170,7 +169,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	})
 
 	t.Run("deleted owner returns same 401 as RequireAuth", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{createRoomErr: store.ErrRoomOwnerNotFound})
+		h := NewRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomOwnerNotFound})
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody("房間"))
 
@@ -251,7 +250,7 @@ func TestHandleGetRoom(t *testing.T) {
 	})
 
 	t.Run("not found returns 404", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{getRoomErr: store.ErrRoomNotFound})
+		h := NewRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound})
 
 		rec := serveGetRoom(h, "nope")
 
@@ -302,7 +301,7 @@ func serveListRooms(t *testing.T, h *RoomHandler, mine bool, userID int64, rawQu
 func TestHandleListRooms(t *testing.T) {
 	const userID = int64(7)
 	cursorTime := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
-	cursor := store.RoomCursor{CreatedAt: cursorTime, PublicID: "abcDEF12340"}
+	cursor := model.RoomCursor{CreatedAt: cursorTime, PublicID: "abcDEF12340"}
 
 	// 兩個 endpoint 的共同行為都跑一次
 	for _, mine := range []bool{false, true} {
@@ -318,7 +317,7 @@ func TestHandleListRooms(t *testing.T) {
 				}{
 					{"", defaultRoomListLimit},
 					{"limit=1", 1},
-					{"limit=" + strconv.Itoa(store.MaxRoomListLimit), store.MaxRoomListLimit},
+					{"limit=" + strconv.Itoa(model.MaxRoomListLimit), model.MaxRoomListLimit},
 				}
 				for _, tc := range cases {
 					db := &fakeDBStore{}
@@ -333,7 +332,7 @@ func TestHandleListRooms(t *testing.T) {
 			})
 
 			t.Run("invalid limit returns 400 without hitting store", func(t *testing.T) {
-				for _, v := range []string{"", "abc", "1.5", "0", "-1", strconv.Itoa(store.MaxRoomListLimit + 1)} {
+				for _, v := range []string{"", "abc", "1.5", "0", "-1", strconv.Itoa(model.MaxRoomListLimit + 1)} {
 					db := &fakeDBStore{}
 					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "limit="+v)
 					if rec.Code != http.StatusBadRequest {

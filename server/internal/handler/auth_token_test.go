@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
-	"github.com/jay41chen/danmaku/server/internal/store"
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 func TestHandleRefresh(t *testing.T) {
@@ -27,11 +27,11 @@ func TestHandleRefresh(t *testing.T) {
 	}{
 		{"broken json", http.MethodPost, `{"refresh_token":`, nil, http.StatusBadRequest},
 		{"missing token", http.MethodPost, `{}`, nil, http.StatusBadRequest},
-		{"invalid token", http.MethodPost, validBody, store.ErrRefreshTokenInvalid, http.StatusUnauthorized},
+		{"invalid token", http.MethodPost, validBody, model.ErrRefreshTokenInvalid, http.StatusUnauthorized},
 		// duplicate use 對 client 也是 401：不透露「這個 token 曾經有效」
-		{"duplicate use token", http.MethodPost, validBody, &store.RefreshTokenDuplicateUseError{UserID: 7}, http.StatusUnauthorized},
+		{"duplicate use token", http.MethodPost, validBody, &model.RefreshTokenDuplicateUseError{UserID: 7}, http.StatusUnauthorized},
 		// 被撤銷全部之前發的 token：對 client 跟 invalid 一樣是 401（handler 另外記 Warn）
-		{"revoked token", http.MethodPost, validBody, &store.RefreshTokenRevokedError{UserID: 7}, http.StatusUnauthorized},
+		{"revoked token", http.MethodPost, validBody, &model.RefreshTokenRevokedError{UserID: 7}, http.StatusUnauthorized},
 		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
@@ -105,9 +105,9 @@ func TestHandleRefreshLogging(t *testing.T) {
 		rotateErr error
 		wantMsg   string // 空字串 = 不應該有 WARN
 	}{
-		{"revoked token", &store.RefreshTokenRevokedError{UserID: 7}, "refresh token issued before credentials revoked was used"},
-		{"duplicate use token", &store.RefreshTokenDuplicateUseError{UserID: 7}, "refresh token duplicate use detected, revoked all tokens of user"},
-		{"invalid token", store.ErrRefreshTokenInvalid, ""},
+		{"revoked token", &model.RefreshTokenRevokedError{UserID: 7}, "refresh token issued before credentials revoked was used"},
+		{"duplicate use token", &model.RefreshTokenDuplicateUseError{UserID: 7}, "refresh token duplicate use detected, revoked all tokens of user"},
+		{"invalid token", model.ErrRefreshTokenInvalid, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

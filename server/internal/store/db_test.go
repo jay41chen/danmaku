@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// migration 000010 建的 legacy room（public_id = LegacyRoomPublicID）固定是 id 1，newTestDBStore 清資料時也會保留它
+// migration 000010 建的 legacy room（public_id = model.LegacyRoomPublicID）固定是 id 1，newTestDBStore 清資料時也會保留它
 const legacyRoomID int64 = 1
 
 func newTestDBStore(t *testing.T) *DBStore {

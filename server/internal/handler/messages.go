@@ -70,7 +70,7 @@ func (this *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http
 // 只會多回一次剛刪房間的歷史訊息，無害
 func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, roomPublicID string) {
 	room, err := this.db.GetRoomByPublicID(r.Context(), roomPublicID)
-	if errors.Is(err, store.ErrRoomNotFound) {
+	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404（跟 HandleGetRoom 一樣）
 		http.Error(w, "room not found", http.StatusNotFound)
 		return
@@ -129,12 +129,12 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	}
 
 	msg, err := this.db.CreateMessage(r.Context(), roomPublicID, userID, req.Content)
-	if errors.Is(err, store.ErrRoomNotFound) {
+	if errors.Is(err, model.ErrRoomNotFound) {
 		// 房間不存在或已刪除（兩者都不讓外人分辨）
 		http.Error(w, "room not found", http.StatusNotFound)
 		return
 	}
-	if errors.Is(err, store.ErrMessageUserNotFound) {
+	if errors.Is(err, model.ErrMessageUserNotFound) {
 		// user 已刪除但 access token 還沒過期：回跟 RequireAuth 一模一樣的 401
 		// client 會去 /refresh → refresh token 已經被 CASCADE 刪掉 → 401 → 跳登入
 		httpx.WriteUnauthorized(w)

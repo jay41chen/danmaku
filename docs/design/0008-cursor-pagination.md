@@ -39,7 +39,7 @@ LIMIT $limit + 1
   instead, the next query's `<` would skip it, and that room would never be shown. `count(*)` would be a
   second query (racing with the first one) that scans every live row. Postgres keeps no stored row count,
   because under MVCC different transactions see different counts.
-- `limit` defaults to 20 and is capped at 50 (`store.MaxRoomListLimit`, shared by handler and store). The
+- `limit` defaults to 20 and is capped at 50 (`model.MaxRoomListLimit`, shared by handler and store). The
   store also rejects `limit <= 0`: `rooms[limit-1]` would panic, and a negative `LIMIT` is a Postgres error.
 
 ### The page token
@@ -57,7 +57,7 @@ The response carries `next_page_token`, which the client sends back as `?page_to
   - **trailing data after the JSON object**
   - the wrong `v`
   - a zero `created_at`
-  - a `public_id` that isn't the format the store generates (`store.ValidPublicID`: 8 random bytes in
+  - a `public_id` that isn't the format the store generates (`model.ValidPublicID`: 8 random bytes in
     base64url = 11 characters)
 
 ## The traps

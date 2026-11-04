@@ -3,6 +3,8 @@ package store
 import (
 	"errors"
 	"testing"
+
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 // 需要真的 Postgres：沒設 TEST_DATABASE_URL 就 skip（見 newTestDBStore）
@@ -40,8 +42,8 @@ func TestCreateUser(t *testing.T) {
 
 			_, err := s.CreateUser(t.Context(), tc.username, "fake-hash")
 
-			if !errors.Is(err, ErrUsernameTaken) {
-				t.Errorf("CreateUser(%q) after %q error = %v, want ErrUsernameTaken", tc.username, tc.existing, err)
+			if !errors.Is(err, model.ErrUsernameTaken) {
+				t.Errorf("CreateUser(%q) after %q error = %v, want model.ErrUsernameTaken", tc.username, tc.existing, err)
 			}
 		})
 	}
@@ -76,13 +78,13 @@ func TestGetUser(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown username returns ErrUserNotFound", func(t *testing.T) {
+	t.Run("unknown username returns model.ErrUserNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
 		_, err := s.GetUser(t.Context(), "nobody")
 
-		if !errors.Is(err, ErrUserNotFound) {
-			t.Errorf("GetUser(nobody) error = %v, want ErrUserNotFound", err)
+		if !errors.Is(err, model.ErrUserNotFound) {
+			t.Errorf("GetUser(nobody) error = %v, want model.ErrUserNotFound", err)
 		}
 	})
 }
@@ -112,13 +114,13 @@ func TestGetUserByID(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown id returns ErrUserNotFound", func(t *testing.T) {
+	t.Run("unknown id returns model.ErrUserNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
 		_, err := s.GetUserByID(t.Context(), 999999)
 
-		if !errors.Is(err, ErrUserNotFound) {
-			t.Errorf("GetUserByID(999999) error = %v, want ErrUserNotFound", err)
+		if !errors.Is(err, model.ErrUserNotFound) {
+			t.Errorf("GetUserByID(999999) error = %v, want model.ErrUserNotFound", err)
 		}
 	})
 }

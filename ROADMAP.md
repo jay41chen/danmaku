@@ -148,7 +148,7 @@
     - Known issue（低優先）：`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
   - [x] 列出房間的 API（M1 後端，2026-11-04）：`GET /rooms`（公開）、`GET /me/rooms`（要登入，`no-store`）
     - Cursor pagination（keyset）：`ORDER BY created_at DESC, public_id DESC`，`public_id` 當 tiebreaker；撈 `limit+1` 判斷有沒有下一頁，cursor = 最後一筆回傳的；migration 000013 partial index `rooms(created_at, public_id) WHERE deleted_at IS NULL`（見 go-notes 3.37）
-    - Page token：base64url 的 JSON `{v, created_at, public_id}`，對 client opaque；decode 嚴格（不認識的欄位、後面多接資料、版本、零值時間、public_id 格式 → `400 invalid cursor`）。`limit` 預設 20、最多 50（`store.MaxRoomListLimit`）
+    - Page token：base64url 的 JSON `{v, created_at, public_id}`，對 client opaque；decode 嚴格（不認識的欄位、後面多接資料、版本、零值時間、public_id 格式 → `400 invalid cursor`）。`limit` 預設 20、最多 50（`model.MaxRoomListLimit`）
     - `GET /me/rooms` 也走同一套分頁（雖然未刪除的最多 3 筆）：之後列出已刪除房間（恢復功能）時不用改格式
     - Viewer 數排序 → M2（presence 之後）
   - [x] 選房間的 UI（M1 前端，2026-11-04）：「所有房間」+ 登入後的「我的房間」，每個房間是 `?room=<public_id>` 連結（整頁重載，沿用原本換房方式）；「載入更多」用 `next_page_token`；房名用 `<bdi>` + overflow 隔離

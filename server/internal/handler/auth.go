@@ -152,7 +152,7 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 
 	id, err := this.db.CreateUser(r.Context(), req.Username, hash)
 	// 先比對已知的 sentinel，剩下的才是真的系統錯誤
-	if errors.Is(err, store.ErrUsernameTaken) {
+	if errors.Is(err, model.ErrUsernameTaken) {
 		http.Error(w, "username already taken", http.StatusConflict)
 		return
 	}
@@ -196,7 +196,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// 查詢user在不在
 	user, err := this.db.GetUser(r.Context(), req.Username)
-	if errors.Is(err, store.ErrUserNotFound) {
+	if errors.Is(err, model.ErrUserNotFound) {
 		// 結果不重要，目的是花跟「密碼錯」一樣的時間
 		// 借以避免讓攻擊者知道錯誤
 		_, _ = this.checkPassword(dummyHash, req.Password)
@@ -274,7 +274,7 @@ func (this *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := this.db.GetUserByID(r.Context(), userID)
-	if errors.Is(err, store.ErrUserNotFound) {
+	if errors.Is(err, model.ErrUserNotFound) {
 		// user 已刪除但 access token 還沒過期：跟 RequireAuth 同一個 401，
 		// client 會去 /refresh → refresh token 已被 CASCADE 刪除 → 401 → 登出
 		httpx.WriteUnauthorized(w)

@@ -5,13 +5,11 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/randx"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -43,17 +41,17 @@ func TestGetRoomByPublicID(t *testing.T) {
 		}
 	})
 
-	t.Run("not found returns ErrRoomNotFound", func(t *testing.T) {
+	t.Run("not found returns model.ErrRoomNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
 		_, err := s.GetRoomByPublicID(t.Context(), "doesnotexist")
 
-		if !errors.Is(err, ErrRoomNotFound) {
-			t.Errorf("error = %v, want ErrRoomNotFound", err)
+		if !errors.Is(err, model.ErrRoomNotFound) {
+			t.Errorf("error = %v, want model.ErrRoomNotFound", err)
 		}
 	})
 
-	t.Run("soft-deleted returns ErrRoomNotFound", func(t *testing.T) {
+	t.Run("soft-deleted returns model.ErrRoomNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 		ownerID, err := s.CreateUser(t.Context(), "jay", "fake-hash")
 		if err != nil {
@@ -66,8 +64,8 @@ func TestGetRoomByPublicID(t *testing.T) {
 
 		_, err = s.GetRoomByPublicID(t.Context(), "room0000002")
 
-		if !errors.Is(err, ErrRoomNotFound) {
-			t.Errorf("error = %v, want ErrRoomNotFound", err)
+		if !errors.Is(err, model.ErrRoomNotFound) {
+			t.Errorf("error = %v, want model.ErrRoomNotFound", err)
 		}
 	})
 }
@@ -110,9 +108,13 @@ func TestCreateRoom(t *testing.T) {
 		if !regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`).MatchString(room.PublicID) {
 			t.Errorf("public id = %q, want 11 base64url chars", room.PublicID)
 		}
+		// 產生器和檢查器要對得上：store 產生的 public_id 一定要通過 model.ValidPublicID（page token 等地方用它擋格式）
+		if !model.ValidPublicID(room.PublicID) {
+			t.Errorf("model.ValidPublicID(%q) = false, want true", room.PublicID)
+		}
 	})
 
-	t.Run("4th room returns ErrRoomLimitReached", func(t *testing.T) {
+	t.Run("4th room returns model.ErrRoomLimitReached", func(t *testing.T) {
 		s := newTestDBStore(t)
 		ownerID, err := s.CreateUser(t.Context(), "jay", "fake-hash")
 		if err != nil {
@@ -126,8 +128,8 @@ func TestCreateRoom(t *testing.T) {
 
 		_, err = s.CreateRoom(t.Context(), ownerID, "x")
 
-		if !errors.Is(err, ErrRoomLimitReached) {
-			t.Errorf("error = %v, want ErrRoomLimitReached", err)
+		if !errors.Is(err, model.ErrRoomLimitReached) {
+			t.Errorf("error = %v, want model.ErrRoomLimitReached", err)
 		}
 	})
 
@@ -154,13 +156,13 @@ func TestCreateRoom(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent owner returns ErrRoomOwnerNotFound", func(t *testing.T) {
+	t.Run("nonexistent owner returns model.ErrRoomOwnerNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
 		_, err := s.CreateRoom(t.Context(), 999999999, "x")
 
-		if !errors.Is(err, ErrRoomOwnerNotFound) {
-			t.Errorf("error = %v, want ErrRoomOwnerNotFound", err)
+		if !errors.Is(err, model.ErrRoomOwnerNotFound) {
+			t.Errorf("error = %v, want model.ErrRoomOwnerNotFound", err)
 		}
 	})
 
@@ -188,7 +190,7 @@ func TestCreateRoom(t *testing.T) {
 			switch {
 			case err == nil:
 				ok++
-			case errors.Is(err, ErrRoomLimitReached):
+			case errors.Is(err, model.ErrRoomLimitReached):
 				limited++
 			default:
 				t.Errorf("unexpected error: %v", err)
@@ -225,7 +227,7 @@ func TestRoomsMigration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("setup CreateUser error = %v", err)
 		}
-		msg, err := s.CreateMessage(t.Context(), LegacyRoomPublicID, userID, "hi")
+		msg, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, userID, "hi")
 		if err != nil {
 			t.Fatalf("setup CreateMessage error = %v", err)
 		}
@@ -322,7 +324,7 @@ func TestGetRoomLists(t *testing.T) {
 
 	t.Run("all owners with cursor", func(t *testing.T) {
 		s, _, _, all := setupTwoOwners(t)
-		after := &RoomCursor{CreatedAt: roomListBase.Add(-2 * time.Second), PublicID: all[2]}
+		after := &model.RoomCursor{CreatedAt: roomListBase.Add(-2 * time.Second), PublicID: all[2]}
 
 		rooms, cursor, err := s.GetRoomLists(t.Context(), nil, after, 10)
 
@@ -330,7 +332,7 @@ func TestGetRoomLists(t *testing.T) {
 			t.Fatalf("GetRoomLists error = %v, want nil", err)
 		}
 		// 剩下 room3、room4，最後是 legacy 房間
-		want := []string{all[3], all[4], LegacyRoomPublicID}
+		want := []string{all[3], all[4], model.LegacyRoomPublicID}
 		if got := roomIDs(rooms); !slices.Equal(got, want) {
 			t.Errorf("ids = %v, want %v", got, want)
 		}
@@ -363,7 +365,7 @@ func TestGetRoomLists(t *testing.T) {
 
 	t.Run("owner only with cursor", func(t *testing.T) {
 		s, a, _, all := setupTwoOwners(t)
-		after := &RoomCursor{CreatedAt: roomListBase.Add(-2 * time.Second), PublicID: all[2]}
+		after := &model.RoomCursor{CreatedAt: roomListBase.Add(-2 * time.Second), PublicID: all[2]}
 
 		rooms, cursor, err := s.GetRoomLists(t.Context(), &a, after, 10)
 
@@ -415,7 +417,7 @@ func TestGetRoomLists(t *testing.T) {
 		want := insertListRooms(t, s, owner, 7)
 
 		var got []string
-		var after *RoomCursor
+		var after *model.RoomCursor
 		for range 10 { // 防止無窮迴圈
 			rooms, cursor, err := s.GetRoomLists(t.Context(), &owner, after, 3)
 			if err != nil {
@@ -453,7 +455,7 @@ func TestGetRoomLists(t *testing.T) {
 		if err != nil {
 			t.Fatalf("all list error = %v", err)
 		}
-		if want := []string{"room0000001", "room0000003", LegacyRoomPublicID}; !slices.Equal(roomIDs(all), want) {
+		if want := []string{"room0000001", "room0000003", model.LegacyRoomPublicID}; !slices.Equal(roomIDs(all), want) {
 			t.Errorf("all ids = %v, want %v", roomIDs(all), want)
 		}
 	})
@@ -466,7 +468,7 @@ func TestGetRoomLists(t *testing.T) {
 		insertListRoom(t, s, "room0000001", owner, roomListBase, nil)
 		insertListRoom(t, s, "room0000002", owner, roomListBase.Add(-time.Second), &deleted)
 		insertListRoom(t, s, "room0000003", owner, roomListBase.Add(-2*time.Second), nil)
-		after := &RoomCursor{CreatedAt: roomListBase, PublicID: "room0000001"}
+		after := &model.RoomCursor{CreatedAt: roomListBase, PublicID: "room0000001"}
 
 		mine, _, err := s.GetRoomLists(t.Context(), &owner, after, 10)
 		if err != nil {
@@ -480,7 +482,7 @@ func TestGetRoomLists(t *testing.T) {
 		if err != nil {
 			t.Fatalf("all list error = %v", err)
 		}
-		if want := []string{"room0000003", LegacyRoomPublicID}; !slices.Equal(roomIDs(all), want) {
+		if want := []string{"room0000003", model.LegacyRoomPublicID}; !slices.Equal(roomIDs(all), want) {
 			t.Errorf("all ids = %v, want %v", roomIDs(all), want)
 		}
 	})
@@ -493,7 +495,7 @@ func TestGetRoomLists(t *testing.T) {
 			want      []string
 		}{
 			{"owner only", false, []string{"ddddddddddd", "ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa"}},
-			{"all owners", true, []string{"ddddddddddd", "ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa", LegacyRoomPublicID}},
+			{"all owners", true, []string{"ddddddddddd", "ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa", model.LegacyRoomPublicID}},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -509,7 +511,7 @@ func TestGetRoomLists(t *testing.T) {
 				}
 
 				var got []string
-				var after *RoomCursor
+				var after *model.RoomCursor
 				for page := 0; page < 10; page++ { // 防止無窮迴圈
 					rooms, cursor, err := s.GetRoomLists(t.Context(), userID, after, 2)
 					if err != nil {
@@ -590,18 +592,18 @@ func TestGetRoomLists(t *testing.T) {
 
 	t.Run("invalid limit", func(t *testing.T) {
 		s := newTestDBStore(t)
-		for _, limit := range []int{0, -1, MaxRoomListLimit + 1} {
+		for _, limit := range []int{0, -1, model.MaxRoomListLimit + 1} {
 			rooms, cursor, err := s.GetRoomLists(t.Context(), nil, nil, limit)
-			if !errors.Is(err, ErrInvalidLimit) {
-				t.Errorf("limit %d: error = %v, want ErrInvalidLimit", limit, err)
+			if !errors.Is(err, model.ErrInvalidLimit) {
+				t.Errorf("limit %d: error = %v, want model.ErrInvalidLimit", limit, err)
 			}
 			if rooms != nil || cursor != nil {
 				t.Errorf("limit %d: rooms = %v, cursor = %v, want nil", limit, rooms, cursor)
 			}
 		}
 
-		if _, _, err := s.GetRoomLists(t.Context(), nil, nil, MaxRoomListLimit); err != nil {
-			t.Errorf("limit %d: error = %v, want nil", MaxRoomListLimit, err)
+		if _, _, err := s.GetRoomLists(t.Context(), nil, nil, model.MaxRoomListLimit); err != nil {
+			t.Errorf("limit %d: error = %v, want nil", model.MaxRoomListLimit, err)
 		}
 	})
 
@@ -621,30 +623,4 @@ func TestGetRoomLists(t *testing.T) {
 			t.Errorf("cursor = %+v, want CreatedAt %v", cursor, created)
 		}
 	})
-}
-
-func TestValidPublicID(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"generated id", randx.URLText(publicIDBytes), true},
-		{"legacy id", LegacyRoomPublicID, true},
-		{"empty", "", false},
-		{"10 chars", strings.Repeat("a", 10), false},
-		{"12 chars", strings.Repeat("a", 12), false},
-		{"contains =", "abcdefghij=", false},
-		{"contains +", "abcdefghij+", false},
-		{"contains /", "abcdefghij/", false},
-		{"contains space", "abcdefghij ", false},
-		{"11 bytes with non-ascii", "abcdefgh中", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ValidPublicID(tt.in); got != tt.want {
-				t.Errorf("ValidPublicID(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-		})
-	}
 }

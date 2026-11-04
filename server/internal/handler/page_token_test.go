@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jay41chen/danmaku/server/internal/store"
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 func rawToken(s string) string {
@@ -16,9 +16,9 @@ func TestPageTokenRoundTrip(t *testing.T) {
 	zone := time.FixedZone("UTC+8", 8*3600)
 	created := time.Date(2030, 1, 2, 3, 4, 5, 123456000, zone)
 
-	for _, publicID := range []string{"abcdefghijk", store.LegacyRoomPublicID} {
+	for _, publicID := range []string{"abcdefghijk", model.LegacyRoomPublicID} {
 		t.Run(publicID, func(t *testing.T) {
-			token, err := encodePageToken(store.RoomCursor{CreatedAt: created, PublicID: publicID})
+			token, err := encodePageToken(model.RoomCursor{CreatedAt: created, PublicID: publicID})
 			if err != nil {
 				t.Fatalf("encodePageToken error = %v, want nil", err)
 			}
@@ -89,7 +89,7 @@ func TestDecodePageToken(t *testing.T) {
 			if err != errInvalidPageToken {
 				t.Errorf("error = %v, want errInvalidPageToken", err)
 			}
-			if got != (store.RoomCursor{}) {
+			if got != (model.RoomCursor{}) {
 				t.Errorf("cursor = %+v, want zero value", got)
 			}
 		})

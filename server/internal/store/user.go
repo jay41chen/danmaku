@@ -10,11 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var (
-	ErrUsernameTaken = errors.New("username already taken")
-	ErrUserNotFound  = errors.New("user not found")
-)
-
 func (this *DBStore) CreateUser(ctx context.Context, username string, passwordHash string) (int64, error) {
 	var id int64
 	// 用 Exec 還是 Query的取捨：=> 是否需要 DB 回傳資料列。
@@ -44,7 +39,7 @@ func (this *DBStore) CreateUser(ctx context.Context, username string, passwordHa
 		//
 		// 所以要透過`code`和`constraint name`同時比對才能確定正確的錯誤
 		if errors.As(err, &pgErr) && (pgErr.Code == "23505" && pgErr.ConstraintName == "users_username_lower_key") {
-			return 0, ErrUsernameTaken
+			return 0, model.ErrUsernameTaken
 		}
 		return 0, err
 	}
@@ -61,7 +56,7 @@ func (this *DBStore) GetUser(ctx context.Context, username string) (model.User, 
 		`, username).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return user, ErrUserNotFound
+			return user, model.ErrUserNotFound
 		}
 		return user, err
 	}
@@ -79,7 +74,7 @@ func (this *DBStore) GetUserByID(ctx context.Context, id int64) (model.User, err
 		`, id).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return user, ErrUserNotFound
+			return user, model.ErrUserNotFound
 		}
 		return user, err
 	}
@@ -87,7 +82,7 @@ func (this *DBStore) GetUserByID(ctx context.Context, id int64) (model.User, err
 }
 
 // 一次做三件事：
-//  1. 確認 user 還在 → 查不到回 ErrUserNotFound
+//  1. 確認 user 還在 → 查不到回 model.ErrUserNotFound
 //  2. 鎖住這個 user 的那一列直到 transaction 結束：同一個 user 的請求在這裡排隊
 //     （CreateRoom 的房間數上限、RotateRefreshToken 的撤銷判斷）；不同 user 不會互相卡住
 //  3. 拿 username
@@ -105,7 +100,7 @@ func lockUser(ctx context.Context, tx pgx.Tx, userID int64) (string, error) {
 		`, userID).Scan(&username)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrUserNotFound
+			return "", model.ErrUserNotFound
 		}
 		return "", err
 	}

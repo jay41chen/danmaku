@@ -20,7 +20,6 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 // 讀出 gauge 目前的值（/metrics 輸出背後就是這個 dto.Metric 結構）
@@ -109,7 +108,7 @@ func (f *wsFakeDB) GetUserByID(ctx context.Context, id int64) (model.User, error
 	}
 	name, ok := f.users[id]
 	if !ok {
-		return model.User{}, store.ErrUserNotFound
+		return model.User{}, model.ErrUserNotFound
 	}
 	return model.User{ID: id, Username: name}, nil
 }
@@ -120,7 +119,7 @@ func (f *wsFakeDB) GetRoomByPublicID(ctx context.Context, publicID string) (mode
 		return model.Room{}, f.roomErr
 	}
 	if !f.rooms[publicID] {
-		return model.Room{}, store.ErrRoomNotFound
+		return model.Room{}, model.ErrRoomNotFound
 	}
 	return model.Room{PublicID: publicID}, nil
 }

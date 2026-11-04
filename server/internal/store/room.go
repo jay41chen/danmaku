@@ -2,10 +2,8 @@ package store
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/randx"
@@ -13,39 +11,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var (
-	// 查不到、或已 soft delete：對外都當成沒這個房間
-	ErrRoomNotFound = errors.New("room not found")
-	// 這個 user 的未刪除房間已達上限
-	ErrRoomLimitReached = errors.New("room limit reached")
-	// owner 已被刪除，但他的 access token 還沒過期（同 ErrMessageUserNotFound 的情況）
-	ErrRoomOwnerNotFound = errors.New("room owner not found")
-	// 房間列表的 limit 不在 1..MaxRoomListLimit：handler 應該先擋掉，走到這裡代表 caller 有 bug
-	ErrInvalidLimit = errors.New("invalid limit")
-)
-
 const (
-	// migration 000010 建的房間，裝房間功能之前的舊訊息；已移除的 /messages endpoints 以前讀寫的就是它，
-	// 現在是 client 的預設房間（client/src/config.ts），test 也會用
-	LegacyRoomPublicID = "legacy00000"
-
 	// 每個 user 最多同時擁有的（未刪除）房間數
 	maxRoomsPerUser = 3
-	// public_id 用幾個隨機 bytes 產生（8 bytes 編成 base64url 是 11 字元）
-	publicIDBytes = 8
 	// public_id 撞號時最多試幾次：64 bits 下撞一次已經極罕見，連撞 3 次幾乎不可能，真的發生就當成錯誤
 	maxPublicIDAttempts = 3
-	// 房間列表一頁最多幾筆；handler 解析 query 的 limit 時也用這個，上限只定義在這裡
-	MaxRoomListLimit = 50
 )
-
-// 房間列表的翻頁位置：上一頁「最後一筆回傳的房間」的排序鍵
-// 只放排序用得到的欄位（created_at, public_id），跟 index 的欄位一一對應
-// （Kotlin 類比：data class RoomCursor(val createdAt: Instant, val publicId: String)）
-type RoomCursor struct {
-	CreatedAt time.Time
-	PublicID  string
-}
 
 // 所有「讀房間」的路徑都要經過這類 method，deleted_at IS NULL 的條件才不會被漏掉
 func (this *DBStore) GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error) {
@@ -61,7 +32,7 @@ func (this *DBStore) GetRoomByPublicID(ctx context.Context, publicID string) (mo
 	).Scan(&room.ID, &room.PublicID, &room.OwnerID, &room.OwnerUsername, &room.Name, &room.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Room{}, ErrRoomNotFound
+			return model.Room{}, model.ErrRoomNotFound
 		}
 		return model.Room{}, err
 	}
@@ -98,7 +69,7 @@ func insertRoom(ctx context.Context, tx pgx.Tx, ownerID int64, name string) (mod
 		// base64 是每 6 bits 直接對應一個字元，沒有取模，所以沒有 modulo bias；
 		// 8 bytes = 64 bits 的熵，編碼後 11 字元（64 = 10×6 + 4，最後一個字元只帶 4 bits），跟 YouTube 的 video id 一樣
 		// 每圈都產生新的：撞號時 continue 才會換一個 id 重試
-		publicID := randx.URLText(publicIDBytes)
+		publicID := randx.URLText(model.PublicIDBytes)
 
 		var room model.Room
 		// ON CONFLICT DO NOTHING：撞號時不報錯、RETURNING 回 0 列 → Scan 得到 pgx.ErrNoRows（下面靠這個判斷撞號）
@@ -133,8 +104,8 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string)
 	username, err := lockUser(ctx, tx, ownerID)
 	if err != nil {
 		// user 已刪除、但 access token 還沒過期：對 room 這一層來說是「owner 不存在」
-		if errors.Is(err, ErrUserNotFound) {
-			return model.Room{}, ErrRoomOwnerNotFound
+		if errors.Is(err, model.ErrUserNotFound) {
+			return model.Room{}, model.ErrRoomOwnerNotFound
 		}
 		return model.Room{}, err
 	}
@@ -143,7 +114,7 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string)
 		return model.Room{}, err
 	}
 	if count >= maxRoomsPerUser {
-		return model.Room{}, ErrRoomLimitReached
+		return model.Room{}, model.ErrRoomLimitReached
 	}
 	room, err := insertRoom(ctx, tx, ownerID, name)
 	if err != nil {
@@ -162,16 +133,16 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string)
 // after == nil → 第一頁；不是 nil → 從 after 之後開始
 // 回傳的 cursor == nil 代表沒有下一頁
 // 回傳的 Room 沒有 OwnerUsername（沒 JOIN users）：handler 要用只含 room_name / public_id 的 DTO 回傳
-func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *RoomCursor, limit int) ([]model.Room, *RoomCursor, error) {
+func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error) {
 	// handler 應該已經驗證過；store 再擋一次：limit = 0 時下面的 rooms[limit-1] 會 panic，
 	// 負數會讓 SQL 變成 LIMIT 負數，Postgres 直接報錯
-	if limit > MaxRoomListLimit || limit <= 0 {
-		return nil, nil, ErrInvalidLimit
+	if limit > model.MaxRoomListLimit || limit <= 0 {
+		return nil, nil, model.ErrInvalidLimit
 	}
 	var (
 		rooms  []model.Room
 		err    error
-		cursor *RoomCursor
+		cursor *model.RoomCursor
 	)
 
 	// 列出未刪除的房間，排序 created_at DESC, public_id DESC
@@ -195,7 +166,7 @@ func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *Roo
 		// 再去拿現在rooms的最後一筆
 		// 不是多拿的那筆：下一頁的條件是 < cursor，用多拿的那筆的話它自己會被跳過、永遠不會出現
 		r := rooms[limit-1]
-		cursor = &RoomCursor{CreatedAt: r.CreatedAt, PublicID: r.PublicID}
+		cursor = &model.RoomCursor{CreatedAt: r.CreatedAt, PublicID: r.PublicID}
 	}
 
 	return rooms, cursor, nil
@@ -203,7 +174,7 @@ func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *Roo
 
 // GET /rooms 用：所有人的未刪除房間
 // n 是要撈幾筆；翻頁規則（+1、算 cursor）由 GetRoomLists 處理，這裡不用知道
-func (this *DBStore) getPublicRoomLists(ctx context.Context, after *RoomCursor, n int) ([]model.Room, error) {
+func (this *DBStore) getPublicRoomLists(ctx context.Context, after *model.RoomCursor, n int) ([]model.Room, error) {
 	var (
 		sql  string
 		args []any
@@ -234,7 +205,7 @@ func (this *DBStore) getPublicRoomLists(ctx context.Context, after *RoomCursor, 
 }
 
 // GET /me/rooms 用：只看 ownerID 的未刪除房間
-func (this *DBStore) getUserRoomLists(ctx context.Context, ownerID int64, after *RoomCursor, n int) ([]model.Room, error) {
+func (this *DBStore) getUserRoomLists(ctx context.Context, ownerID int64, after *model.RoomCursor, n int) ([]model.Room, error) {
 	var (
 		sql  string
 		args []any
@@ -288,21 +259,4 @@ func (this *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([
 		return nil, err
 	}
 	return rooms, nil
-}
-
-// public_id 的格式：publicIDBytes 個隨機 bytes，用 RawURLEncoding 編碼（跟 insertRoom 產生的方式一樣）
-// 放在 store：格式是這裡定義的（publicIDBytes），產生和檢查放一起，改格式時兩邊一起看得到
-// 只檢查格式，不查 DB：格式對但不存在的 id，還是要查了才知道
-// 給 handler 擋掉明顯錯的 id（page token 裡的 public_id；之後 GET /rooms/{public_id} 也能用，不用打 DB）
-// 是 package 層級的函式、不是 DBStore 的 method（不碰 DB），handler 直接呼叫 store.ValidPublicID，不放進 handler 的 store interface
-func ValidPublicID(s string) bool {
-	// 1. 長度：base64 每個字元裝 6 bits，8 bytes = 64 bits → 10 個字元還剩 4 bits → 11 個字元（Raw：不補 =）
-	//    讓標準庫算，不要寫死 11：publicIDBytes 改了這裡會跟著變
-	if len(s) != base64.RawURLEncoding.EncodedLen(publicIDBytes) {
-		return false
-	}
-	// 2. 字元：能 decode 成功，代表每個字元都在 A-Z a-z 0-9 - _ 裡面，也沒有 =
-	_, err := base64.RawURLEncoding.DecodeString(s)
-
-	return err == nil
 }

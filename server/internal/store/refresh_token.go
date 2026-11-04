@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/model"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -144,7 +146,7 @@ func classifyRefreshToken(ctx context.Context, tx pgx.Tx, oldHash string, grace 
 	// 順序就是優先權：先看 err（Scan 失敗時 expired / inGrace 只是零值，不能拿來判斷），
 	// 再看 expired（過期又剛好在 grace 內 → 照規格算 invalid，不發新的）
 	if errors.Is(err, pgx.ErrNoRows) {
-		// 查不到是正常的狀態，不是 DB 錯誤：error 回 nil，交給 Rotate 的 switch 轉成 ErrRefreshTokenInvalid
+		// 查不到是正常的狀態，不是 DB 錯誤：error 回 nil，交給 Rotate 的 switch 轉成 model.ErrRefreshTokenInvalid
 		return tokenInvalid, 0, nil
 	} else if err != nil {
 		// 沒有這個分支的話：DB 斷線 → 一路掉到 else → 當成 duplicate use 把 user 全部登出
@@ -205,9 +207,9 @@ func revokedByCredentialState(ctx context.Context, tx pgx.Tx, oldHash string) (b
 //
 //	有效             → 作廢、存新的                       → (userID, nil)
 //	已作廢 ≤ grace   → 不動其他 token、存新的（回應掉了重送）→ (userID, nil)
-//	已作廢 > grace   → 寫入 valid_after（撤銷全部）         → *RefreshTokenDuplicateUseError（errors.Is ErrRefreshTokenDuplicateUse）
-//	被 valid_after 撤銷 → 不撤銷、不寫任何東西                → *RefreshTokenRevokedError（errors.Is ErrRefreshTokenInvalid）
-//	查不到 / 已過期   →                                      ErrRefreshTokenInvalid
+//	已作廢 > grace   → 寫入 valid_after（撤銷全部）         → *model.RefreshTokenDuplicateUseError（errors.Is model.ErrRefreshTokenDuplicateUse）
+//	被 valid_after 撤銷 → 不撤銷、不寫任何東西                → *model.RefreshTokenRevokedError（errors.Is model.ErrRefreshTokenInvalid）
+//	查不到 / 已過期   →                                      model.ErrRefreshTokenInvalid
 func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error) {
 	tx, err := this.dbPool.Begin(ctx)
 	if err != nil {
@@ -222,14 +224,14 @@ func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash st
 	err = tx.QueryRow(ctx,
 		`SELECT user_id FROM refresh_tokens WHERE token_hash = $1`, oldHash).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrRefreshTokenInvalid
+		return 0, model.ErrRefreshTokenInvalid
 	} else if err != nil {
 		return 0, err
 	}
 
 	// (b) 同一個 user 的 refresh / 撤銷全部在這裡排隊
-	if _, err := lockUser(ctx, tx, userID); errors.Is(err, ErrUserNotFound) {
-		return 0, ErrRefreshTokenInvalid
+	if _, err := lockUser(ctx, tx, userID); errors.Is(err, model.ErrUserNotFound) {
+		return 0, model.ErrRefreshTokenInvalid
 	} else if err != nil {
 		return 0, err
 	}
@@ -241,7 +243,7 @@ func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash st
 	}
 	if revoked {
 		// 撤銷之前發的 token 不再觸發撤銷（見 tokenState 上方），但回帶 userID 的 error 讓 handler 記 log
-		return 0, &RefreshTokenRevokedError{UserID: userID}
+		return 0, &model.RefreshTokenRevokedError{UserID: userID}
 	}
 
 	// (c) 判斷狀態；這裡的 userID 與 (a) 的相同，沿用 classify 的回傳
@@ -270,9 +272,9 @@ func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash st
 		if err := tx.Commit(ctx); err != nil {
 			return 0, err
 		}
-		return 0, &RefreshTokenDuplicateUseError{UserID: userID}
+		return 0, &model.RefreshTokenDuplicateUseError{UserID: userID}
 	default:
-		return 0, ErrRefreshTokenInvalid
+		return 0, model.ErrRefreshTokenInvalid
 	}
 }
 

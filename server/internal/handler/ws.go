@@ -10,7 +10,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
@@ -199,7 +198,7 @@ func (this *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *ws
 	dbCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
 	if _, err := this.db.GetRoomByPublicID(dbCtx, roomID); err != nil {
-		if errors.Is(err, store.ErrRoomNotFound) {
+		if errors.Is(err, model.ErrRoomNotFound) {
 			this.logger.InfoContext(ctx, "ws join rejected", "reason", "room not found", "room", roomID)
 			return &wsError{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
 		}
@@ -244,7 +243,7 @@ func (this *WebsocketHandler) verifyAuthPayload(ctx context.Context, raw json.Ra
 	defer cancel()
 	user, err := this.db.GetUserByID(dbCtx, userID)
 	if err != nil {
-		if errors.Is(err, store.ErrUserNotFound) {
+		if errors.Is(err, model.ErrUserNotFound) {
 			// user 已被刪除，但 token 還沒過期（stateless，撤不掉）
 			this.logger.InfoContext(ctx, "ws auth rejected", "reason", "user not found", "user_id", userID)
 		} else {

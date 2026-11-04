@@ -9,10 +9,9 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
-// limit 沒帶時的預設值；上限是 store.MaxRoomListLimit
+// limit 沒帶時的預設值；上限是 model.MaxRoomListLimit
 const defaultRoomListLimit = 20
 
 // 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
@@ -20,7 +19,7 @@ type roomStore interface {
 	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
 	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
 
-	GetRoomLists(ctx context.Context, userID *int64, after *store.RoomCursor, limit int) ([]model.Room, *store.RoomCursor, error)
+	GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error)
 }
 
 type RoomHandler struct {
@@ -80,14 +79,14 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 	}
 
 	room, err := this.db.CreateRoom(r.Context(), userID, name)
-	if errors.Is(err, store.ErrRoomLimitReached) {
+	if errors.Is(err, model.ErrRoomLimitReached) {
 		// 額度是「權限」問題，所以回 403：
 		//   409 是「跟現有資料衝突」（例如帳號重複）；422 是「請求內容本身有問題」，這裡請求內容沒錯
 		// 目前 HTTP error 都是純文字，client 還分不出 403 的原因，之後要做成結構化錯誤（ROADMAP W5）
 		http.Error(w, "room limit reached", http.StatusForbidden)
 		return
 	}
-	if errors.Is(err, store.ErrRoomOwnerNotFound) {
+	if errors.Is(err, model.ErrRoomOwnerNotFound) {
 		// user 已刪除但 access token 還沒過期：回跟 RequireAuth 一模一樣的 401
 		httpx.WriteUnauthorized(w)
 		return
@@ -104,7 +103,7 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 // 公開：知道 public_id 的人都能查
 func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
 	room, err := this.db.GetRoomByPublicID(r.Context(), r.PathValue("public_id"))
-	if errors.Is(err, store.ErrRoomNotFound) {
+	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404、不是 410：不讓外人知道「這個房間曾經存在過」
 		http.Error(w, "room not found", http.StatusNotFound)
 		return
@@ -145,7 +144,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 	limit := defaultRoomListLimit
 	if query.Has("limit") {
 		n, err := strconv.Atoi(query.Get("limit"))
-		if err != nil || n < 1 || n > store.MaxRoomListLimit {
+		if err != nil || n < 1 || n > model.MaxRoomListLimit {
 			http.Error(w, "invalid limit", http.StatusBadRequest)
 			return
 		}
@@ -153,7 +152,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 	}
 
 	// 沒帶或空字串 = 第一頁
-	var after *store.RoomCursor
+	var after *model.RoomCursor
 	if raw := query.Get("page_token"); raw != "" {
 		cursor, err := decodePageToken(raw)
 		if err != nil {

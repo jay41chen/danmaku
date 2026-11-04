@@ -14,7 +14,6 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 func TestHandleRegister(t *testing.T) {
@@ -29,12 +28,12 @@ func TestHandleRegister(t *testing.T) {
 		createErr  error
 		wantStatus int
 	}{
-		{"broken json", http.MethodPost, `{"username":"jay",}`, store.ErrUsernameTaken, http.StatusBadRequest},
-		{"invalid username", http.MethodPost, `{"username":"a","password":"kq7vz2mx"}`, store.ErrUsernameTaken, http.StatusBadRequest},
-		{"too short password", http.MethodPost, `{"username":"jay","password":"jayjay"}`, store.ErrUsernameTaken, http.StatusBadRequest},
-		{"common password", http.MethodPost, `{"username":"jay","password":"12345678"}`, store.ErrUsernameTaken, http.StatusBadRequest},
+		{"broken json", http.MethodPost, `{"username":"jay",}`, model.ErrUsernameTaken, http.StatusBadRequest},
+		{"invalid username", http.MethodPost, `{"username":"a","password":"kq7vz2mx"}`, model.ErrUsernameTaken, http.StatusBadRequest},
+		{"too short password", http.MethodPost, `{"username":"jay","password":"jayjay"}`, model.ErrUsernameTaken, http.StatusBadRequest},
+		{"common password", http.MethodPost, `{"username":"jay","password":"12345678"}`, model.ErrUsernameTaken, http.StatusBadRequest},
 		// 以下 body 要完全合法，才走得到 CreateUser
-		{"username taken", http.MethodPost, validBody, store.ErrUsernameTaken, http.StatusConflict},
+		{"username taken", http.MethodPost, validBody, model.ErrUsernameTaken, http.StatusConflict},
 		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
@@ -111,7 +110,7 @@ func TestHandleLogin(t *testing.T) {
 	}{
 		{"broken json", http.MethodPost, `{"username":"jay",}`, stored, nil, http.StatusBadRequest, ""},
 		// 這兩個 case 要回一模一樣的 status 和訊息，不能讓人分辨帳號存不存在
-		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, store.ErrUserNotFound, http.StatusBadRequest, msgInvalidCredentials},
+		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, model.ErrUserNotFound, http.StatusBadRequest, msgInvalidCredentials},
 		{"wrong password", http.MethodPost, body("jay", "wrong-password"), stored, nil, http.StatusBadRequest, msgInvalidCredentials},
 		{"db error", http.MethodPost, body("jay", password), model.User{}, errors.New("db down"), http.StatusInternalServerError, ""},
 		// DB 裡的 hash 壞掉是系統錯誤，不是密碼錯
@@ -139,7 +138,7 @@ func TestHandleLogin(t *testing.T) {
 	// 未知帳號也必須真的跑一次 bcrypt（用 dummyHash），否則回應時間會洩漏帳號存不存在
 	// 用 spy 取代 checkPassword 確認呼叫次數與收到的 hash；回應則照舊
 	t.Run("checkPassword is called once for unknown user with dummyHash", func(t *testing.T) {
-		h := NewAuthHandler(&fakeDBStore{getErr: store.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
+		h := NewAuthHandler(&fakeDBStore{getErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
 		var gotHashes []string
 		h.checkPassword = func(hash, pw string) (bool, error) {
 			gotHashes = append(gotHashes, hash)
@@ -472,7 +471,7 @@ func TestHandleMe(t *testing.T) {
 	})
 
 	t.Run("deleted user returns same 401 as RequireAuth", func(t *testing.T) {
-		h := NewAuthHandler(&fakeDBStore{getByIDErr: store.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
+		h := NewAuthHandler(&fakeDBStore{getByIDErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
 
 		rec := serveMe(t, h, userID)
 

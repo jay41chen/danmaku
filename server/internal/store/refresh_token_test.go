@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 // 需要真的 Postgres：沒設 TEST_DATABASE_URL 就 skip（見 newTestDBStore）
@@ -73,13 +75,13 @@ func TestRotateRefreshToken(t *testing.T) {
 		// grace = 0：不用真的等 15 秒，「作廢的時間」一定早於這次的 now()
 		_, err := s.RotateRefreshToken(t.Context(), "old", "attacker-new", testTTL, 0)
 
-		if !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("Rotate(old) after grace error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("Rotate(old) after grace error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 		// handler 的 Warn log 要知道是哪個 user：userID 帶在 error 裡
-		var dupUse *RefreshTokenDuplicateUseError
+		var dupUse *model.RefreshTokenDuplicateUseError
 		if !errors.As(err, &dupUse) || dupUse.UserID != userID {
-			t.Errorf("Rotate(old) after grace error = %#v, want *RefreshTokenDuplicateUseError{UserID: %d}", err, userID)
+			t.Errorf("Rotate(old) after grace error = %#v, want *model.RefreshTokenDuplicateUseError{UserID: %d}", err, userID)
 		}
 		if exists(t, s, "attacker-new") {
 			t.Errorf("attacker-new was stored, want not stored")
@@ -87,8 +89,8 @@ func TestRotateRefreshToken(t *testing.T) {
 		// 撤銷有 Commit：忘了 Commit 的話 defer Rollback 會取消 valid_after，這兩顆還能換
 		for _, h := range []string{"new", "other-device"} {
 			_, err := s.RotateRefreshToken(t.Context(), h, h+"-next", testTTL, testGrace)
-			if !errors.Is(err, ErrRefreshTokenInvalid) {
-				t.Errorf("Rotate(%s) after revoke all error = %v, want ErrRefreshTokenInvalid", h, err)
+			if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+				t.Errorf("Rotate(%s) after revoke all error = %v, want model.ErrRefreshTokenInvalid", h, err)
 			}
 		}
 		// 撤銷全部只寫 valid_after，不改 refresh_tokens（見 tokenState 上方說明）
@@ -124,14 +126,14 @@ func TestRotateRefreshToken(t *testing.T) {
 
 		_, err := s.RotateRefreshToken(t.Context(), "phone", "attacker-new", testTTL, testGrace)
 
-		if !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("Rotate(logged-out) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("Rotate(logged-out) error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 		if exists(t, s, "attacker-new") {
 			t.Errorf("attacker-new was stored, want not stored")
 		}
-		if _, err := s.RotateRefreshToken(t.Context(), "laptop", "laptop-next", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(laptop) after revoke all error = %v, want ErrRefreshTokenInvalid", err)
+		if _, err := s.RotateRefreshToken(t.Context(), "laptop", "laptop-next", testTTL, testGrace); !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(laptop) after revoke all error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 	})
 
@@ -145,13 +147,13 @@ func TestRotateRefreshToken(t *testing.T) {
 		backdateRevokedAt(t, s, "t0", time.Minute)
 		mustRotate(t, s, "t1", "t2", testGrace) // t1 現在 revoked_at = now()，在 grace 內
 
-		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("Rotate(t0) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("Rotate(t0) error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 
 		_, err := s.RotateRefreshToken(t.Context(), "t1", "t3", testTTL, testGrace)
-		if !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(t1) after revoke all error = %v, want ErrRefreshTokenInvalid", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(t1) after revoke all error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 		if exists(t, s, "t3") {
 			t.Errorf("t3 was stored, want not stored")
@@ -164,23 +166,23 @@ func TestRotateRefreshToken(t *testing.T) {
 		mustCreateToken(t, s, userID, "t0", testTTL)
 		mustRotate(t, s, "t0", "t1", testGrace)
 		backdateRevokedAt(t, s, "t0", time.Minute)
-		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("setup Rotate(t0) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("setup Rotate(t0) error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 		before := validAfter(t, s, userID)
 
 		_, err := s.RotateRefreshToken(t.Context(), "t0", "y", testTTL, testGrace)
 
-		if !errors.Is(err, ErrRefreshTokenInvalid) || errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Errorf("Rotate(t0) again error = %v, want ErrRefreshTokenInvalid (not duplicate use)", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) || errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Errorf("Rotate(t0) again error = %v, want model.ErrRefreshTokenInvalid (not duplicate use)", err)
 		}
 		if after := validAfter(t, s, userID); !after.Equal(before) {
 			t.Errorf("valid_after changed %v → %v, want unchanged", before, after)
 		}
 		// handler 的 Warn log 要知道是哪個 user
-		var revoked *RefreshTokenRevokedError
+		var revoked *model.RefreshTokenRevokedError
 		if !errors.As(err, &revoked) || revoked.UserID != userID {
-			t.Errorf("Rotate(t0) again error = %#v, want *RefreshTokenRevokedError{UserID: %d}", err, userID)
+			t.Errorf("Rotate(t0) again error = %#v, want *model.RefreshTokenRevokedError{UserID: %d}", err, userID)
 		}
 	})
 
@@ -191,8 +193,8 @@ func TestRotateRefreshToken(t *testing.T) {
 		mustCreateToken(t, s, userID, "a0", testTTL)
 		mustRotate(t, s, "a0", "a1", testGrace)
 		backdateRevokedAt(t, s, "a0", time.Minute)
-		if _, err := s.RotateRefreshToken(t.Context(), "a0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("setup first revoke error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if _, err := s.RotateRefreshToken(t.Context(), "a0", "x", testTTL, testGrace); !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("setup first revoke error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 		v1 := validAfter(t, s, userID)
 
@@ -200,16 +202,16 @@ func TestRotateRefreshToken(t *testing.T) {
 		mustCreateToken(t, s, userID, "b0", testTTL)
 		mustRotate(t, s, "b0", "b1", testGrace)
 		backdateRevokedAt(t, s, "b0", time.Minute)
-		if _, err := s.RotateRefreshToken(t.Context(), "b0", "y", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("second revoke error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if _, err := s.RotateRefreshToken(t.Context(), "b0", "y", testTTL, testGrace); !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("second revoke error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 
 		if v2 := validAfter(t, s, userID); !v2.After(v1) {
 			t.Errorf("valid_after = %v after second revoke, want later than %v", v2, v1)
 		}
 		_, err := s.RotateRefreshToken(t.Context(), "b1", "b2", testTTL, testGrace)
-		if !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(b1) after second revoke error = %v, want ErrRefreshTokenInvalid", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(b1) after second revoke error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 		if exists(t, s, "b2") {
 			t.Errorf("b2 was stored, want not stored")
@@ -222,8 +224,8 @@ func TestRotateRefreshToken(t *testing.T) {
 		mustCreateToken(t, s, userID, "t0", testTTL)
 		mustRotate(t, s, "t0", "t1", testGrace)
 		backdateRevokedAt(t, s, "t0", time.Minute)
-		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, ErrRefreshTokenDuplicateUse) {
-			t.Fatalf("setup Rotate(t0) error = %v, want ErrRefreshTokenDuplicateUse", err)
+		if _, err := s.RotateRefreshToken(t.Context(), "t0", "x", testTTL, testGrace); !errors.Is(err, model.ErrRefreshTokenDuplicateUse) {
+			t.Fatalf("setup Rotate(t0) error = %v, want model.ErrRefreshTokenDuplicateUse", err)
 		}
 
 		mustCreateToken(t, s, userID, "relogin", testTTL) // 模擬重新登入
@@ -270,8 +272,8 @@ func TestRotateRefreshToken(t *testing.T) {
 
 		select {
 		case err := <-done:
-			if !errors.Is(err, ErrRefreshTokenInvalid) {
-				t.Errorf("Rotate error = %v, want ErrRefreshTokenInvalid", err)
+			if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+				t.Errorf("Rotate error = %v, want model.ErrRefreshTokenInvalid", err)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("Rotate still blocked 2s after lock released")
@@ -306,8 +308,8 @@ func TestRotateRefreshToken(t *testing.T) {
 		}
 
 		_, err = s.RotateRefreshToken(t.Context(), "later", "new", testTTL, testGrace)
-		if !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(later) error = %v, want ErrRefreshTokenInvalid", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(later) error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 	})
 
@@ -316,8 +318,8 @@ func TestRotateRefreshToken(t *testing.T) {
 
 		_, err := s.RotateRefreshToken(t.Context(), "nobody", "new", testTTL, testGrace)
 
-		if !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(nobody) error = %v, want ErrRefreshTokenInvalid", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(nobody) error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 	})
 
@@ -330,8 +332,8 @@ func TestRotateRefreshToken(t *testing.T) {
 
 		_, err := s.RotateRefreshToken(t.Context(), "old", "new", testTTL, testGrace)
 
-		if !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(expired) error = %v, want ErrRefreshTokenInvalid", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(expired) error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 		if exists(t, s, "new") {
 			t.Errorf("new token stored for expired old token")
@@ -351,8 +353,8 @@ func TestRotateRefreshToken(t *testing.T) {
 
 		_, err := s.RotateRefreshToken(t.Context(), "old", "new", testTTL, testGrace)
 
-		if !errors.Is(err, ErrRefreshTokenInvalid) {
-			t.Errorf("Rotate(expired, in grace) error = %v, want ErrRefreshTokenInvalid", err)
+		if !errors.Is(err, model.ErrRefreshTokenInvalid) {
+			t.Errorf("Rotate(expired, in grace) error = %v, want model.ErrRefreshTokenInvalid", err)
 		}
 	})
 

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"slices"
 	"testing"
+
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 func TestQueryMessage(t *testing.T) {
@@ -56,7 +58,7 @@ func TestCreateMessage(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "Jay")
 
-		msg, err := s.CreateMessage(t.Context(), LegacyRoomPublicID, userID, "哈哈")
+		msg, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, userID, "哈哈")
 
 		if err != nil {
 			t.Fatalf("CreateMessage error = %v, want nil", err)
@@ -80,13 +82,13 @@ func TestCreateMessage(t *testing.T) {
 	})
 
 	// user 已刪除但 access token 還有效：FK 違反要變成 sentinel，而且不能留下任何列
-	t.Run("nonexistent user returns ErrMessageUserNotFound and inserts nothing", func(t *testing.T) {
+	t.Run("nonexistent user returns model.ErrMessageUserNotFound and inserts nothing", func(t *testing.T) {
 		s := newTestDBStore(t)
 
-		_, err := s.CreateMessage(t.Context(), LegacyRoomPublicID, 999999, "hi")
+		_, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, 999999, "hi")
 
-		if !errors.Is(err, ErrMessageUserNotFound) {
-			t.Fatalf("CreateMessage error = %v, want ErrMessageUserNotFound", err)
+		if !errors.Is(err, model.ErrMessageUserNotFound) {
+			t.Fatalf("CreateMessage error = %v, want model.ErrMessageUserNotFound", err)
 		}
 		if n := countMessages(t, s); n != 0 {
 			t.Errorf("messages count = %d, want 0", n)
@@ -126,14 +128,14 @@ func TestCreateMessageRooms(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent room returns ErrRoomNotFound and inserts nothing", func(t *testing.T) {
+	t.Run("nonexistent room returns model.ErrRoomNotFound and inserts nothing", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
 
 		_, err := s.CreateMessage(t.Context(), "nope0000000", userID, "hi")
 
-		if !errors.Is(err, ErrRoomNotFound) {
-			t.Fatalf("CreateMessage error = %v, want ErrRoomNotFound", err)
+		if !errors.Is(err, model.ErrRoomNotFound) {
+			t.Fatalf("CreateMessage error = %v, want model.ErrRoomNotFound", err)
 		}
 		if n := countMessages(t, s); n != 0 {
 			t.Errorf("messages count = %d, want 0", n)
@@ -141,17 +143,17 @@ func TestCreateMessageRooms(t *testing.T) {
 	})
 
 	// room 跟 user 都不存在：插入 0 列、FK 不會被檢查 → 房間優先（handler 回 404 不是 401）
-	t.Run("nonexistent room and user returns ErrRoomNotFound", func(t *testing.T) {
+	t.Run("nonexistent room and user returns model.ErrRoomNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
 		_, err := s.CreateMessage(t.Context(), "nope0000000", 999999, "hi")
 
-		if !errors.Is(err, ErrRoomNotFound) {
-			t.Fatalf("CreateMessage error = %v, want ErrRoomNotFound", err)
+		if !errors.Is(err, model.ErrRoomNotFound) {
+			t.Fatalf("CreateMessage error = %v, want model.ErrRoomNotFound", err)
 		}
 	})
 
-	t.Run("soft-deleted room returns ErrRoomNotFound", func(t *testing.T) {
+	t.Run("soft-deleted room returns model.ErrRoomNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
 		room, err := s.CreateRoom(t.Context(), userID, "r")
@@ -164,15 +166,15 @@ func TestCreateMessageRooms(t *testing.T) {
 
 		_, err = s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
 
-		if !errors.Is(err, ErrRoomNotFound) {
-			t.Fatalf("CreateMessage error = %v, want ErrRoomNotFound", err)
+		if !errors.Is(err, model.ErrRoomNotFound) {
+			t.Fatalf("CreateMessage error = %v, want model.ErrRoomNotFound", err)
 		}
 		if n := countMessages(t, s); n != 0 {
 			t.Errorf("messages count = %d, want 0", n)
 		}
 	})
 
-	t.Run("nonexistent user in existing room still returns ErrMessageUserNotFound", func(t *testing.T) {
+	t.Run("nonexistent user in existing room still returns model.ErrMessageUserNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
 		room, err := s.CreateRoom(t.Context(), userID, "r")
@@ -182,8 +184,8 @@ func TestCreateMessageRooms(t *testing.T) {
 
 		_, err = s.CreateMessage(t.Context(), room.PublicID, 999999, "hi")
 
-		if !errors.Is(err, ErrMessageUserNotFound) {
-			t.Fatalf("CreateMessage error = %v, want ErrMessageUserNotFound", err)
+		if !errors.Is(err, model.ErrMessageUserNotFound) {
+			t.Fatalf("CreateMessage error = %v, want model.ErrMessageUserNotFound", err)
 		}
 	})
 }

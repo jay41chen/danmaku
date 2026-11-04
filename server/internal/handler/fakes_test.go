@@ -70,11 +70,11 @@ type fakeDBStore struct {
 
 	// GetRoomLists 用
 	listRooms      []model.Room
-	listNextCursor *store.RoomCursor
+	listNextCursor *model.RoomCursor
 	listRoomsErr   error
 	listRoomsCalls int
 	gotListUserID  *int64 // spy：GetRoomLists 收到的 userID（nil = 不限 owner）
-	gotListAfter   *store.RoomCursor
+	gotListAfter   *model.RoomCursor
 	gotListLimit   int
 }
 
@@ -134,7 +134,7 @@ func (f *fakeDBStore) GetRoomByPublicID(ctx context.Context, publicID string) (m
 	return f.room, f.getRoomErr
 }
 
-func (f *fakeDBStore) GetRoomLists(ctx context.Context, userID *int64, after *store.RoomCursor, limit int) ([]model.Room, *store.RoomCursor, error) {
+func (f *fakeDBStore) GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error) {
 	f.listRoomsCalls++
 	f.gotListUserID, f.gotListAfter, f.gotListLimit = userID, after, limit
 	return f.listRooms, f.listNextCursor, f.listRoomsErr

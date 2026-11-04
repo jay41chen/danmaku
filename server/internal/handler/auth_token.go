@@ -6,7 +6,7 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
-	"github.com/jay41chen/danmaku/server/internal/store"
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 // login 用：簽 access token + 存一個新的 refresh token
@@ -71,7 +71,7 @@ func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request
 	// invalid 和 duplicate use 對 client 都是 401（重新登入），不讓對方知道「這個 token 曾經有效」
 	// RefreshTokenRevokedError 一定要在 errors.Is(Invalid) 之前判斷：它的 Is 也會對 Invalid 回 true，
 	// 順序反過來的話會被 Is 先接走，log 就不會記
-	var revoked *store.RefreshTokenRevokedError
+	var revoked *model.RefreshTokenRevokedError
 	if errors.As(err, &revoked) {
 		// 被撤銷的憑證又出現（多半是攻擊者手上的舊 token）；不記 token 本身
 		this.logger.WarnContext(r.Context(), "refresh token issued before credentials revoked was used",
@@ -79,11 +79,11 @@ func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
 		return
 	}
-	if errors.Is(err, store.ErrRefreshTokenInvalid) {
+	if errors.Is(err, model.ErrRefreshTokenInvalid) {
 		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
 		return
 	}
-	var dupUse *store.RefreshTokenDuplicateUseError
+	var dupUse *model.RefreshTokenDuplicateUseError
 	if errors.As(err, &dupUse) {
 		// 資安事件：記 Warn 方便追查是哪個帳號被盜、從哪來；不記 token 本身
 		// IP 用 httpx.ClientIP：RemoteAddr 在 nginx 後面只會是 nginx 的 IP

@@ -10,11 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var (
-	// user 已被刪除，但他的 access token 還沒過期（stateless，撤不掉）
-	ErrMessageUserNotFound = errors.New("message user not found")
-)
-
 // 存訊息並回傳完整的 Message（含 id、username、created_at），handler 直接拿去廣播 / 回給 client
 // 房間用 public_id 指定：「房間存在且未刪除」和 INSERT 合成同一句 statement（INSERT ... SELECT FROM rooms）
 func (this *DBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
@@ -36,9 +31,9 @@ func (this *DBStore) CreateMessage(ctx context.Context, roomPublicID string, use
 		// 同 insertRoom 的手法：房間不存在或已 soft delete → SELECT 回 0 列 → 插入 0 列 → RETURNING 也是空 → ErrNoRows
 		// 檢查跟插入在同一句裡，「查房間」和「插入」之間沒有空隙，而且省一次來回（熱門房間約 50 msgs/s）
 		// user 不存在時 FK 會先失敗（23503），到不了 JOIN，所以這裡的 ErrNoRows 只可能是房間不存在
-		// 房間跟 user 都不存在時回 ErrRoomNotFound：插入 0 列，根本不會觸發 FK 檢查（handler 會回 404 而不是 401）
+		// 房間跟 user 都不存在時回 model.ErrRoomNotFound：插入 0 列，根本不會觸發 FK 檢查（handler 會回 404 而不是 401）
 		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Message{}, ErrRoomNotFound
+			return model.Message{}, model.ErrRoomNotFound
 		}
 		var pgErr *pgconn.PgError
 		// 23503 = foreign_key_violation：user_id 指向的 user 不存在（已被刪除）
@@ -46,7 +41,7 @@ func (this *DBStore) CreateMessage(ctx context.Context, roomPublicID string, use
 		// room_id 來自 SELECT（那一刻列一定存在）、房間只做 soft delete、ON DELETE RESTRICT 也擋住「刪有訊息的房間」
 		// 之後若加了 hard delete，要用 pgErr.ConstraintName 區分
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			return model.Message{}, ErrMessageUserNotFound
+			return model.Message{}, model.ErrMessageUserNotFound
 		}
 		return model.Message{}, err
 	}
