@@ -38,7 +38,7 @@ func roomNameBody(name string) string {
 func TestHandleCreateRoom(t *testing.T) {
 	const userID = int64(7)
 	created := func() model.Room {
-		return model.Room{ID: 5, OwnerID: userID, PublicID: "abcDEF1234", OwnerUsername: "Jay", Name: "我的房間",
+		return model.Room{ID: 5, OwnerID: userID, PublicID: "abcDEF12345", OwnerUsername: "Jay", Name: "我的房間",
 			CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
 	}
 
@@ -58,7 +58,7 @@ func TestHandleCreateRoom(t *testing.T) {
 		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if body["public_id"] != "abcDEF1234" || body["room_name"] != "我的房間" || body["owner_username"] != "Jay" {
+		if body["public_id"] != "abcDEF12345" || body["room_name"] != "我的房間" || body["owner_username"] != "Jay" {
 			t.Errorf("body = %v, want public_id / room_name / owner_username of the created room", body)
 		}
 		// 內部 id 不能外洩
@@ -226,22 +226,22 @@ func serveGetRoom(h *RoomHandler, publicID string) *httptest.ResponseRecorder {
 
 func TestHandleGetRoom(t *testing.T) {
 	t.Run("found returns 200 with room", func(t *testing.T) {
-		db := &fakeDBStore{room: model.Room{ID: 5, OwnerID: 7, PublicID: "abcDEF1234", OwnerUsername: "Jay", Name: "房間"}}
+		db := &fakeDBStore{room: model.Room{ID: 5, OwnerID: 7, PublicID: "abcDEF12345", OwnerUsername: "Jay", Name: "房間"}}
 		h := NewRoomHandler(db)
 
-		rec := serveGetRoom(h, "abcDEF1234")
+		rec := serveGetRoom(h, "abcDEF12345")
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if db.gotRoomPublic != "abcDEF1234" {
-			t.Errorf("GetRoomByPublicID got %q, want %q", db.gotRoomPublic, "abcDEF1234")
+		if db.gotRoomPublic != "abcDEF12345" {
+			t.Errorf("GetRoomByPublicID got %q, want %q", db.gotRoomPublic, "abcDEF12345")
 		}
 		var body map[string]any
 		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if body["public_id"] != "abcDEF1234" || body["room_name"] != "房間" || body["owner_username"] != "Jay" {
+		if body["public_id"] != "abcDEF12345" || body["room_name"] != "房間" || body["owner_username"] != "Jay" {
 			t.Errorf("body = %v, want the room", body)
 		}
 		if _, ok := body["id"]; ok {
@@ -252,7 +252,7 @@ func TestHandleGetRoom(t *testing.T) {
 	t.Run("not found returns 404", func(t *testing.T) {
 		h := NewRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound})
 
-		rec := serveGetRoom(h, "nope")
+		rec := serveGetRoom(h, "zzzZZZ99999")
 
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -262,7 +262,7 @@ func TestHandleGetRoom(t *testing.T) {
 	t.Run("db error returns 500", func(t *testing.T) {
 		h := NewRoomHandler(&fakeDBStore{getRoomErr: errors.New("db down")})
 
-		rec := serveGetRoom(h, "abcDEF1234")
+		rec := serveGetRoom(h, "abcDEF12345")
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -392,7 +392,7 @@ func TestHandleListRooms(t *testing.T) {
 
 			t.Run("next cursor becomes next_page_token", func(t *testing.T) {
 				db := &fakeDBStore{
-					listRooms:      []model.Room{{ID: 1, OwnerID: 3, PublicID: "abcDEF1234", Name: "房間", CreatedAt: cursorTime}},
+					listRooms:      []model.Room{{ID: 1, OwnerID: 3, PublicID: "abcDEF12345", Name: "房間", CreatedAt: cursorTime}},
 					listNextCursor: &cursor,
 				}
 				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
@@ -412,7 +412,7 @@ func TestHandleListRooms(t *testing.T) {
 			})
 
 			t.Run("nil cursor omits next_page_token", func(t *testing.T) {
-				db := &fakeDBStore{listRooms: []model.Room{{PublicID: "abcDEF1234", Name: "房間"}}}
+				db := &fakeDBStore{listRooms: []model.Room{{PublicID: "abcDEF12345", Name: "房間"}}}
 				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
 				var body map[string]json.RawMessage
 				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -440,8 +440,8 @@ func TestHandleListRooms(t *testing.T) {
 
 			t.Run("items have only room_name and public_id", func(t *testing.T) {
 				db := &fakeDBStore{listRooms: []model.Room{
-					{ID: 1, OwnerID: 3, PublicID: "abcDEF1234", Name: "房間一", CreatedAt: cursorTime},
-					{ID: 2, OwnerID: 4, PublicID: "ghiJKL5678", Name: "房間二", CreatedAt: cursorTime},
+					{ID: 1, OwnerID: 3, PublicID: "abcDEF12345", Name: "房間一", CreatedAt: cursorTime},
+					{ID: 2, OwnerID: 4, PublicID: "ghiJKL56789", Name: "房間二", CreatedAt: cursorTime},
 				}}
 				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
 				var body struct {
@@ -458,8 +458,8 @@ func TestHandleListRooms(t *testing.T) {
 						t.Errorf("rooms[%d] = %v, want exactly room_name and public_id", i, item)
 					}
 				}
-				if body.Rooms[0]["room_name"] != "房間一" || body.Rooms[0]["public_id"] != "abcDEF1234" {
-					t.Errorf("rooms[0] = %v, want 房間一 / abcDEF1234", body.Rooms[0])
+				if body.Rooms[0]["room_name"] != "房間一" || body.Rooms[0]["public_id"] != "abcDEF12345" {
+					t.Errorf("rooms[0] = %v, want 房間一 / abcDEF12345", body.Rooms[0])
 				}
 			})
 

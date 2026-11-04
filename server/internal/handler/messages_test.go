@@ -290,8 +290,8 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("missing user id in context returns 500", func(t *testing.T) {
 		db := &fakeDBStore{}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
-		req := httptest.NewRequest(http.MethodPost, "/rooms/abc/messages", strings.NewReader(contentBody("hi")))
-		req.SetPathValue("public_id", "abc")
+		req := httptest.NewRequest(http.MethodPost, "/rooms/abcDEF12345/messages", strings.NewReader(contentBody("hi")))
+		req.SetPathValue("public_id", "abcDEF12345")
 		rec := httptest.NewRecorder()
 
 		h.HandleCreateRoomMessage(rec, req)
@@ -316,18 +316,18 @@ func TestHandleGetRoomMessages(t *testing.T) {
 
 	t.Run("uses path public id and room id", func(t *testing.T) {
 		db := &fakeDBStore{
-			room: model.Room{ID: 9, PublicID: "abc"},
+			room: model.Room{ID: 9, PublicID: "abcDEF12345"},
 			msgs: []model.Message{{ID: 2, Content: "b"}, {ID: 1, Content: "a"}},
 		}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serve(h, "abc")
+		rec := serve(h, "abcDEF12345")
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if db.gotRoomPublic != "abc" || db.gotQueryRoomID != 9 {
-			t.Errorf("got room (%q, %d), want (abc, 9)", db.gotRoomPublic, db.gotQueryRoomID)
+		if db.gotRoomPublic != "abcDEF12345" || db.gotQueryRoomID != 9 {
+			t.Errorf("got room (%q, %d), want (abcDEF12345, 9)", db.gotRoomPublic, db.gotQueryRoomID)
 		}
 		var got []model.Message
 		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
@@ -345,7 +345,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 			{ID: 1, Content: "old"},
 		}}, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serve(h, "abc")
+		rec := serve(h, "abcDEF12345")
 
 		var got []map[string]any
 		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
@@ -366,7 +366,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		db := &fakeDBStore{getRoomErr: model.ErrRoomNotFound}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serve(h, "nope")
+		rec := serve(h, "zzzZZZ99999")
 
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -380,7 +380,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		db := &fakeDBStore{getRoomErr: errors.New("db down")}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serve(h, "abc")
+		rec := serve(h, "abcDEF12345")
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -394,7 +394,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 9}, err: errors.New("db down")}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serve(h, "abc")
+		rec := serve(h, "abcDEF12345")
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -405,7 +405,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 9}, msgs: []model.Message{}}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serve(h, "abc")
+		rec := serve(h, "abcDEF12345")
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -423,20 +423,20 @@ func TestHandleCreateRoomMessage(t *testing.T) {
 		db := &fakeDBStore{createdMsg: model.Message{ID: 42, Content: "hi"}}
 		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, "abc", contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, "abcDEF12345", contentBody("hi"))
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
 		}
-		if db.gotMsgRoomPublic != "abc" || db.gotMsgUserID != userID {
-			t.Errorf("CreateMessage got (%q, %d), want (abc, %d)", db.gotMsgRoomPublic, db.gotMsgUserID, userID)
+		if db.gotMsgRoomPublic != "abcDEF12345" || db.gotMsgUserID != userID {
+			t.Errorf("CreateMessage got (%q, %d), want (abcDEF12345, %d)", db.gotMsgRoomPublic, db.gotMsgUserID, userID)
 		}
 	})
 	t.Run("room not found returns 404 and does not publish", func(t *testing.T) {
 		redis := &fakeRedis{}
 		h := NewMessageHandler(&fakeDBStore{createMsgErr: model.ErrRoomNotFound}, redis, &fakeRateLimiter{})
 
-		rec := serveCreateRoomMessage(t, h, userID, "nope", contentBody("hi"))
+		rec := serveCreateRoomMessage(t, h, userID, "zzzZZZ99999", contentBody("hi"))
 
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)

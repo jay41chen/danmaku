@@ -532,23 +532,23 @@ func joinRoom(t *testing.T, conn *websocket.Conn, room string) {
 
 func TestWebsocketJoinSuccess(t *testing.T) {
 	redis := &fakeRedis{}
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true}})
 	conn := dialWS(t, url)
 
-	joinRoom(t, conn, "abc")
+	joinRoom(t, conn, "abcDEF12345")
 
-	if got := redis.joinedRooms(); len(got) != 1 || got[0] != "abc" {
-		t.Errorf("JoinRoom calls = %v, want [abc]", got)
+	if got := redis.joinedRooms(); len(got) != 1 || got[0] != "abcDEF12345" {
+		t.Errorf("JoinRoom calls = %v, want [abcDEF12345]", got)
 	}
 }
 
 func TestWebsocketJoinTwice(t *testing.T) {
 	redis := &fakeRedis{}
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true, "def": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true, "defGHI67890": true}})
 	conn := dialWS(t, url)
-	joinRoom(t, conn, "abc")
+	joinRoom(t, conn, "abcDEF12345")
 
-	sendJoin(t, conn, "def")
+	sendJoin(t, conn, "defGHI67890")
 
 	expectErrorCode(t, conn, 2*time.Second, wsCodeAlreadyInRoom)
 	if got := redis.joinedRooms(); len(got) != 1 {
@@ -561,7 +561,7 @@ func TestWebsocketJoinUnknownRoom(t *testing.T) {
 	_, url := newRoomTestServer(t, redis, &wsFakeDB{})
 	conn := dialWS(t, url)
 
-	sendJoin(t, conn, "nope")
+	sendJoin(t, conn, "zzzZZZ99999")
 
 	expectErrorCode(t, conn, 2*time.Second, wsCodeRoomNotFound)
 	if got := redis.joinedRooms(); len(got) != 0 {
@@ -574,7 +574,7 @@ func TestWebsocketJoinDBError(t *testing.T) {
 	_, url := newRoomTestServer(t, redis, &wsFakeDB{roomErr: errors.New("db down")})
 	conn := dialWS(t, url)
 
-	sendJoin(t, conn, "abc")
+	sendJoin(t, conn, "abcDEF12345")
 
 	expectErrorCode(t, conn, 2*time.Second, wsCodeJoinUnavailable)
 	if got := redis.joinedRooms(); len(got) != 0 {
@@ -584,10 +584,10 @@ func TestWebsocketJoinDBError(t *testing.T) {
 
 func TestWebsocketJoinRedisError(t *testing.T) {
 	redis := &fakeRedis{joinErr: errors.New("redis down")}
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true}})
 	conn := dialWS(t, url)
 
-	sendJoin(t, conn, "abc")
+	sendJoin(t, conn, "abcDEF12345")
 
 	expectErrorCode(t, conn, 2*time.Second, wsCodeJoinUnavailable)
 	// join 失敗後還不在房間裡：leave 應該回 ws_not_in_room
@@ -597,11 +597,11 @@ func TestWebsocketJoinRedisError(t *testing.T) {
 
 func TestWebsocketJoinMalformedPayload(t *testing.T) {
 	redis := &fakeRedis{}
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true}})
 	conn := dialWS(t, url)
 
 	for _, frame := range []string{
-		`{"type":"join","payload":"abc"}`,
+		`{"type":"join","payload":"abcDEF12345"}`,
 		`{"type":"join","payload":{"room":""}}`,
 		`{"type":"join"}`,
 	} {
@@ -624,29 +624,29 @@ func TestWebsocketLeaveWithoutJoin(t *testing.T) {
 
 func TestWebsocketJoinThenLeave(t *testing.T) {
 	redis := &fakeRedis{}
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true}})
 	conn := dialWS(t, url)
-	joinRoom(t, conn, "abc")
+	joinRoom(t, conn, "abcDEF12345")
 
 	sendFrame(t, conn, `{"type":"leave"}`)
 
-	expectRoomFrame(t, conn, wsTypeLeaveOK, "abc")
+	expectRoomFrame(t, conn, wsTypeLeaveOK, "abcDEF12345")
 	deadline := time.Now().Add(2 * time.Second)
 	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
-		t.Errorf("LeaveRoom calls = %v, want [abc]", got)
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abcDEF12345" {
+		t.Errorf("LeaveRoom calls = %v, want [abcDEF12345]", got)
 	}
 	// 離開後可以再 join
-	joinRoom(t, conn, "abc")
+	joinRoom(t, conn, "abcDEF12345")
 }
 
 func TestWebsocketDisconnectLeavesRoom(t *testing.T) {
 	redis := &fakeRedis{}
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true}})
 	conn := dialWS(t, url)
-	joinRoom(t, conn, "abc")
+	joinRoom(t, conn, "abcDEF12345")
 
 	conn.Close()
 
@@ -654,13 +654,13 @@ func TestWebsocketDisconnectLeavesRoom(t *testing.T) {
 	for len(redis.leftRooms()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
-		t.Errorf("LeaveRoom calls = %v, want [abc]", got)
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abcDEF12345" {
+		t.Errorf("LeaveRoom calls = %v, want [abcDEF12345]", got)
 	}
 }
 
 // 使用者按下 join 之後馬上關分頁：讀取迴圈還卡在 handleJoin 的 JoinRoom（Redis I/O）裡，
-// JoinRoom 一回來 hub.Join 成功（連線還註冊著），接著 ReadLoop 讀到錯誤，hub.Unregister 回傳 "abc"，
+// JoinRoom 一回來 hub.Join 成功（連線還註冊著），接著 ReadLoop 讀到錯誤，hub.Unregister 回傳 "abcDEF12345"，
 // 清理 LeaveRoom 恰好一次 —— Join / Leave 才會成對（不能漏，也不能重複）
 func TestWebsocketDisconnectDuringJoinLeavesRoomOnce(t *testing.T) {
 	redis := &fakeRedis{joinEntered: make(chan struct{}, 1), joinBlock: make(chan struct{})}
@@ -668,10 +668,10 @@ func TestWebsocketDisconnectDuringJoinLeavesRoomOnce(t *testing.T) {
 	var releaseOnce sync.Once
 	releaseJoin := func() { releaseOnce.Do(func() { close(redis.joinBlock) }) }
 	t.Cleanup(releaseJoin)
-	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abc": true}})
+	_, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"abcDEF12345": true}})
 	conn := dialWS(t, url)
 
-	sendJoin(t, conn, "abc")
+	sendJoin(t, conn, "abcDEF12345")
 	select {
 	case <-redis.joinEntered:
 	case <-time.After(2 * time.Second):
@@ -682,28 +682,28 @@ func TestWebsocketDisconnectDuringJoinLeavesRoomOnce(t *testing.T) {
 	conn.Close()
 	releaseJoin()
 
-	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "abc" {
-		t.Fatalf("LeaveRoom calls = %v, want [abc]", got)
+	if got := waitForLeftRooms(t, redis, 2*time.Second); len(got) != 1 || got[0] != "abcDEF12345" {
+		t.Fatalf("LeaveRoom calls = %v, want [abcDEF12345]", got)
 	}
 	// 再等一下，確認不會有第二次 LeaveRoom（恰好一次）
 	time.Sleep(200 * time.Millisecond)
-	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abc" {
-		t.Errorf("LeaveRoom calls = %v, want exactly [abc]", got)
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abcDEF12345" {
+		t.Errorf("LeaveRoom calls = %v, want exactly [abcDEF12345]", got)
 	}
 }
 
 // 廣播只送給在該房間的連線
 func TestWebsocketBroadcastFilteredByRoom(t *testing.T) {
 	redis := &fakeRedis{}
-	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true, "b": true}})
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"aaaAAA11111": true, "bbbBBB22222": true}})
 	// fakeRedis.Subscribe 只存 handler 就返回，所以可以直接同步呼叫
 	h.StartBroadcast()
 	conn1 := dialWS(t, url)
 	conn2 := dialWS(t, url)
-	joinRoom(t, conn1, "a")
-	joinRoom(t, conn2, "b")
+	joinRoom(t, conn1, "aaaAAA11111")
+	joinRoom(t, conn2, "bbbBBB22222")
 
-	redis.deliver("a", `{"type":"message","payload":"hi"}`)
+	redis.deliver("aaaAAA11111", `{"type":"message","payload":"hi"}`)
 
 	conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := conn1.ReadMessage()
@@ -719,14 +719,14 @@ func TestWebsocketBroadcastFilteredByRoom(t *testing.T) {
 // leave 之後（handleLeave 把 c.room 清成 ""）不該再收到舊房間的廣播
 func TestWebsocketNoBroadcastAfterLeave(t *testing.T) {
 	redis := &fakeRedis{}
-	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"a": true}})
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"aaaAAA11111": true}})
 	h.StartBroadcast()
 	conn := dialWS(t, url)
-	joinRoom(t, conn, "a")
+	joinRoom(t, conn, "aaaAAA11111")
 	sendFrame(t, conn, `{"type":"leave"}`)
-	expectRoomFrame(t, conn, wsTypeLeaveOK, "a")
+	expectRoomFrame(t, conn, wsTypeLeaveOK, "aaaAAA11111")
 
-	redis.deliver("a", `{"type":"message","payload":"stale"}`)
+	redis.deliver("aaaAAA11111", `{"type":"message","payload":"stale"}`)
 
 	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	if _, data, err := conn.ReadMessage(); err == nil {
