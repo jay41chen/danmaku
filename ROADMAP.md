@@ -151,6 +151,7 @@
     - Page token：base64url 的 JSON `{v, created_at, public_id}`，對 client opaque；decode 嚴格（不認識的欄位、後面多接資料、版本、零值時間、public_id 格式 → `400 invalid cursor`）。`limit` 預設 20、最多 50（`model.MaxRoomListLimit`）
     - `GET /me/rooms` 也走同一套分頁（雖然未刪除的最多 3 筆）：之後列出已刪除房間（恢復功能）時不用改格式
     - Viewer 數排序 → M2（presence 之後）
+    - Known issue（先不處理，2026-11-04）：`/me/rooms` 沒有 `(owner_id, created_at, public_id)` index。`danmaku_test` 強制關掉 seq scan 跑 `EXPLAIN`：planner 沿著 `rooms_created_at_public_id_idx` 倒著走、逐筆 `Filter: owner_id`，資料多、自己的房間又很舊時要掃過大部分的表；另一條路 `rooms_owner_id_idx` 只照 owner_id 排，還要 Sort。未刪除的最多 3 間，但被刪除的會一直累積（見下方 soft delete 的 known issue）。等有資料量能用 `EXPLAIN ANALYZE` 量出差別再加；加的時候要考慮：partial `WHERE deleted_at IS NULL` 與否、`rooms_owner_id_idx` 能不能 drop（`ON DELETE RESTRICT` 的 FK 檢查也會用到它，而且包含已刪除的房間）
   - [x] 選房間的 UI（M1 前端，2026-11-04）：「所有房間」+ 登入後的「我的房間」，每個房間是 `?room=<public_id>` 連結（整頁重載，沿用原本換房方式）；「載入更多」用 `next_page_token`；房名用 `<bdi>` + overflow 隔離
     - 建立房間的 UI 還沒有（只能打 `POST /rooms`）→ 之後需要時再做
     - 彈幕分頁不在 A：`after` → W6 replay，`before` → Backlog（Q167）
