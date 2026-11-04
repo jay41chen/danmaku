@@ -137,6 +137,16 @@ cd client && npm install && npm run dev                          # http://localh
 
 `JWT_SECRET` is required (at least 32 bytes). See [Environment Variables](README.zh-TW.md#environment-variables).
 
+### Git hooks
+
+Run once per clone. Pre-commit checks `gofmt`, `go vet` and the client lint; pre-push runs all tests and the
+client build, for whichever of `server/` and `client/` changed. Tests use a separate database, so create it too:
+
+```bash
+git config core.hooksPath .githooks
+docker exec danmaku-db createdb -U danmaku danmaku_test
+```
+
 ## API overview
 
 | Method | Path | Auth | |

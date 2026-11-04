@@ -2,17 +2,20 @@
 
 ## Milestones（2026-11-03 訂，暫定）
 
-> 主軸：application + architecture。從 2026-11-03 起估 5 ～ 7 週。估計假設投入時間跟前一個月差不多，沒算做的過程中新長出來的項目 → 實際偏後半段。細項見下方 W4b / W6
+> 主軸：application + architecture。從 2026-11-03 起估 5 ～ 7 週（2026-11-04 重排 M3 之後的順序，日期從當天重算，假設 M7 會做）。估計假設投入時間跟前一個月差不多，沒算做的過程中新長出來的項目 → 實際偏後半段。細項見下方 W4b / W6
 
 | Milestone | 內容 | 估計（週） | 預計完成（快 ～ 慢） |
 |---|---|---|---|
 | M1 房間可瀏覽 ✅ | 房間列表（`GET /rooms` cursor 分頁、`/me/rooms`）+ 選房間 UI（2026-11-04 完成，[ADR 0008](docs/design/0008-cursor-pagination.md)） | 0.5 ～ 0.75 | 11/6 ～ 11/8 |
 | M2 房間有人氣 ✅ | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前；2026-11-04 完成，[ADR 0010](docs/design/0010-room-presence.md)） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
-| M3 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/19 ～ 11/27 |
-| M4 最小 CI | GitHub Actions 跑 `go vet` / `go test` + multi-stage Dockerfile | 0.25 ～ 0.5 | 11/21 ～ 11/30 |
-| M5 不漏訊息 | replay + auto-reconnect（含 `after`）+ half-open watchdog + 證明它有效的 SLI metrics（漏訊息數、重連 / 補撈次數、送達延遲） | 1 ～ 1.5 | 11/28 ～ 12/11 |
-| M6 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗） | 1 ～ 1.25 | 12/5 ～ 12/19 |
-| M7 驗收 | 輕量 chaos：本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞），檢查不漏訊息、人數恢復、重連成功 | 0.5 | 12/8 ～ 12/23 |
+| M3 Git hook ✅ | pre-commit：`gofmt` / `go vet` / 前端 lint；pre-push：全部測試（只用 `danmaku_test`）+ 前端 build（2026-11-04 完成） | < 0.1 | 11/4 ～ 11/5 |
+| M4 不漏訊息 | replay + auto-reconnect（含 `after`）+ half-open watchdog + 證明它有效的 SLI metrics（漏訊息數、重連 / 補撈次數、送達延遲）；設計 replay 時要先想好「已廣播、還沒存進 DB」 | 1 ～ 1.5 | 11/11 ～ 11/16 |
+| M5 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/18 ～ 11/26 |
+| M6 壓測基準 | 自己寫腳本在本機模擬大量流量（不打 prod、只用測試環境），記下同步寫入的基準數字，決定 M7 要不要做；同一台 Mac 的數字只用來比較前後，不當容量上限 | 0.5 ～ 0.75 | 11/22 ～ 12/2 |
+| M7 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗）；**看 M6 結果決定要不要做** | 1 ～ 1.25 | 11/29 ～ 12/10 |
+| M8 依人數排序 | 房間列表依人數排序（從 M2 移出，見下方 W4b） | 0.5 ～ 0.75 | 12/2 ～ 12/16 |
+| M9 最小 CI | 精簡 GitHub Actions（只跑測試，不擋部署、不走 PR）+ multi-stage Dockerfile | 0.1 ～ 0.25 | 12/3 ～ 12/17 |
+| M10 驗收 | 本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞）+ 重跑 M6 的壓測，檢查不漏訊息、人數恢復、重連成功 | 0.5 ～ 0.75 | 12/7 ～ 12/23 |
 
 選做（infra 向）：Railway multi-replica metrics / service discovery、alerts、trusted proxy + IPv6 /64、全域限流、測試 DB 隔離、Hub + SSE。其餘見最下方 Backlog
 
@@ -150,7 +153,7 @@
     - Cursor pagination（keyset）：`ORDER BY created_at DESC, public_id DESC`，`public_id` 當 tiebreaker；撈 `limit+1` 判斷有沒有下一頁，cursor = 最後一筆回傳的；migration 000013 partial index `rooms(created_at, public_id) WHERE deleted_at IS NULL`（見 go-notes 3.37）
     - Page token：base64url 的 JSON `{v, created_at, public_id}`，對 client opaque；decode 嚴格（不認識的欄位、後面多接資料、版本、零值時間、public_id 格式 → `400 invalid cursor`）。`limit` 預設 20、最多 50（`model.MaxRoomListLimit`）
     - `GET /me/rooms` 也走同一套分頁（雖然未刪除的最多 3 筆）：之後列出已刪除房間（恢復功能）時不用改格式
-    - Viewer 數排序 → M2（presence 之後）
+    - [ ] Viewer 數排序 → M8（2026-11-04 從 M2 移過來）。要先解決：目前人數只推給房內觀眾，`GET /rooms` 拿不到；沒有觀眾的 server 不會算那間房，要有人清掉過期的數字；人數一直變，現在的 `(created_at, public_id)` cursor 不能直接沿用
     - Known issue（先不處理，2026-11-04）：`/me/rooms` 沒有 `(owner_id, created_at, public_id)` index。`danmaku_test` 強制關掉 seq scan 跑 `EXPLAIN`：planner 沿著 `rooms_created_at_public_id_idx` 倒著走、逐筆 `Filter: owner_id`，資料多、自己的房間又很舊時要掃過大部分的表；另一條路 `rooms_owner_id_idx` 只照 owner_id 排，還要 Sort。未刪除的最多 3 間，但被刪除的會一直累積（見下方 soft delete 的 known issue）。等有資料量能用 `EXPLAIN ANALYZE` 量出差別再加；加的時候要考慮：partial `WHERE deleted_at IS NULL` 與否、`rooms_owner_id_idx` 能不能 drop（`ON DELETE RESTRICT` 的 FK 檢查也會用到它，而且包含已刪除的房間）
   - [x] 選房間的 UI（M1 前端，2026-11-04）：「所有房間」+ 登入後的「我的房間」，每個房間是 `?room=<public_id>` 連結（整頁重載，沿用原本換房方式）；「載入更多」用 `next_page_token`；房名用 `<bdi>` + overflow 隔離
     - 建立房間的 UI 還沒有（只能打 `POST /rooms`）→ 之後需要時再做
@@ -193,9 +196,9 @@
 
 ## W6 — CI/CD + 進階穩定性
 
-> 順序（2026-11-03，對應上方 M2、M4–M7）：跨 server 人數（提前到 M2）→ 最小 CI + multi-stage → replay + auto-reconnect + half-open watchdog → 非同步保存 → 輕量 chaos 驗收；其餘 W6 項目為選做（見上方 Milestones）
+> 順序（2026-11-04 重排，以上方 Milestones 為準）：跨 server 人數（M2）→ replay + auto-reconnect + half-open watchdog（M4）→ 壓測基準（M6）→ 非同步保存（M7）→ 最小 CI + multi-stage（M9）→ 故障情境 + 壓測驗收（M10）；其餘 W6 項目為選做（見上方 Milestones）
 
-- [ ] CI/CD（GitHub Actions）
+- [ ] CI/CD（GitHub Actions）：範圍見 M9（2026-11-04 定）。自己一個人開發，不走 PR，部署也不等 CI；要改成擋部署時再調整
 - [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
 - [ ] Redis List replay（搭配前端 auto-reconnect）
   - 補漏的 API 候選：`GET /rooms/{public_id}/messages?after=<id>`（2026-11-03 從 W5 Pagination 移來）跟 Redis List replay 二選一或並用，這裡一起決定

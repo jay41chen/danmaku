@@ -149,6 +149,15 @@ npm run dev
 
 4. 開啟 http://localhost:5173/danmaku/
 
+### Git hooks
+
+每個 clone 設定一次。pre-commit 檢查 `gofmt`、`go vet` 和前端 lint；pre-push 依 `server/`、`client/` 有沒有變動，跑全部測試和前端 build。測試用獨立的 DB，也要建一次：
+
+```bash
+git config core.hooksPath .githooks
+docker exec danmaku-db createdb -U danmaku danmaku_test
+```
+
 ## API
 
 | Method | Path | 要登入 | 說明 |
