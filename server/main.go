@@ -48,6 +48,7 @@ func main() {
 		ws:       wsHandler,
 	})
 	go wsHandler.StartBroadcast()
+	go wsHandler.StartPresence(redis)
 
 	startServer(mux, cfg.Port, cfg.CORSOrigins)
 }

@@ -261,3 +261,13 @@ func (this *WebsocketHandler) StartBroadcast() {
 		this.hub.Broadcast(context.Background(), roomID, []byte(msg))
 	})
 }
+
+func (this *WebsocketHandler) StartPresence(store wsPresence) {
+	// Presence也是Server level的任務，所以一樣用context.Background()
+	renew := time.NewTicker(10 * time.Second)
+	defer renew.Stop()
+	count := time.NewTicker(5 * time.Second)
+	defer count.Stop()
+	worker := newPresenceWorker(this.hub, store, this.logger)
+	worker.run(context.Background(), this.hub.PresenceChanged(), renew.C, count.C)
+}

@@ -1,18 +1,21 @@
 package handler
 
+import "encoding/json"
+
 // WS 上跑的訊息都包成 envelope：{"type": ..., "payload": ...}
 // client 靠 type 分辨收到的是廣播的訊息還是錯誤，之後要加新種類（presence 等）也不用改格式
 const (
-	wsTypeMessage = "message"
-	wsTypeError   = "error"
-	wsTypeAuth    = "auth"     // client → server：連線內登入 / 續期
-	wsTypeAuthOK  = "auth_ok"  // server → client：登入 / 續期成功
-	wsTypePing    = "ping"     // client → server：應用層心跳
-	wsTypePong    = "pong"     // server → client：回應心跳
-	wsTypeJoin    = "join"     // client → server：進入房間
-	wsTypeJoinOK  = "join_ok"  // server → client：進入房間成功
-	wsTypeLeave   = "leave"    // client → server：離開房間
-	wsTypeLeaveOK = "leave_ok" // server → client：離開房間成功
+	wsTypeMessage  = "message"
+	wsTypeError    = "error"
+	wsTypeAuth     = "auth"     // client → server：連線內登入 / 續期
+	wsTypeAuthOK   = "auth_ok"  // server → client：登入 / 續期成功
+	wsTypePing     = "ping"     // client → server：應用層心跳
+	wsTypePong     = "pong"     // server → client：回應心跳
+	wsTypeJoin     = "join"     // client → server：進入房間
+	wsTypeJoinOK   = "join_ok"  // server → client：進入房間成功
+	wsTypeLeave    = "leave"    // client → server：離開房間
+	wsTypeLeaveOK  = "leave_ok" // server → client：離開房間成功
+	wsTypePresence = "presence" // server → client：房間人數（每 5 秒推一次）
 
 	wsCodeWriteForbidden  = "ws_write_forbidden"
 	wsMsgWriteForbidden   = "請透過 POST /rooms/{public_id}/messages 發送"
@@ -56,4 +59,23 @@ type wsRoomPayload struct {
 type wsAuthOKPayload struct {
 	User      userResponse `json:"user"`
 	ExpiresIn int          `json:"expires_in"`
+}
+
+// type = "presence" 的 payload（server → client）：room 是房間的 public_id，count 是跨 server 去重後的在線人數
+type wsPresencePayload struct {
+	Room  string `json:"room"`
+	Count int    `json:"count"`
+}
+
+// presence envelope 的 frame（給 presence worker 用，沒有 request ctx 所以不是 WebsocketHandler 的方法）
+// 編碼失敗回傳 nil（Hub.Broadcast 收到 nil 會送出空 frame，所以呼叫端要自己檢查）；實務上這個固定結構不會失敗
+func encodePresence(room string, count int) []byte {
+	msg, err := json.Marshal(wsEnvelope{
+		Type:    wsTypePresence,
+		Payload: wsPresencePayload{Room: room, Count: count},
+	})
+	if err != nil {
+		return nil
+	}
+	return msg
 }

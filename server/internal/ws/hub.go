@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 )
 
@@ -48,6 +49,8 @@ type Hub struct {
 	rooms      map[string]map[*Client]struct{} // 房間 public_id → 在裡面的連線（廣播用的索引，跟 clientState.room 同步）
 	members    map[int64]int                   // user id → 這個 user 在這台 server 上的連線數（同一個人多分頁只算一個 viewer）
 	logger     *slog.Logger
+	// presence 快照可能變了的通知（buffer 1，非阻塞送）：worker 醒來後自己呼叫 PresenceSnapshot 取最新的
+	presenceWake chan struct{}
 }
 
 // 一條連線的狀態，全部由 Hub.mu 保護。userID == 0 代表匿名（users.id 是 IDENTITY，從 1 開始，不會有 0）
@@ -63,11 +66,12 @@ type clientState struct {
 // logger 在這裡才取 slog.Default()：main 會在建立 handler 之前 slog.SetDefault，package 初始化時取會拿到舊的
 func NewHub(maxClients int) *Hub {
 	return &Hub{
-		maxClients: maxClients,
-		clients:    make(map[*Client]*clientState),
-		rooms:      make(map[string]map[*Client]struct{}),
-		members:    make(map[int64]int),
-		logger:     slog.Default().With("component", "websocket"),
+		maxClients:   maxClients,
+		clients:      make(map[*Client]*clientState),
+		rooms:        make(map[string]map[*Client]struct{}),
+		members:      make(map[int64]int),
+		presenceWake: make(chan struct{}, 1),
+		logger:       slog.Default().With("component", "websocket"),
 	}
 }
 
@@ -125,6 +129,7 @@ func (h *Hub) removeClientLocked(c *Client) string {
 	room := st.room
 	h.removeFromRoomLocked(c, room)
 	st.room = ""
+	h.notifyPresenceLocked()
 	prom.WebsocketConnections.Dec()
 	delete(h.clients, c)
 	h.updateViewersGaugeLocked()
@@ -159,6 +164,7 @@ func (h *Hub) Join(ctx context.Context, c *Client, room string, joinOK []byte) b
 		h.rooms[room] = members
 	}
 	members[c] = struct{}{}
+	h.notifyPresenceLocked()
 	h.sendLocked(ctx, c, st, joinOK)
 	return true
 }
@@ -174,6 +180,7 @@ func (h *Hub) Leave(ctx context.Context, c *Client, leaveOK []byte) {
 	}
 	h.removeFromRoomLocked(c, st.room)
 	st.room = ""
+	h.notifyPresenceLocked()
 	h.sendLocked(ctx, c, st, leaveOK)
 }
 
@@ -196,6 +203,7 @@ func (h *Hub) Authenticate(ctx context.Context, c *Client, userID int64, usernam
 		}
 		st.userID = userID
 		h.memberJoinedLocked(userID)
+		h.notifyPresenceLocked()
 		h.logger.InfoContext(ctx, "ws identity changed", "from", identityLabel(from), "to", identityLabel(userID), "reason", reasonAuth)
 	}
 	// 同一個 user 續期不算身分變更，只更新 exp 和 timer
@@ -221,6 +229,35 @@ func (h *Hub) Downgrade(ctx context.Context, c *Client, reason string, reply []b
 	h.sendLocked(ctx, c, st, reply)
 }
 
+// 目前在房間裡的連線快照：每條「已註冊且 room != ""」的連線一筆（連線 ID + 目前身分，匿名 = 0）
+// 不在房間的連線不算。回傳的是新建的 map，呼叫端可以隨便用
+func (h *Hub) PresenceSnapshot() map[model.PresenceEntry]struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	snap := make(map[model.PresenceEntry]struct{})
+	for c, st := range h.clients {
+		if st.room == "" {
+			continue
+		}
+		snap[model.PresenceEntry{Room: st.room, ConnID: c.ID, UserID: st.userID}] = struct{}{}
+	}
+	return snap
+}
+
+// 快照可能變了就會有訊號（合併過：多次變動只留一個）；worker 收到後再呼叫 PresenceSnapshot
+func (h *Hub) PresenceChanged() <-chan struct{} {
+	return h.presenceWake
+}
+
+// 通知 presence worker 快照可能變了（呼叫時要持有 h.mu）
+// 非阻塞送：已經有未處理的訊號就直接丟掉，不能在鎖裡等
+func (h *Hub) notifyPresenceLocked() {
+	select {
+	case h.presenceWake <- struct{}{}:
+	default:
+	}
+}
+
 // 排一則 frame 給這條連線。沒註冊（應該被移除了）就靜靜丟掉
 func (h *Hub) Send(ctx context.Context, c *Client, frame []byte) {
 	h.mu.Lock()
@@ -233,7 +270,8 @@ func (h *Hub) Send(ctx context.Context, c *Client, frame []byte) {
 }
 
 // 把 frame 送給所有在 room 的連線
-// 跑在 Redis consumer goroutine（整台只有一個，SUB 確認也靠它）：只能做不會卡的事，絕不寫 conn
+// 呼叫者有兩個：Redis consumer goroutine（整台只有一個，SUB 確認也靠它）和 presence worker
+// 所以只能做不會卡的事，絕不寫 conn
 // frame 這個 slice 是所有連線共用的，只讀不改（每條連線的 outbox 裡放的是同一個 slice）
 func (h *Hub) Broadcast(ctx context.Context, room string, frame []byte) {
 	h.mu.Lock()
@@ -291,6 +329,7 @@ func (h *Hub) downgradeLocked(ctx context.Context, c *Client, st *clientState, r
 	st.userID = 0
 	st.username = ""
 	st.exp = time.Time{}
+	h.notifyPresenceLocked()
 	h.updateViewersGaugeLocked()
 	h.logger.InfoContext(ctx, "ws identity changed", "from", identityLabel(from), "to", anonymous, "reason", reason)
 }

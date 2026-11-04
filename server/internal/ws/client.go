@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jay41chen/danmaku/server/internal/randx"
 )
 
 const (
@@ -23,6 +24,8 @@ const (
 // 發現連線壞了只 Close() 叫醒讀取迴圈，絕不自己從任何 map 移除或呼叫 Redis（清理 owner 是呼叫 ReadLoop 的那一方）
 // 寫 conn 不用拿鎖：gorilla 同一條連線只能一個 writer，這個 writer 就是 WriteLoop，其他人一律用 Enqueue 排進 send
 type Client struct {
+	// 連線 ID，只給 presence 用（跨 server 的 Redis 成員要靠它區分每條連線）；Hub 的 map 仍然用 *Client 當 key
+	ID   string
 	conn *websocket.Conn
 	// outbox：要寫給這條連線的 frame（已經編碼好的 bytes），只有 WriteLoop 會讀出來寫進 conn
 	// 不 close：往裡面送的有好幾個人（廣播、讀取迴圈），close 了別人再送會 panic；WriteLoop 靠 done 結束
@@ -41,6 +44,7 @@ type Client struct {
 // logger 在這裡才取 slog.Default()：main 會 slog.SetDefault，package 初始化時取會拿到舊的
 func NewClient(conn *websocket.Conn, pingPeriod, pongWait time.Duration) *Client {
 	return &Client{
+		ID:         randx.URLText(16),
 		conn:       conn,
 		send:       make(chan []byte, SendBuffer),
 		done:       make(chan struct{}),
