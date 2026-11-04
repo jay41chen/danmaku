@@ -14,5 +14,6 @@ fault-injection experiment.
 | [0006](0006-input-validation.md) | Text input validation: reject, don't rewrite | Unicode, PRECIS (RFC 8264), layered defense |
 | [0007](0007-metrics-cardinality.md) | Metric labels must not be chosen by the client | Prometheus cardinality, middleware ordering, wiring tests |
 | [0008](0008-cursor-pagination.md) | Room list: cursor pagination with an opaque, strictly parsed token | keyset pagination, tiebreakers, partial indexes, parse don't validate |
+| [0009](0009-consumer-side-interfaces.md) | Consumer-side interfaces, domain errors in `model`, one package per backend | interface segregation, dependency direction, composition root, compile-time checks |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.

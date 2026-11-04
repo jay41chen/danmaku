@@ -10,7 +10,6 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 // handler test 共用的假 DB：auth / room / message handler 的 store interface 都靠它實作
@@ -141,7 +140,7 @@ func (f *fakeDBStore) GetRoomLists(ctx context.Context, userID *int64, after *mo
 }
 
 // handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數
-var _ store.RateLimiterInterface = (*fakeRateLimiter)(nil) // compile 時檢查 fake 有實作 interface
+var _ rateLimiter = (*fakeRateLimiter)(nil) // compile 時檢查 fake 有實作 interface
 
 type fakeRateLimiter struct {
 	blockKey   string                   // 收到這個 key 就回 allowed=false

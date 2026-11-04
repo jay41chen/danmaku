@@ -14,8 +14,9 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	logging "github.com/jay41chen/danmaku/server/internal/logging"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
+	"github.com/jay41chen/danmaku/server/internal/pgstore"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
-	"github.com/jay41chen/danmaku/server/internal/store"
+	"github.com/jay41chen/danmaku/server/internal/redisstore"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -36,7 +37,7 @@ func main() {
 	db := initDatabase(cfg.DatabaseURL)
 	redis := initRedis(cfg.RedisURL)
 
-	// RedisStore 同時實作 Pub/Sub 和 RateLimiterInterface，同一條連線共用
+	// RedisStore 同時實作 Pub/Sub 和 rateLimiter，同一條連線共用
 	wsHandler := handler.NewWebsocketHandler(redis, db, tokens)
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
@@ -58,13 +59,13 @@ func initApp() {
 	slog.SetDefault(slog.New(contextHandler))
 }
 
-func initDatabase(dbURL string) *store.DBStore {
+func initDatabase(dbURL string) *pgstore.DBStore {
 	// 這邊隱含了semantic上的順序，先準備好schema再建立DB
-	if err := store.RunMigration(dbURL); err != nil {
+	if err := pgstore.RunMigration(dbURL); err != nil {
 		slog.Error("db migration failed", "error", err)
 		os.Exit(1)
 	}
-	dbStore, err := store.NewDBStore(context.Background(), dbURL)
+	dbStore, err := pgstore.NewDBStore(context.Background(), dbURL)
 	if err != nil {
 		// fatal will terminate the execution!!
 		slog.Error("db init failed", "error", err)
@@ -74,8 +75,8 @@ func initDatabase(dbURL string) *store.DBStore {
 	return dbStore
 }
 
-func initRedis(redisURL string) *store.RedisStore {
-	redisStore, err := store.NewRedisStore(context.Background(), redisURL)
+func initRedis(redisURL string) *redisstore.RedisStore {
+	redisStore, err := redisstore.NewRedisStore(context.Background(), redisURL)
 	if err != nil {
 		slog.Error("redis init failed", "error", err)
 		os.Exit(1)

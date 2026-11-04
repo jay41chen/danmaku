@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"net/http"
@@ -8,7 +9,6 @@ import (
 	"time"
 
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 // 限流的「機制」：規則長什麼樣、怎麼組 key、被擋時怎麼回應
@@ -28,10 +28,22 @@ func (rule rateRule) key(value string) string {
 	return "rl:" + rule.name + ":" + value
 }
 
+// 限流器：interface 定義在使用方，理由同 auth.go 的 authStore
+// 由 *redisstore.RedisStore 實作（Redis 計數，多台 server 共用）
+// 固定時間窗口：同一個 key 在 window 內最多 limit 次
+type rateLimiter interface {
+	// allowed=false 時，retryAfter 是這個窗口還剩多久
+	Allow(ctx context.Context, key string, limit int, window time.Duration) (allowed bool, retryAfter time.Duration, err error)
+	// 清掉 key 的計數（登入成功時用，避免使用者自己打錯幾次後被鎖）
+	Reset(ctx context.Context, key string) error
+	// 退還這一次 Allow 用掉的額度（-1）；key 已經過期就什麼都不做
+	Refund(ctx context.Context, key string) error
+}
+
 // 問 limiter 這條規則放不放行；被擋時回傳還要等多久（Retry-After 用）
 // 這裡負責 fail open、記 log、累計 metric；回不回 429 由呼叫端決定
 // （login 一條規則擋住就直接回；POST /rooms/{public_id}/messages 兩條都要問，取比較長的等待時間）
-func checkRate(r *http.Request, limiter store.RateLimiterInterface, logger *slog.Logger, rule rateRule, value string) (allowed bool, retryAfter time.Duration) {
+func checkRate(r *http.Request, limiter rateLimiter, logger *slog.Logger, rule rateRule, value string) (allowed bool, retryAfter time.Duration) {
 	key := rule.key(value)
 	allowed, retryAfter, err := limiter.Allow(r.Context(), key, rule.limit, rule.window)
 	// 直接遇到limiter error

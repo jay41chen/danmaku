@@ -35,6 +35,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | Zero-width, bidi-override and Zalgo text in messages and room names | PRECIS (RFC 8264) to reject invalid text without rewriting it; layout isolation on the client | [0006](docs/design/0006-input-validation.md) |
 | Anyone could make Prometheus run out of memory by requesting random URLs | Metric labels are restricted to known values (route pattern, standard methods), with a test that runs requests through the real middleware chain | [0007](docs/design/0007-metrics-cardinality.md) |
 | Offset pagination repeats or skips rooms when the list changes, and gets slower the deeper you page | Keyset pagination on `(created_at, public_id)` with a partial index; fetch `limit+1` to detect the next page; an opaque page token that the server parses strictly (unknown fields, trailing data, version, id format → 400) | [0008](docs/design/0008-cursor-pagination.md) |
+| One 13-method store interface: every handler depended on methods it never called, test fakes compiled while missing methods, and handlers imported the Postgres package just for its errors | Each handler declares a small interface with only the methods it calls (Go interfaces are satisfied implicitly); domain errors live in a dependency-free `model`; Postgres and Redis code in separate packages, so only `main.go` knows the backends | [0009](docs/design/0009-consumer-side-interfaces.md) |
 
 ## Architecture
 

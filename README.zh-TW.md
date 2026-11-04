@@ -29,6 +29,7 @@
 | 彈幕、房名裡的零寬字元、RLO、Zalgo | 用 PRECIS（RFC 8264）只擋不合法的文字、不改寫；版面問題交給前端隔離 | [0006](docs/design/0006-input-validation.md) |
 | 任何人亂打 URL 就能讓 Prometheus 記憶體爆掉 | Metrics label 只用已知的值（route pattern、標準 method），並用走真實 middleware chain 的 test 守住 | [0007](docs/design/0007-metrics-cardinality.md) |
 | 用 offset 分頁的話，列表在翻頁期間有增減就會重複或漏掉房間，而且越後面越慢 | 用 `(created_at, public_id)` 做 keyset 分頁並建 partial index；多撈一筆判斷有沒有下一頁；page token 對 client 是 opaque，server 嚴格解析（不認識的欄位、後面多接資料、版本、id 格式不對都回 400） | [0008](docs/design/0008-cursor-pagination.md) |
+| 一個 13 個方法的 store interface：每個 handler 都依賴用不到的方法，test 的 fake 少實作方法也能編譯，handler 還為了錯誤值 import Postgres 的 package | 每個 handler 自己宣告只含它會呼叫的方法的小 interface（Go 的 interface 是隱式符合）；domain error 放在不依賴任何東西的 `model`；Postgres 和 Redis 分成兩個 package，只有 `main.go` 知道底下用什麼 | [0009](docs/design/0009-consumer-side-interfaces.md) |
 
 ## 架構
 

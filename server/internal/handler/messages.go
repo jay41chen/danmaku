@@ -12,7 +12,6 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
 // 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
@@ -41,12 +40,12 @@ type messageStore interface {
 type MessageHandler struct {
 	db      messageStore
 	redis   messagePublisher
-	limiter store.RateLimiterInterface
+	limiter rateLimiter
 	logger  *slog.Logger
 }
 
 // constructor
-func NewMessageHandler(db messageStore, redis messagePublisher, limiter store.RateLimiterInterface) *MessageHandler {
+func NewMessageHandler(db messageStore, redis messagePublisher, limiter rateLimiter) *MessageHandler {
 	return &MessageHandler{
 		db:      db,
 		redis:   redis,

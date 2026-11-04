@@ -60,7 +60,7 @@ func (e *RefreshTokenDuplicateUseError) Is(target error) bool {
 }
 
 // 被撤銷的憑證（valid_after 之前發的 token）又被拿來用：資安訊號（多半是攻擊者手上的舊 token）
-// 不再觸發撤銷（見 store/refresh_token.go 的 tokenState 上方的狀態表），但要讓 handler 記 log，所以獨立成帶 userID 的 error
+// 不再觸發撤銷（見 pgstore/refresh_token.go 的 tokenState 上方的狀態表），但要讓 handler 記 log，所以獨立成帶 userID 的 error
 // errors.Is(err, ErrRefreshTokenInvalid) 仍成立：對 client 仍是 invalid
 type RefreshTokenRevokedError struct {
 	UserID int64
