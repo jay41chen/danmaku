@@ -3,6 +3,8 @@ import * as session from "./auth/session";
 import { AuthForm } from "./components/AuthForm";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
+import { RoomList } from "./components/RoomList";
+import { fetchMyRooms, fetchRooms } from "./api/rooms";
 import { ROOM_PUBLIC_ID } from "./config";
 import { useRoomStatus } from "./hooks/useRoomStatus";
 import { useSession } from "./hooks/useSession";
@@ -50,6 +52,8 @@ function App() {
       ) : (
         <AuthForm />
       )}
+      <RoomList title="所有房間" fetcher={fetchRooms} />
+      {user && <RoomList key={user.id} title="我的房間" fetcher={fetchMyRooms} />}
       {roomStatus === "not_found" ? (
         <div style={{ color: "crimson" }}>房間不存在（{ROOM_PUBLIC_ID}）</div>
       ) : (
