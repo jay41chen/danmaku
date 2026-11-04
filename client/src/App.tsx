@@ -6,13 +6,14 @@ import { MessageList } from "./components/MessageList";
 import { RoomList } from "./components/RoomList";
 import { fetchMyRooms, fetchRooms } from "./api/rooms";
 import { ROOM_PUBLIC_ID } from "./config";
-import { useRoomStatus } from "./hooks/useRoomStatus";
+import { useRoomPresence, useRoomStatus } from "./hooks/useRoomStatus";
 import { useSession } from "./hooks/useSession";
 import * as connection from "./realtime/connection";
 
 function App() {
   const { status, user } = useSession();
   const roomStatus = useRoomStatus();
+  const presence = useRoomPresence();
   // 登出可能要等進行中的 refresh 結束（最多約 10 秒），期間按鈕停用並顯示「登出中…」
   const [loggingOut, setLoggingOut] = useState(false);
 
@@ -58,6 +59,7 @@ function App() {
         <div style={{ color: "crimson" }}>房間不存在（{ROOM_PUBLIC_ID}）</div>
       ) : (
         <>
+          {presence !== null && <div>{presence} 人在線</div>}
           <MessageList />
           <Composer />
         </>

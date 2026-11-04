@@ -17,3 +17,20 @@ export function set(next: RoomStatus) {
   status = next;
   listeners.forEach((l) => l());
 }
+
+// 房間在線人數（server 約每 5 秒推一次 presence）；null = 還沒收到過 / 已斷線，UI 不顯示
+let presence: number | null = null;
+
+export function getPresence(): number | null {
+  return presence;
+}
+
+export function setPresence(next: number | null) {
+  if (next === presence) return;
+  presence = next;
+  listeners.forEach((l) => l());
+}
+
+export function isPresenceCount(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0;
+}

@@ -59,6 +59,7 @@ function startHeartbeat(sock: WebSocket) {
       console.warn("ws: pong timeout, reconnecting");
       // 先把 ws 設 null，舊 socket 的 onclose 才不會重複排重連；重連由這裡直接排
       ws = null;
+      room.setPresence(null);
       stopHeartbeat();
       clearAuthRetry();
       clearJoinRetry();
@@ -139,6 +140,7 @@ async function fetchMessages() {
 function recycle() {
   const old = ws;
   ws = null;
+  room.setPresence(null);
   stopHeartbeat();
   old?.close();
   reconnectAttempt = 0;
@@ -191,6 +193,12 @@ function handleFrame(sock: WebSocket, raw: unknown) {
   switch (frame.type) {
     case "message":
       if (messages.isMessage(frame.payload)) messages.merge([frame.payload]);
+      break;
+    case "presence":
+      // 只收目前房間的；count 不合法就忽略（保留上一個數字）
+      if (payload?.room === ROOM_PUBLIC_ID && room.isPresenceCount(payload.count)) {
+        room.setPresence(payload.count);
+      }
       break;
     case "pong":
       // 收到就代表連線還活著；不用渲染
@@ -274,6 +282,7 @@ function connect() {
     console.info("ws closed", e.code, e.wasClean);
     if (sock !== ws) return; // 自己關的（stop / 登出 recycle）
     ws = null;
+    room.setPresence(null);
     clearAuthRetry();
     clearJoinRetry();
     stopHeartbeat();
@@ -311,6 +320,7 @@ export function stop() {
   clearAuthRetry();
   clearJoinRetry();
   stopHeartbeat();
+  room.setPresence(null);
   const old = ws;
   ws = null; // 先設 null，onclose 才會認得是自己關的
   old?.close();
