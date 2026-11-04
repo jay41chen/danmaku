@@ -1,0 +1,71 @@
+#!/bin/sh
+# 推送前檢查：依實際變動的範圍跑 server 測試 / client build。
+# 跳過：git push --no-verify
+set -u
+
+root=$(git rev-parse --show-toplevel) || exit 1
+zero=0000000000000000000000000000000000000000
+
+server_changed=0
+client_changed=0
+any=0
+diff_head=0
+head_sha=$(git rev-parse HEAD 2>/dev/null || echo none)
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+	# 刪除分支，沒東西要驗
+	case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+	any=1
+	[ "$local_sha" != "$head_sha" ] && diff_head=1
+	if [ "$remote_sha" = "$zero" ] || ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+		# 新分支或本地沒有遠端物件，無法 diff，保守視為都有變
+		server_changed=1
+		client_changed=1
+		continue
+	fi
+	# diff 失敗一樣保守視為都有變；檔名含 " \ tab 時 git 會在路徑前加引號，所以 pattern 要接受
+	if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "$remote_sha" "$local_sha"); then
+		server_changed=1
+		client_changed=1
+		continue
+	fi
+	printf '%s\n' "$files" | grep -q '^"\{0,1\}server/' && server_changed=1
+	printf '%s\n' "$files" | grep -q '^"\{0,1\}client/' && client_changed=1
+done
+
+if [ "$any" -eq 0 ]; then
+	exit 0
+fi
+if [ "$server_changed" -eq 0 ] && [ "$client_changed" -eq 0 ]; then
+	echo "pre-push：server/ 與 client/ 都沒變動，略過檢查"
+	exit 0
+fi
+
+# 測試跑在工作目錄 / HEAD 上；若與實際要推的內容不同，先警告（不擋）
+if [ -n "$(git status --porcelain -- server client)" ] || [ "$diff_head" -eq 1 ]; then
+	echo "pre-push 警告：測試跑在工作目錄 / HEAD 上，與實際要推送的內容不同" >&2
+fi
+
+fail() {
+	echo "pre-push 失敗：$1（git push --no-verify 可跳過）" >&2
+	exit 1
+}
+
+# hook 環境會帶 GIT_DIR 等變數，避免干擾 go / npm 內部呼叫 git
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX
+
+if [ "$server_changed" -eq 1 ]; then
+	nc -z localhost 3192 >/dev/null 2>&1 || fail "Postgres (3192) 未啟動，請先 docker compose up -d postgres redis"
+	nc -z localhost 2907 >/dev/null 2>&1 || fail "Redis (2907) 未啟動，請先 docker compose up -d postgres redis"
+	# 一律覆寫（不沿用外部環境）：這兩個變數缺了測試會靜默 SKIP，
+	# 且測試絕不能碰開發用 DB。-p 1 因為 store 測試共用同一個 DB，不能並行。
+	# 不加 -count=1：沒改到的 package 用 Go 的測試快取，只動 DB 資料時要自己加 -count=1 重跑。
+	TEST_DATABASE_URL='postgres://danmaku:danmaku@localhost:3192/danmaku_test?sslmode=disable'
+	TEST_REDIS_URL='redis://localhost:2907/15'
+	export TEST_DATABASE_URL TEST_REDIS_URL
+	(cd "$root/server" && go test -race -p 1 ./...) || fail "server go test"
+fi
+
+if [ "$client_changed" -eq 1 ]; then
+	(cd "$root/client" && npm run build) || fail "client npm run build"
+fi

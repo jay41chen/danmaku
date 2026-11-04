@@ -1,0 +1,44 @@
+#!/bin/sh
+# 提交前快速檢查：只看 staged 的內容，沒動到 server/client 就直接放行。
+# 跳過：git commit --no-verify
+set -u
+
+root=$(git rev-parse --show-toplevel) || exit 1
+staged=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR)
+
+go_files=$(printf '%s\n' "$staged" | grep '^server/.*\.go$' || true)
+has_client=$(printf '%s\n' "$staged" | grep -c '^client/' || true)
+
+[ -z "$go_files" ] && [ "$has_client" -eq 0 ] && exit 0
+
+fail() {
+	echo "pre-commit 失敗：$1（git commit --no-verify 可跳過）" >&2
+	exit 1
+}
+
+if [ -n "$go_files" ]; then
+	# gofmt 檢查 index 裡的內容，不是工作目錄（可能已另外格式化過）
+	# 先讀完 staged 內容再 unset，因為 git show ":path" 需要 GIT_INDEX_FILE
+	bad=""
+	while IFS= read -r f; do
+		if ! out=$(git show ":$f" | gofmt -l 2>&1); then
+			# gofmt 非零退出：語法錯誤或找不到 gofmt，不是「未格式化」
+			fail "gofmt 執行失敗：${f}：${out}"
+		fi
+		[ -n "$out" ] && bad="$bad $f"
+	done <<LIST
+$go_files
+LIST
+	[ -n "$bad" ] && fail "gofmt 未格式化（staged 內容）：$bad"
+fi
+
+# hook 環境會帶 GIT_DIR / GIT_INDEX_FILE，避免干擾 go / npm 內部呼叫 git
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX
+
+if [ -n "$go_files" ]; then
+	(cd "$root/server" && go vet ./...) || fail "go vet"
+fi
+
+if [ "$has_client" -gt 0 ]; then
+	(cd "$root/client" && npm run lint) || fail "client npm run lint"
+fi
