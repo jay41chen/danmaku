@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/store"
@@ -88,4 +89,92 @@ func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, r, this.logger, http.StatusOK, room)
+}
+
+// limit 沒帶時的預設值；上限是 store.MaxRoomListLimit
+const defaultRoomListLimit = 20
+
+// 列表裡每個房間只給這兩個欄位
+// 不直接序列化 model.Room：store 的列表沒有 JOIN users，owner_username 是空的，
+// 直接輸出會多出空的 owner_username 和 created_at
+type roomListItem struct {
+	RoomName string `json:"room_name"`
+	PublicID string `json:"public_id"`
+}
+
+// next_page_token 沒有下一頁時整個欄位省略
+type roomListResponse struct {
+	Rooms         []roomListItem `json:"rooms"`
+	NextPageToken string         `json:"next_page_token,omitempty"`
+}
+
+// GET /rooms：公開，列出所有人的房間
+func (this *RoomHandler) HandleListRooms(w http.ResponseWriter, r *http.Request) {
+	this.listRooms(w, r, nil)
+}
+
+// GET /me/rooms：要登入，只列出自己的房間
+func (this *RoomHandler) HandleListMyRooms(w http.ResponseWriter, r *http.Request) {
+	// 跟 HandleMe 一樣：回應看是誰在問，所以 CDN / 瀏覽器都不能存
+	// 放在最前面：錯誤回應也不該被快取
+	w.Header().Set("Cache-Control", "no-store")
+
+	userID, ok := requireUserID(w, r, this.logger)
+	if !ok {
+		return
+	}
+	this.listRooms(w, r, &userID)
+}
+
+// 兩個列表 endpoint 共用；userID 為 nil = 不限 owner
+// 驗證順序：先 limit、再 page_token；任何一個不合格都不碰 DB
+func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userID *int64) {
+	query := r.URL.Query()
+
+	// 沒帶才用預設值；帶了就一定要合法（?limit= 空字串也算帶了 → 400）
+	limit := defaultRoomListLimit
+	if query.Has("limit") {
+		n, err := strconv.Atoi(query.Get("limit"))
+		if err != nil || n < 1 || n > store.MaxRoomListLimit {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+
+	// 沒帶或空字串 = 第一頁
+	var after *store.RoomCursor
+	if raw := query.Get("page_token"); raw != "" {
+		cursor, err := decodePageToken(raw)
+		if err != nil {
+			// 不說是哪一項壞掉
+			http.Error(w, errInvalidPageToken.Error(), http.StatusBadRequest)
+			return
+		}
+		after = &cursor
+	}
+
+	rooms, next, err := this.db.GetRoomLists(r.Context(), userID, after, limit)
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "list rooms failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// make 而不是 var：沒有資料時 JSON 要是 []、不是 null
+	resp := roomListResponse{Rooms: make([]roomListItem, 0, len(rooms))}
+	for _, room := range rooms {
+		resp.Rooms = append(resp.Rooms, roomListItem{RoomName: room.Name, PublicID: room.PublicID})
+	}
+	if next != nil {
+		token, err := encodePageToken(*next)
+		if err != nil {
+			this.logger.ErrorContext(r.Context(), "encode page token failed", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		resp.NextPageToken = token
+	}
+
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, resp)
 }

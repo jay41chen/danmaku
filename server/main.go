@@ -165,6 +165,8 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 
 	r.post("/rooms", http.HandlerFunc(h.rooms.HandleCreateRoom))
 	r.publicGet("/rooms/{public_id}", http.HandlerFunc(h.rooms.HandleGetRoom))
+	// 公開：列出所有人的房間（分頁）
+	r.publicGet("/rooms", http.HandlerFunc(h.rooms.HandleListRooms))
 
 	r.publicGet("/healthcheck", http.HandlerFunc(h.health.HandleHealthCheck))
 	// 公開 route：任何人都能連（匿名）；連上後可以在連線內送 auth frame 升級成登入身分（選擇性）
@@ -179,6 +181,8 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	r.publicPost("/logout", http.HandlerFunc(h.auth.HandleLogout))
 	// 要登入：回目前 token 對應的 user
 	r.get("/me", http.HandlerFunc(h.auth.HandleMe))
+	// 要登入：列出自己的房間（分頁）
+	r.get("/me/rooms", http.HandlerFunc(h.rooms.HandleListMyRooms))
 }
 
 // prod 和 test 共用的 middleware chain：test 走這裡，才測得到跟 prod 一樣的順序

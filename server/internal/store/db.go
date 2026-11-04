@@ -37,6 +37,7 @@ type DBStoreInterface interface {
 	// 實作在 room.go
 	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
 	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
+	GetRoomLists(ctx context.Context, userID *int64, after *RoomCursor, limit int) ([]model.Room, *RoomCursor, error)
 }
 
 type DBStore struct {

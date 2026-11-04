@@ -67,6 +67,15 @@ type fakeDBStore struct {
 	room          model.Room
 	getRoomErr    error
 	gotRoomPublic string // spy：GetRoomByPublicID 收到的 public id
+
+	// GetRoomLists 用
+	listRooms      []model.Room
+	listNextCursor *store.RoomCursor
+	listRoomsErr   error
+	listRoomsCalls int
+	gotListUserID  *int64 // spy：GetRoomLists 收到的 userID（nil = 不限 owner）
+	gotListAfter   *store.RoomCursor
+	gotListLimit   int
 }
 
 func (f *fakeDBStore) QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error) {
@@ -123,6 +132,12 @@ func (f *fakeDBStore) CreateRoom(ctx context.Context, ownerID int64, name string
 func (f *fakeDBStore) GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error) {
 	f.gotRoomPublic = publicID
 	return f.room, f.getRoomErr
+}
+
+func (f *fakeDBStore) GetRoomLists(ctx context.Context, userID *int64, after *store.RoomCursor, limit int) ([]model.Room, *store.RoomCursor, error) {
+	f.listRoomsCalls++
+	f.gotListUserID, f.gotListAfter, f.gotListLimit = userID, after, limit
+	return f.listRooms, f.listNextCursor, f.listRoomsErr
 }
 
 // handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數

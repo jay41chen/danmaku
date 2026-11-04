@@ -2,9 +2,16 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/randx"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -246,4 +253,398 @@ func TestRoomsMigration(t *testing.T) {
 			t.Fatalf("error = %v, want not_null_violation on room_id", err)
 		}
 	})
+}
+
+// 所有測試房間都比 legacy 房間（migration 時間）新，所以 created_at DESC 時 legacy 一定排最後
+var roomListBase = time.Date(2030, 1, 1, 0, 0, 0, 123456000, time.UTC)
+
+func insertListRoom(t *testing.T, s *DBStore, publicID string, ownerID int64, createdAt time.Time, deletedAt *time.Time) {
+	t.Helper()
+	if _, err := s.dbPool.Exec(t.Context(),
+		`INSERT INTO rooms(public_id, owner_id, room_name, created_at, deleted_at) VALUES ($1, $2, 'r', $3, $4)`,
+		publicID, ownerID, createdAt, deletedAt); err != nil {
+		t.Fatalf("setup insert room %s: %v", publicID, err)
+	}
+}
+
+// 建 n 個房間 room0000000..，index 越小越新（created_at 每個差 1 秒），回傳依 DESC 排序的 public_id
+func insertListRooms(t *testing.T, s *DBStore, ownerID int64, n int) []string {
+	t.Helper()
+	ids := make([]string, n)
+	for i := range n {
+		ids[i] = fmt.Sprintf("room%07d", i)
+		insertListRoom(t, s, ids[i], ownerID, roomListBase.Add(-time.Duration(i)*time.Second), nil)
+	}
+	return ids
+}
+
+func roomIDs(rooms []model.Room) []string {
+	ids := make([]string, len(rooms))
+	for i, r := range rooms {
+		ids[i] = r.PublicID
+	}
+	return ids
+}
+
+func TestGetRoomLists(t *testing.T) {
+	// 5 個房間交錯屬於 a / b：index 偶數 a、奇數 b
+	setupTwoOwners := func(t *testing.T) (s *DBStore, a, b int64, all []string) {
+		s = newTestDBStore(t)
+		a = createTestUser(t, s, "A")
+		b = createTestUser(t, s, "B")
+		for i := range 5 {
+			id := fmt.Sprintf("room%07d", i)
+			owner := a
+			if i%2 == 1 {
+				owner = b
+			}
+			insertListRoom(t, s, id, owner, roomListBase.Add(-time.Duration(i)*time.Second), nil)
+			all = append(all, id)
+		}
+		return
+	}
+
+	t.Run("all owners first page", func(t *testing.T) {
+		s, _, _, all := setupTwoOwners(t)
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), nil, nil, 3)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		if got := roomIDs(rooms); !slices.Equal(got, all[:3]) {
+			t.Errorf("ids = %v, want %v", got, all[:3])
+		}
+		if cursor == nil || cursor.PublicID != all[2] || !cursor.CreatedAt.Equal(rooms[2].CreatedAt) {
+			t.Errorf("cursor = %+v, want last returned room %s", cursor, all[2])
+		}
+	})
+
+	t.Run("all owners with cursor", func(t *testing.T) {
+		s, _, _, all := setupTwoOwners(t)
+		after := &RoomCursor{CreatedAt: roomListBase.Add(-2 * time.Second), PublicID: all[2]}
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), nil, after, 10)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		// 剩下 room3、room4，最後是 legacy 房間
+		want := []string{all[3], all[4], LegacyRoomPublicID}
+		if got := roomIDs(rooms); !slices.Equal(got, want) {
+			t.Errorf("ids = %v, want %v", got, want)
+		}
+		if cursor != nil {
+			t.Errorf("cursor = %+v, want nil", cursor)
+		}
+	})
+
+	t.Run("owner only first page", func(t *testing.T) {
+		s, a, _, all := setupTwoOwners(t)
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), &a, nil, 2)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		want := []string{all[0], all[2]}
+		if got := roomIDs(rooms); !slices.Equal(got, want) {
+			t.Errorf("ids = %v, want %v", got, want)
+		}
+		for _, r := range rooms {
+			if r.OwnerID != a {
+				t.Errorf("room %s owner = %d, want %d", r.PublicID, r.OwnerID, a)
+			}
+		}
+		if cursor == nil || cursor.PublicID != all[2] {
+			t.Errorf("cursor = %+v, want public_id %s", cursor, all[2])
+		}
+	})
+
+	t.Run("owner only with cursor", func(t *testing.T) {
+		s, a, _, all := setupTwoOwners(t)
+		after := &RoomCursor{CreatedAt: roomListBase.Add(-2 * time.Second), PublicID: all[2]}
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), &a, after, 10)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		want := []string{all[4]}
+		if got := roomIDs(rooms); !slices.Equal(got, want) {
+			t.Errorf("ids = %v, want %v", got, want)
+		}
+		if cursor != nil {
+			t.Errorf("cursor = %+v, want nil", cursor)
+		}
+	})
+
+	t.Run("same created_at across page boundary", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		for _, id := range []string{"same000000a", "same000000b", "same000000c"} {
+			insertListRoom(t, s, id, owner, roomListBase, nil)
+		}
+
+		page1, cursor, err := s.GetRoomLists(t.Context(), &owner, nil, 2)
+		if err != nil {
+			t.Fatalf("page 1 error = %v", err)
+		}
+		if want := []string{"same000000c", "same000000b"}; !slices.Equal(roomIDs(page1), want) {
+			t.Errorf("page 1 ids = %v, want %v", roomIDs(page1), want)
+		}
+		if cursor == nil {
+			t.Fatal("page 1 cursor = nil, want non-nil")
+		}
+
+		page2, cursor2, err := s.GetRoomLists(t.Context(), &owner, cursor, 2)
+		if err != nil {
+			t.Fatalf("page 2 error = %v", err)
+		}
+		if want := []string{"same000000a"}; !slices.Equal(roomIDs(page2), want) {
+			t.Errorf("page 2 ids = %v, want %v", roomIDs(page2), want)
+		}
+		if cursor2 != nil {
+			t.Errorf("page 2 cursor = %+v, want nil", cursor2)
+		}
+	})
+
+	t.Run("paging through everything", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		want := insertListRooms(t, s, owner, 7)
+
+		var got []string
+		var after *RoomCursor
+		for range 10 { // 防止無窮迴圈
+			rooms, cursor, err := s.GetRoomLists(t.Context(), &owner, after, 3)
+			if err != nil {
+				t.Fatalf("GetRoomLists error = %v", err)
+			}
+			got = append(got, roomIDs(rooms)...)
+			if cursor == nil {
+				break
+			}
+			after = cursor
+		}
+
+		if !slices.Equal(got, want) {
+			t.Errorf("ids = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("soft deleted excluded", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		deleted := roomListBase.Add(time.Hour)
+		insertListRoom(t, s, "room0000001", owner, roomListBase, nil)
+		insertListRoom(t, s, "room0000002", owner, roomListBase.Add(-time.Second), &deleted)
+		insertListRoom(t, s, "room0000003", owner, roomListBase.Add(-2*time.Second), nil)
+
+		mine, _, err := s.GetRoomLists(t.Context(), &owner, nil, 10)
+		if err != nil {
+			t.Fatalf("owner list error = %v", err)
+		}
+		if want := []string{"room0000001", "room0000003"}; !slices.Equal(roomIDs(mine), want) {
+			t.Errorf("owner ids = %v, want %v", roomIDs(mine), want)
+		}
+
+		all, _, err := s.GetRoomLists(t.Context(), nil, nil, 10)
+		if err != nil {
+			t.Fatalf("all list error = %v", err)
+		}
+		if want := []string{"room0000001", "room0000003", LegacyRoomPublicID}; !slices.Equal(roomIDs(all), want) {
+			t.Errorf("all ids = %v, want %v", roomIDs(all), want)
+		}
+	})
+
+	// cursor 之後的 SQL 也要過濾 soft delete
+	t.Run("soft deleted excluded after cursor", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		deleted := roomListBase.Add(time.Hour)
+		insertListRoom(t, s, "room0000001", owner, roomListBase, nil)
+		insertListRoom(t, s, "room0000002", owner, roomListBase.Add(-time.Second), &deleted)
+		insertListRoom(t, s, "room0000003", owner, roomListBase.Add(-2*time.Second), nil)
+		after := &RoomCursor{CreatedAt: roomListBase, PublicID: "room0000001"}
+
+		mine, _, err := s.GetRoomLists(t.Context(), &owner, after, 10)
+		if err != nil {
+			t.Fatalf("owner list error = %v", err)
+		}
+		if want := []string{"room0000003"}; !slices.Equal(roomIDs(mine), want) {
+			t.Errorf("owner ids = %v, want %v", roomIDs(mine), want)
+		}
+
+		all, _, err := s.GetRoomLists(t.Context(), nil, after, 10)
+		if err != nil {
+			t.Fatalf("all list error = %v", err)
+		}
+		if want := []string{"room0000003", LegacyRoomPublicID}; !slices.Equal(roomIDs(all), want) {
+			t.Errorf("all ids = %v, want %v", roomIDs(all), want)
+		}
+	})
+
+	// created_at 全部相同時，翻頁順序完全靠 public_id DESC 決定（4 條 SQL 都要覆蓋）
+	t.Run("tiebreak by public_id across pages", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			allOwners bool
+			want      []string
+		}{
+			{"owner only", false, []string{"ddddddddddd", "ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa"}},
+			{"all owners", true, []string{"ddddddddddd", "ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa", LegacyRoomPublicID}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				s := newTestDBStore(t)
+				owner := createTestUser(t, s, "A")
+				// 故意不照順序插入
+				for _, id := range []string{"bbbbbbbbbbb", "ddddddddddd", "aaaaaaaaaaa", "ccccccccccc"} {
+					insertListRoom(t, s, id, owner, roomListBase, nil)
+				}
+				var userID *int64
+				if !tt.allOwners {
+					userID = &owner
+				}
+
+				var got []string
+				var after *RoomCursor
+				for page := 0; page < 10; page++ { // 防止無窮迴圈
+					rooms, cursor, err := s.GetRoomLists(t.Context(), userID, after, 2)
+					if err != nil {
+						t.Fatalf("page %d error = %v", page+1, err)
+					}
+					if page == 0 {
+						if want := []string{"ddddddddddd", "ccccccccccc"}; !slices.Equal(roomIDs(rooms), want) {
+							t.Errorf("page 1 ids = %v, want %v", roomIDs(rooms), want)
+						}
+					}
+					got = append(got, roomIDs(rooms)...)
+					if cursor == nil {
+						break
+					}
+					after = cursor
+				}
+
+				if !slices.Equal(got, tt.want) {
+					t.Errorf("ids = %v, want %v", got, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("exactly limit rows has no cursor", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		want := insertListRooms(t, s, owner, 3)
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), &owner, nil, 3)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		if !slices.Equal(roomIDs(rooms), want) {
+			t.Errorf("ids = %v, want %v", roomIDs(rooms), want)
+		}
+		if cursor != nil {
+			t.Errorf("cursor = %+v, want nil", cursor)
+		}
+	})
+
+	t.Run("limit plus one rows cursor is last returned row", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		ids := insertListRooms(t, s, owner, 4)
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), &owner, nil, 3)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		if !slices.Equal(roomIDs(rooms), ids[:3]) {
+			t.Errorf("ids = %v, want %v", roomIDs(rooms), ids[:3])
+		}
+		wantTime := roomListBase.Add(-2 * time.Second)
+		if cursor == nil || cursor.PublicID != ids[2] || !cursor.CreatedAt.Equal(wantTime) {
+			t.Errorf("cursor = %+v, want {%v %s}", cursor, wantTime, ids[2])
+		}
+	})
+
+	t.Run("empty result", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+
+		rooms, cursor, err := s.GetRoomLists(t.Context(), &owner, nil, 10)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		if rooms == nil || len(rooms) != 0 {
+			t.Errorf("rooms = %#v, want non-nil empty slice", rooms)
+		}
+		if cursor != nil {
+			t.Errorf("cursor = %+v, want nil", cursor)
+		}
+	})
+
+	t.Run("invalid limit", func(t *testing.T) {
+		s := newTestDBStore(t)
+		for _, limit := range []int{0, -1, MaxRoomListLimit + 1} {
+			rooms, cursor, err := s.GetRoomLists(t.Context(), nil, nil, limit)
+			if !errors.Is(err, ErrInvalidLimit) {
+				t.Errorf("limit %d: error = %v, want ErrInvalidLimit", limit, err)
+			}
+			if rooms != nil || cursor != nil {
+				t.Errorf("limit %d: rooms = %v, cursor = %v, want nil", limit, rooms, cursor)
+			}
+		}
+
+		if _, _, err := s.GetRoomLists(t.Context(), nil, nil, MaxRoomListLimit); err != nil {
+			t.Errorf("limit %d: error = %v, want nil", MaxRoomListLimit, err)
+		}
+	})
+
+	t.Run("microsecond precision", func(t *testing.T) {
+		s := newTestDBStore(t)
+		owner := createTestUser(t, s, "A")
+		created := time.Date(2030, 6, 7, 8, 9, 10, 654321000, time.UTC)
+		insertListRoom(t, s, "room0000001", owner, created, nil)
+		insertListRoom(t, s, "room0000002", owner, created.Add(-time.Second), nil)
+
+		_, cursor, err := s.GetRoomLists(t.Context(), &owner, nil, 1)
+
+		if err != nil {
+			t.Fatalf("GetRoomLists error = %v, want nil", err)
+		}
+		if cursor == nil || !cursor.CreatedAt.Equal(created) {
+			t.Errorf("cursor = %+v, want CreatedAt %v", cursor, created)
+		}
+	})
+}
+
+func TestValidPublicID(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"generated id", randx.URLText(publicIDBytes), true},
+		{"legacy id", LegacyRoomPublicID, true},
+		{"empty", "", false},
+		{"10 chars", strings.Repeat("a", 10), false},
+		{"12 chars", strings.Repeat("a", 12), false},
+		{"contains =", "abcdefghij=", false},
+		{"contains +", "abcdefghij+", false},
+		{"contains /", "abcdefghij/", false},
+		{"contains space", "abcdefghij ", false},
+		{"11 bytes with non-ascii", "abcdefgh中", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidPublicID(tt.in); got != tt.want {
+				t.Errorf("ValidPublicID(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
 }

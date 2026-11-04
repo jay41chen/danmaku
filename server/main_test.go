@@ -159,6 +159,28 @@ func TestRoutes(t *testing.T) {
 			t.Errorf("POST /rooms status = %d, want %d", rec.Code, http.StatusUnauthorized)
 		}
 	})
+	t.Run("GET /me/rooms without token returns 401", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/me/rooms", nil)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET /me/rooms status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+	})
+	// 這個 mux 的 RoomHandler 沒有 DB：帶壞的 limit 讓 handler 在碰 DB 前就回 400，
+	// 400 代表請求通過了 auth、進到 handler（公開）
+	t.Run("GET /rooms without token is public", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/rooms?limit=abc", nil)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("GET /rooms?limit=abc status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
 	t.Run("GET /me without token returns 401", func(t *testing.T) {
 		defer func() {
 			if r := recover(); r != nil {

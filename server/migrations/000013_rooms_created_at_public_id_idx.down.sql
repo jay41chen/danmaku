@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS rooms_created_at_public_id_idx

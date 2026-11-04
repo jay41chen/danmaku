@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -266,6 +267,242 @@ func TestHandleGetRoom(t *testing.T) {
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+	})
+}
+
+// GET /rooms 與 GET /me/rooms 共用的送出 helper
+// mine = true 走 /me/rooms（用 RequireAuth 包起來送 Bearer token），否則走公開的 /rooms
+func serveListRooms(t *testing.T, h *RoomHandler, mine bool, userID int64, rawQuery string) *httptest.ResponseRecorder {
+	t.Helper()
+	path := "/rooms"
+	handlerFunc := http.HandlerFunc(h.HandleListRooms)
+	if mine {
+		path = "/me/rooms"
+		handlerFunc = http.HandlerFunc(h.HandleListMyRooms)
+	}
+	if rawQuery != "" {
+		path += "?" + rawQuery
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	var h2 http.Handler = handlerFunc
+	if mine {
+		token, _, err := testTokens.IssueAccessToken(userID)
+		if err != nil {
+			t.Fatalf("issue token: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		h2 = middleware.RequireAuth(testTokens)(handlerFunc)
+	}
+	rec := httptest.NewRecorder()
+	h2.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleListRooms(t *testing.T) {
+	const userID = int64(7)
+	cursorTime := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	cursor := store.RoomCursor{CreatedAt: cursorTime, PublicID: "abcDEF12340"}
+
+	// 兩個 endpoint 的共同行為都跑一次
+	for _, mine := range []bool{false, true} {
+		name := "GET /rooms"
+		if mine {
+			name = "GET /me/rooms"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Run("limit passes through", func(t *testing.T) {
+				cases := []struct {
+					query string
+					want  int
+				}{
+					{"", defaultRoomListLimit},
+					{"limit=1", 1},
+					{"limit=" + strconv.Itoa(store.MaxRoomListLimit), store.MaxRoomListLimit},
+				}
+				for _, tc := range cases {
+					db := &fakeDBStore{}
+					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, tc.query)
+					if rec.Code != http.StatusOK {
+						t.Fatalf("%q: status = %d, want 200 (body: %q)", tc.query, rec.Code, rec.Body.String())
+					}
+					if db.listRoomsCalls != 1 || db.gotListLimit != tc.want {
+						t.Errorf("%q: store calls=%d limit=%d, want 1 call with limit %d", tc.query, db.listRoomsCalls, db.gotListLimit, tc.want)
+					}
+				}
+			})
+
+			t.Run("invalid limit returns 400 without hitting store", func(t *testing.T) {
+				for _, v := range []string{"", "abc", "1.5", "0", "-1", strconv.Itoa(store.MaxRoomListLimit + 1)} {
+					db := &fakeDBStore{}
+					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "limit="+v)
+					if rec.Code != http.StatusBadRequest {
+						t.Errorf("limit=%q: status = %d, want 400", v, rec.Code)
+					}
+					if !strings.Contains(rec.Body.String(), "invalid limit") {
+						t.Errorf("limit=%q: body = %q, want it to contain %q", v, rec.Body.String(), "invalid limit")
+					}
+					if db.listRoomsCalls != 0 {
+						t.Errorf("limit=%q: store called %d times, want 0", v, db.listRoomsCalls)
+					}
+				}
+			})
+
+			t.Run("invalid page_token returns 400 without hitting store", func(t *testing.T) {
+				// base64url of `{}`
+				for _, v := range []string{"!!!", "e30"} {
+					db := &fakeDBStore{}
+					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "page_token="+v)
+					if rec.Code != http.StatusBadRequest {
+						t.Errorf("page_token=%q: status = %d, want 400", v, rec.Code)
+					}
+					if !strings.Contains(rec.Body.String(), "invalid cursor") {
+						t.Errorf("page_token=%q: body = %q, want it to contain %q", v, rec.Body.String(), "invalid cursor")
+					}
+					if db.listRoomsCalls != 0 {
+						t.Errorf("page_token=%q: store called %d times, want 0", v, db.listRoomsCalls)
+					}
+				}
+			})
+
+			t.Run("valid page_token reaches store as cursor", func(t *testing.T) {
+				token, err := encodePageToken(cursor)
+				if err != nil {
+					t.Fatalf("encode token: %v", err)
+				}
+				db := &fakeDBStore{}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "page_token="+token)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200 (body: %q)", rec.Code, rec.Body.String())
+				}
+				if db.gotListAfter == nil || !db.gotListAfter.CreatedAt.Equal(cursor.CreatedAt) || db.gotListAfter.PublicID != cursor.PublicID {
+					t.Errorf("store got after = %+v, want %+v", db.gotListAfter, cursor)
+				}
+			})
+
+			t.Run("empty page_token is first page", func(t *testing.T) {
+				db := &fakeDBStore{}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "page_token=")
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200", rec.Code)
+				}
+				if db.listRoomsCalls != 1 || db.gotListAfter != nil {
+					t.Errorf("store calls=%d after=%+v, want 1 call with nil after", db.listRoomsCalls, db.gotListAfter)
+				}
+			})
+
+			t.Run("next cursor becomes next_page_token", func(t *testing.T) {
+				db := &fakeDBStore{
+					listRooms:      []model.Room{{ID: 1, OwnerID: 3, PublicID: "abcDEF1234", Name: "房間", CreatedAt: cursorTime}},
+					listNextCursor: &cursor,
+				}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				var body struct {
+					NextPageToken string `json:"next_page_token"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				got, err := decodePageToken(body.NextPageToken)
+				if err != nil {
+					t.Fatalf("decode next_page_token %q: %v", body.NextPageToken, err)
+				}
+				if !got.CreatedAt.Equal(cursor.CreatedAt) || got.PublicID != cursor.PublicID {
+					t.Errorf("next_page_token decodes to %+v, want %+v", got, cursor)
+				}
+			})
+
+			t.Run("nil cursor omits next_page_token", func(t *testing.T) {
+				db := &fakeDBStore{listRooms: []model.Room{{PublicID: "abcDEF1234", Name: "房間"}}}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				var body map[string]json.RawMessage
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				if _, ok := body["next_page_token"]; ok {
+					t.Errorf("body has next_page_token: %s", rec.Body.String())
+				}
+			})
+
+			t.Run("empty result is [] not null", func(t *testing.T) {
+				db := &fakeDBStore{}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200", rec.Code)
+				}
+				var body map[string]json.RawMessage
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				if got := strings.TrimSpace(string(body["rooms"])); got != "[]" {
+					t.Errorf("rooms = %s, want []", got)
+				}
+			})
+
+			t.Run("items have only room_name and public_id", func(t *testing.T) {
+				db := &fakeDBStore{listRooms: []model.Room{
+					{ID: 1, OwnerID: 3, PublicID: "abcDEF1234", Name: "房間一", CreatedAt: cursorTime},
+					{ID: 2, OwnerID: 4, PublicID: "ghiJKL5678", Name: "房間二", CreatedAt: cursorTime},
+				}}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				var body struct {
+					Rooms []map[string]any `json:"rooms"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				if len(body.Rooms) != 2 {
+					t.Fatalf("len(rooms) = %d, want 2", len(body.Rooms))
+				}
+				for i, item := range body.Rooms {
+					if len(item) != 2 || item["room_name"] == nil || item["public_id"] == nil {
+						t.Errorf("rooms[%d] = %v, want exactly room_name and public_id", i, item)
+					}
+				}
+				if body.Rooms[0]["room_name"] != "房間一" || body.Rooms[0]["public_id"] != "abcDEF1234" {
+					t.Errorf("rooms[0] = %v, want 房間一 / abcDEF1234", body.Rooms[0])
+				}
+			})
+
+			t.Run("store error returns 500", func(t *testing.T) {
+				db := &fakeDBStore{listRoomsErr: errors.New("boom")}
+				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				if rec.Code != http.StatusInternalServerError {
+					t.Errorf("status = %d, want 500", rec.Code)
+				}
+				if strings.Contains(rec.Body.String(), "boom") {
+					t.Errorf("body leaks error: %q", rec.Body.String())
+				}
+			})
+		})
+	}
+
+	t.Run("GET /rooms passes nil userID", func(t *testing.T) {
+		db := &fakeDBStore{}
+		serveListRooms(t, NewRoomHandler(db), false, 0, "")
+		if db.listRoomsCalls != 1 || db.gotListUserID != nil {
+			t.Errorf("calls=%d userID=%v, want 1 call with nil userID", db.listRoomsCalls, db.gotListUserID)
+		}
+	})
+
+	t.Run("GET /me/rooms passes caller's userID", func(t *testing.T) {
+		db := &fakeDBStore{}
+		serveListRooms(t, NewRoomHandler(db), true, userID, "")
+		if db.listRoomsCalls != 1 || db.gotListUserID == nil || *db.gotListUserID != userID {
+			t.Errorf("calls=%d userID=%v, want 1 call with userID %d", db.listRoomsCalls, db.gotListUserID, userID)
+		}
+	})
+
+	t.Run("GET /me/rooms sets Cache-Control no-store", func(t *testing.T) {
+		db := &fakeDBStore{}
+		rec := serveListRooms(t, NewRoomHandler(db), true, userID, "")
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+		// 錯誤回應也要有
+		rec = serveListRooms(t, NewRoomHandler(db), true, userID, "limit=abc")
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("on 400, Cache-Control = %q, want no-store", got)
 		}
 	})
 }
