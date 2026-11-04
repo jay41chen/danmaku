@@ -84,7 +84,7 @@ type roomSubscriptions struct {
 	// 叫醒 worker：buffer 1，非阻塞送（已經有訊號在裡面就不用再送，worker 醒來會把 dirty 整批拿走）
 	wake chan struct{}
 
-	// 注入：正式環境是 PubSub.Subscribe / Unsubscribe（redis.go 負責把 roomID 轉成 channel 名稱）/ time.AfterFunc，test 換成假的
+	// 注入：正式環境是 PubSub.Subscribe / Unsubscribe（pubsub.go 的 roomChannel 負責把 roomID 轉成 channel 名稱）/ time.AfterFunc，test 換成假的
 	// 這裡只認 roomID，不知道 Redis channel 怎麼命名
 	subscribe   func(ctx context.Context, roomID string) error
 	unsubscribe func(ctx context.Context, roomID string) error
