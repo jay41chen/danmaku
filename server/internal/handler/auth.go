@@ -55,7 +55,7 @@ type AuthHandler struct {
 	db               authStore
 	logger           *slog.Logger
 	limiter          store.RateLimiterInterface
-	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 clientIP）
+	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 httpx.ClientIP）
 	tokens           tokenIssuer
 	// 可替換只為了 test：要能確認「未知帳號」那條路也真的跑了 bcrypt，
 	// 否則 timing 防帳號列舉沒有回歸保護。正式環境永遠是 auth.CheckPassword
