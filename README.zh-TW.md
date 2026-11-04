@@ -28,6 +28,7 @@
 | 加 `NOT NULL` 欄位會讓部署期間還在跑的舊版壞掉 | Expand / contract，分兩次部署 | [0005](docs/design/0005-expand-contract-migration.md) |
 | 彈幕、房名裡的零寬字元、RLO、Zalgo | 用 PRECIS（RFC 8264）只擋不合法的文字、不改寫；版面問題交給前端隔離 | [0006](docs/design/0006-input-validation.md) |
 | 任何人亂打 URL 就能讓 Prometheus 記憶體爆掉 | Metrics label 只用已知的值（route pattern、標準 method），並用走真實 middleware chain 的 test 守住 | [0007](docs/design/0007-metrics-cardinality.md) |
+| 用 offset 分頁的話，列表在翻頁期間有增減就會重複或漏掉房間，而且越後面越慢 | 用 `(created_at, public_id)` 做 keyset 分頁並建 partial index；多撈一筆判斷有沒有下一頁；page token 對 client 是 opaque，server 嚴格解析（不認識的欄位、後面多接資料、版本、id 格式不對都回 400） | [0008](docs/design/0008-cursor-pagination.md) |
 
 ## 架構
 
@@ -59,7 +60,7 @@
 
 ## 進度
 
-2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間、限流、可觀測性，以及上面那些強化。接下來：房間列表、房間人數（presence）、角色和 ban、CI，然後是訊息補送（replay）和非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
+2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、限流、可觀測性，以及上面那些強化。接下來：房間人數（presence）、角色和 ban、CI，然後是訊息補送（replay）和非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
 
 ## Tech Stack
 
@@ -141,6 +142,8 @@ npm run dev
 | 任何 method | `/messages` | | **已移除**：回 `410 Gone`，請改用 `/rooms/{public_id}/messages` |
 | `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：1～30 字（彈幕的 100 字也一樣：以 Unicode code point 計，❤️ = U+2764 + U+FE0F 算 2 個），字元規則同彈幕，另外**頭尾不可有空白**（不幫忙 trim，直接回 `400`）、不可有連續空白、不可有超過 2 個連續的 combining mark；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
+| `GET` | `/rooms` | | 房間列表（未刪除，新的在前），cursor 分頁：`?limit=`（預設 20、最多 50）、`?page_token=`（上一頁回的 `next_page_token`，原樣帶回）。回 `{"rooms": [{"room_name", "public_id"}], "next_page_token"}`，沒有下一頁時不帶 `next_page_token`；`limit` 不合法回 `400 invalid limit`，token 不合法回 `400 invalid cursor` |
+| `GET` | `/me/rooms` | ✓ | 自己的房間列表，參數和回應同 `GET /rooms`。`Cache-Control: no-store` |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上後要送 `join` 進房才收得到該房間的彈幕；連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
 | `GET` | `/me` | ✓ | 目前登入的 user `{"id", "username"}`；F5 後 client 用它取得身分。`Cache-Control: no-store` |
@@ -224,6 +227,7 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 | `000010_create_rooms` | `rooms` 表（`public_id` unique、soft delete）；種下系統帳號 `admin`（不能登入）和 `legacy00000` 房間（id 1）；`messages` 加 `room_id`（`DEFAULT 1`，由 000011 拿掉）+ index |
 | `000011_messages_room_id_drop_default` | 拿掉 `messages.room_id` 的 `DEFAULT 1`（expand / contract 的 contract 步驟），INSERT 一定要帶 `room_id`。上線後若要把後端退回 `2c17ac8` 之前的版本（INSERT 不帶 `room_id`），要先手動跑 000011 的 down |
 | `000012_create_user_credential_state` | `user_credential_state` 表（`user_id` PK/FK，`valid_after`）：refresh token 「撤銷全部」改成只寫 `valid_after`，`created_at` 在這之前（含）的 token 一律無效，不再 UPDATE `refresh_tokens`。並依既有的 `duplicate_use_detected` 資料 backfill `valid_after`（每個 user 取最晚的 `revoked_at` / `created_at`），舊 token 部署後再出現不會再觸發撤銷。只新增表，部署一次就好 |
+| `000013_rooms_created_at_public_id_idx` | `rooms(created_at, public_id) WHERE deleted_at IS NULL` 的 partial index，給房間列表的 cursor 分頁用（`ORDER BY created_at DESC, public_id DESC`，`public_id` 當 tiebreaker） |
 
 ### 新增 migration
 

@@ -34,6 +34,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | Adding a `NOT NULL` column would break the old version still running during deploy | Expand / contract across two deploys | [0005](docs/design/0005-expand-contract-migration.md) |
 | Zero-width, bidi-override and Zalgo text in messages and room names | PRECIS (RFC 8264) to reject invalid text without rewriting it; layout isolation on the client | [0006](docs/design/0006-input-validation.md) |
 | Anyone could make Prometheus run out of memory by requesting random URLs | Metric labels are restricted to known values (route pattern, standard methods), with a test that runs requests through the real middleware chain | [0007](docs/design/0007-metrics-cardinality.md) |
+| Offset pagination repeats or skips rooms when the list changes, and gets slower the deeper you page | Keyset pagination on `(created_at, public_id)` with a partial index; fetch `limit+1` to detect the next page; an opaque page token that the server parses strictly (unknown fields, trailing data, version, id format → 400) | [0008](docs/design/0008-cursor-pagination.md) |
 
 ## Architecture
 
@@ -76,8 +77,8 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 ## Status
 
 Started 2026-10-08. Done so far: real-time messaging across multiple servers, auth with refresh-token
-rotation, rooms, rate limiting, observability, and the hardening described above. Next: room list,
-presence (viewer counts), roles and bans, CI, then message replay and async persistence. See the
+rotation, rooms with a paginated room list, rate limiting, observability, and the hardening described
+above. Next: presence (viewer counts), roles and bans, CI, then message replay and async persistence. See the
 [milestones in ROADMAP.md](ROADMAP.md#milestones2026-11-03-訂暫定) (in Chinese).
 
 ## Getting started
@@ -125,6 +126,8 @@ cd client && npm install && npm run dev                          # http://localh
 | `GET` | `/me` | ✓ | current user |
 | `POST` | `/rooms` | ✓ | create a room |
 | `GET` | `/rooms/{public_id}` | | room info |
+| `GET` | `/rooms` | | list rooms, newest first (cursor pagination: `limit`, `page_token`) |
+| `GET` | `/me/rooms` | ✓ | list my rooms (same pagination) |
 | `GET` | `/rooms/{public_id}/messages` | | latest messages |
 | `POST` | `/rooms/{public_id}/messages` | ✓ | post a message (rate limited) |
 | `GET` | `/ws` | | WebSocket: `join` / `leave` / `auth` / `ping` frames; receives `message` |

@@ -6,7 +6,7 @@
 
 | Milestone | 內容 | 估計（週） | 預計完成（快 ～ 慢） |
 |---|---|---|---|
-| M1 房間可瀏覽 | 房間列表（`GET /rooms` cursor 分頁、`/me/rooms`）+ 選房間 UI | 0.5 ～ 0.75 | 11/6 ～ 11/8 |
+| M1 房間可瀏覽 ✅ | 房間列表（`GET /rooms` cursor 分頁、`/me/rooms`）+ 選房間 UI（2026-11-04 完成，[ADR 0008](docs/design/0008-cursor-pagination.md)） | 0.5 ～ 0.75 | 11/6 ～ 11/8 |
 | M2 房間有人氣 | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
 | M3 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/19 ～ 11/27 |
 | M4 最小 CI | GitHub Actions 跑 `go vet` / `go test` + multi-stage Dockerfile | 0.25 ～ 0.5 | 11/21 ～ 11/30 |
@@ -146,9 +146,13 @@
     - [x] 前端 `ws_room_not_found` 只有 `console.warn`，畫面沒顯示（2026-11-03：`realtime/room.ts` store + `useRoomStatus`，not_found 時只顯示「房間不存在」、隱藏列表和 Composer；只看 WS，GET 404 不算；重連不重設狀態避免閃爍）
     - [x] join frame 剛好是 1 秒內第 6 個 frame 會被 WS 限流靜默丟掉，client 也沒有 join 回應的 timeout（2026-11-03：後端不改，限流靜默丟是刻意的（回應也要拿 Hub 鎖）；前端 `JOIN_TIMEOUT_MS` 5 秒逾時 → 走既有 `scheduleJoinRetry` 退避；重送後晚到的 `ws_already_in_room` 不當 client bug。auth 不做 timeout：WS 唯讀，auth 只影響觀眾數統計。Known：舊版 backend 回 `ws_write_forbidden` 時每 ≤30 秒重送一次 join，只在部署空窗）
     - Known issue（低優先）：`CreateMessage` 的 `deleted_at IS NULL` 是自己寫的（為了單一 statement 的 atomicity），沒走共用 method，soft delete 條件改的時候要一起改
-  - [ ] 列出房間的 API + 選房間的 UI：目前只能靠 `POST /rooms` 回傳的 `public_id` 拼網址進房間
-    - Pagination（2026-11-03 從 W5 併入）：`GET /rooms` 沒有上限 → cursor pagination 跟 A 一起設計（cursor 格式在這裡第一次決定）
-    - `GET /me/rooms` 現在不分頁（`maxRoomsPerUser = 3`，未刪除的最多 3 筆），但回應格式預留 cursor pagination 的空間，之後要列出已刪除房間（恢復功能）時加分頁不破壞舊 client
+  - [x] 列出房間的 API（M1 後端，2026-11-04）：`GET /rooms`（公開）、`GET /me/rooms`（要登入，`no-store`）
+    - Cursor pagination（keyset）：`ORDER BY created_at DESC, public_id DESC`，`public_id` 當 tiebreaker；撈 `limit+1` 判斷有沒有下一頁，cursor = 最後一筆回傳的；migration 000013 partial index `rooms(created_at, public_id) WHERE deleted_at IS NULL`（見 go-notes 3.37）
+    - Page token：base64url 的 JSON `{v, created_at, public_id}`，對 client opaque；decode 嚴格（不認識的欄位、後面多接資料、版本、零值時間、public_id 格式 → `400 invalid cursor`）。`limit` 預設 20、最多 50（`store.MaxRoomListLimit`）
+    - `GET /me/rooms` 也走同一套分頁（雖然未刪除的最多 3 筆）：之後列出已刪除房間（恢復功能）時不用改格式
+    - Viewer 數排序 → M2（presence 之後）
+  - [x] 選房間的 UI（M1 前端，2026-11-04）：「所有房間」+ 登入後的「我的房間」，每個房間是 `?room=<public_id>` 連結（整頁重載，沿用原本換房方式）；「載入更多」用 `next_page_token`；房名用 `<bdi>` + overflow 隔離
+    - 建立房間的 UI 還沒有（只能打 `POST /rooms`）→ 之後需要時再做
     - 彈幕分頁不在 A：`after` → W6 replay，`before` → Backlog（Q167）
   - schema（見 go-notes 3.28）：`rooms(id, public_id, owner_id → users ON DELETE RESTRICT, room_name, created_at, deleted_at)` + `owner_id` index；名稱可重複，空白 / 長度由程式檢查
   - 每人房間數上限：transaction 內 `SELECT ... FROM users WHERE id = $1 FOR UPDATE` → 數 → INSERT，只能透過共用 method（恢復房間也走同一條）；超過回 403

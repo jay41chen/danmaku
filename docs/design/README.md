@@ -13,5 +13,6 @@ fault-injection experiment.
 | [0005](0005-expand-contract-migration.md) | Zero-downtime schema change: expand / contract | rolling deploys, migrations, composite indexes |
 | [0006](0006-input-validation.md) | Text input validation: reject, don't rewrite | Unicode, PRECIS (RFC 8264), layered defense |
 | [0007](0007-metrics-cardinality.md) | Metric labels must not be chosen by the client | Prometheus cardinality, middleware ordering, wiring tests |
+| [0008](0008-cursor-pagination.md) | Room list: cursor pagination with an opaque, strictly parsed token | keyset pagination, tiebreakers, partial indexes, parse don't validate |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.
