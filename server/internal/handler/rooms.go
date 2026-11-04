@@ -1,22 +1,32 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
+// 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
+type roomStore interface {
+	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
+	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
+
+	GetRoomLists(ctx context.Context, userID *int64, after *store.RoomCursor, limit int) ([]model.Room, *store.RoomCursor, error)
+}
+
 type RoomHandler struct {
-	db     store.DBStoreInterface
+	db     roomStore
 	logger *slog.Logger
 }
 
 // constructor
-func NewRoomHandler(db store.DBStoreInterface) *RoomHandler {
+func NewRoomHandler(db roomStore) *RoomHandler {
 	return &RoomHandler{
 		db:     db,
 		logger: slog.Default().With("component", "rooms"),

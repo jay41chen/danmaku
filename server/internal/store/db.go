@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 
@@ -19,26 +18,6 @@ var (
 	// user 已被刪除，但他的 access token 還沒過期（stateless，撤不掉）
 	ErrMessageUserNotFound = errors.New("message user not found")
 )
-
-type DBStoreInterface interface {
-	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error)
-	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)
-	CheckHealth(ctx context.Context) error
-
-	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
-	GetUser(ctx context.Context, username string) (model.User, error)
-	GetUserByID(ctx context.Context, id int64) (model.User, error)
-
-	// 實作在 refresh_token.go
-	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
-	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
-	RevokeRefreshToken(ctx context.Context, tokenHash string) error
-
-	// 實作在 room.go
-	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
-	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
-	GetRoomLists(ctx context.Context, userID *int64, after *RoomCursor, limit int) ([]model.Room, *RoomCursor, error)
-}
 
 type DBStore struct {
 	dbPool *pgxpool.Pool

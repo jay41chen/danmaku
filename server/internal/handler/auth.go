@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -36,8 +38,21 @@ const (
 	refreshTokenGrace = 15 * time.Second
 )
 
+// handler 需要的 DB 方法：interface 定義在使用方（Go 的 accept interfaces, return structs）
+// 只列這個 handler 真的會呼叫的方法；*store.DBStore 不用宣告就自動符合，main.go 照樣傳同一個 db
+// test 換成 fake 時，只要實作這幾個方法
+type authStore interface {
+	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
+	GetUser(ctx context.Context, username string) (model.User, error)
+	GetUserByID(ctx context.Context, id int64) (model.User, error)
+
+	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
+	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
+}
+
 type AuthHandler struct {
-	db               store.DBStoreInterface
+	db               authStore
 	logger           *slog.Logger
 	limiter          store.RateLimiterInterface
 	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 clientIP）
@@ -53,7 +68,7 @@ type tokenIssuer interface {
 	IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error)
 }
 
-func NewAuthHandler(db store.DBStoreInterface, limiter store.RateLimiterInterface, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
+func NewAuthHandler(db authStore, limiter store.RateLimiterInterface, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
 	return &AuthHandler{
 		db:               db,
 		logger:           slog.Default().With("component", "auth"),

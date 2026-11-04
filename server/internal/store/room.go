@@ -294,7 +294,7 @@ func (this *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([
 // 放在 store：格式是這裡定義的（publicIDBytes），產生和檢查放一起，改格式時兩邊一起看得到
 // 只檢查格式，不查 DB：格式對但不存在的 id，還是要查了才知道
 // 給 handler 擋掉明顯錯的 id（page token 裡的 public_id；之後 GET /rooms/{public_id} 也能用，不用打 DB）
-// 是 package 層級的函式、不是 DBStore 的 method（不碰 DB），所以不放進 DBStoreInterface
+// 是 package 層級的函式、不是 DBStore 的 method（不碰 DB），handler 直接呼叫 store.ValidPublicID，不放進 handler 的 store interface
 func ValidPublicID(s string) bool {
 	// 1. 長度：base64 每個字元裝 6 bits，8 bytes = 64 bits → 10 個字元還剩 4 bits → 11 個字元（Raw：不補 =）
 	//    讓標準庫算，不要寫死 11：publicIDBytes 改了這裡會跟著變

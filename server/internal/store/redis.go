@@ -10,14 +10,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type RedisStoreInterface interface {
-	Publish(ctx context.Context, roomID, msg string) error // 發到 roomChannel(roomID)
-	Subscribe(ctx context.Context, handler func(roomID, msg string)) error
-	JoinRoom(ctx context.Context, roomID string) error // 委派給 roomSubscriptions.Join
-	LeaveRoom(ctx context.Context, roomID string)      // 委派給 roomSubscriptions.Leave
-	CheckHealth(ctx context.Context) error
-}
-
 // Redis channel 名稱：Publish、Subscribe 收訊息、roomSubscriptions 的 SUBSCRIBE / UNSUBSCRIBE 都經過這裡，不要各自拼字串
 // 只有 redis.go 知道命名規則；roomSubscriptions 只認 roomID
 func roomChannel(roomID string) string {
@@ -73,14 +65,17 @@ func (this *RedisStore) CheckHealth(ctx context.Context) error {
 	return this.client.Ping(ctx).Err()
 }
 
+// 發到 roomChannel(roomID)
 func (this *RedisStore) Publish(ctx context.Context, roomID, msg string) error {
 	return this.client.Publish(ctx, roomChannel(roomID), msg).Err()
 }
 
+// 委派給 roomSubscriptions.Join
 func (this *RedisStore) JoinRoom(ctx context.Context, roomID string) error {
 	return this.rooms.Join(ctx, roomID)
 }
 
+// 委派給 roomSubscriptions.Leave
 func (this *RedisStore) LeaveRoom(ctx context.Context, roomID string) {
 	this.rooms.Leave(ctx, roomID)
 }

@@ -38,6 +38,19 @@ type AccessTokenClaimsParser interface {
 	ParseAccessTokenClaims(token string) (userID int64, expiresAt time.Time, err error)
 }
 
+// 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
+type wsStore interface {
+	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
+	GetUserByID(ctx context.Context, id int64) (model.User, error)
+}
+
+// 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
+type wsPubSub interface {
+	Subscribe(ctx context.Context, handler func(roomID, msg string)) error
+	JoinRoom(ctx context.Context, roomID string) error // 委派給 roomSubscriptions.Join
+	LeaveRoom(ctx context.Context, roomID string)      // 委派給 roomSubscriptions.Leave
+}
+
 // 這個檔案裡的 3 種 context：
 //
 //	StartBroadcast        → context.Background()  process 生命週期，跟任何 request 無關
@@ -56,8 +69,8 @@ type AccessTokenClaimsParser interface {
 //
 // 連線的 registry（clients / members / 房間 / 身分 / 到期 timer / 廣播）全部在 ws.Hub，這裡不持有任何鎖
 type WebsocketHandler struct {
-	redis  store.RedisStoreInterface
-	db     store.DBStoreInterface
+	redis  wsPubSub
+	db     wsStore
 	tokens AccessTokenClaimsParser
 	hub    *ws.Hub
 	logger *slog.Logger
@@ -71,7 +84,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // constructor
-func NewWebsocketHandler(redis store.RedisStoreInterface, db store.DBStoreInterface, tokens AccessTokenClaimsParser) *WebsocketHandler {
+func NewWebsocketHandler(redis wsPubSub, db wsStore, tokens AccessTokenClaimsParser) *WebsocketHandler {
 	return &WebsocketHandler{
 		redis:  redis,
 		db:     db,

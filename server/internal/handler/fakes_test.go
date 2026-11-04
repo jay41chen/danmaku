@@ -13,11 +13,11 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
-// handler test 共用的假 DB：只實作用得到的方法，其他的呼叫到會 nil panic
+// handler test 共用的假 DB：auth / room / message handler 的 store interface 都靠它實作
+// 沒有 embed 任何 interface：少實作 handler 需要的方法會直接 compile 不過，不用等到 runtime nil panic
 type fakeDBStore struct {
-	store.DBStoreInterface // 沒填 → nil；其他 4 個方法「有」，但被呼叫會 nil panic
-	msgs                   []model.Message
-	err                    error
+	msgs []model.Message
+	err  error
 
 	// CreateMessage 用
 	createdMsg       model.Message
@@ -197,7 +197,11 @@ func (failingTokenIssuer) IssueAccessToken(userID int64) (string, time.Duration,
 // handler test 用的假 Redis：記下 Publish / JoinRoom / LeaveRoom 的呼叫，Subscribe 只存 handler 然後立刻返回
 // WS 的 handler 在 server 端 goroutine 呼叫 JoinRoom / LeaveRoom，所以這些 spy 都用 mutex 保護
 // 同步執行的 test 可以直接讀 published / publishedRooms
-var _ store.RedisStoreInterface = (*fakeRedis)(nil)
+var (
+	_ messagePublisher = (*fakeRedis)(nil)
+	_ wsPubSub         = (*fakeRedis)(nil)
+	_ healthChecker    = (*fakeRedis)(nil)
+)
 
 type fakeRedis struct {
 	publishErr error

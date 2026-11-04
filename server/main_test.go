@@ -11,7 +11,6 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
-	"github.com/jay41chen/danmaku/server/internal/store"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -20,12 +19,13 @@ import (
 // 路由表的 test：走真的 registerRoutes，只把 handler 的依賴換成假的
 // 每個 case 只驗「route 怎麼接」（method、要不要登入），不驗 handler 內部邏輯（那是 handler 自己的 test）
 
-// 內嵌 nil interface：沒實作的方法被呼叫到會 nil panic
-type healthyDB struct{ store.DBStoreInterface }
+// 只要有 CheckHealth 就符合 handler 的 healthChecker
+type healthyDB struct{}
 
 func (healthyDB) CheckHealth(ctx context.Context) error { return nil }
 
-type healthyRedis struct{ store.RedisStoreInterface }
+// 同 healthyDB：只要有 CheckHealth 就符合 healthChecker
+type healthyRedis struct{}
 
 func (healthyRedis) CheckHealth(ctx context.Context) error { return nil }
 

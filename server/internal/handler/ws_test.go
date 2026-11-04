@@ -95,9 +95,8 @@ func (fakeClaimsParser) ParseAccessTokenClaims(token string) (int64, time.Time, 
 	return id, time.Now().Add(ttl), nil
 }
 
-// 假 DB：只有 GetUserByID，users 裡沒有的 id 回 ErrUserNotFound
+// 假 DB：實作 wsStore（GetUserByID / GetRoomByPublicID）；users 裡沒有的 id 回 ErrUserNotFound
 type wsFakeDB struct {
-	store.DBStoreInterface
 	users   map[int64]string
 	err     error
 	rooms   map[string]bool // 存在的房間 public id

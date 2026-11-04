@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
@@ -25,15 +26,27 @@ var (
 	messageSustainRule = rateRule{"message:sustain", 20, 10 * time.Second}
 )
 
+// 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
+type messagePublisher interface {
+	Publish(ctx context.Context, roomID, msg string) error // 發到 roomChannel(roomID)
+}
+
+// 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
+type messageStore interface {
+	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error)
+	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)
+	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
+}
+
 type MessageHandler struct {
-	db      store.DBStoreInterface
-	redis   store.RedisStoreInterface
+	db      messageStore
+	redis   messagePublisher
 	limiter store.RateLimiterInterface
 	logger  *slog.Logger
 }
 
 // constructor
-func NewMessageHandler(db store.DBStoreInterface, redis store.RedisStoreInterface, limiter store.RateLimiterInterface) *MessageHandler {
+func NewMessageHandler(db messageStore, redis messagePublisher, limiter store.RateLimiterInterface) *MessageHandler {
 	return &MessageHandler{
 		db:      db,
 		redis:   redis,

@@ -8,17 +8,22 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
-	"github.com/jay41chen/danmaku/server/internal/store"
 )
 
+// 這個 handler 需要的 DB / Redis 方法（為什麼定義在這裡見 authStore）
+// DB 和 Redis 的 CheckHealth 簽名一樣，所以兩邊共用這一個 interface
+type healthChecker interface {
+	CheckHealth(ctx context.Context) error
+}
+
 type HealthHandler struct {
-	db     store.DBStoreInterface
-	redis  store.RedisStoreInterface
+	db     healthChecker
+	redis  healthChecker
 	logger *slog.Logger
 }
 
 // constructor
-func NewHealthHandler(db store.DBStoreInterface, redis store.RedisStoreInterface) *HealthHandler {
+func NewHealthHandler(db healthChecker, redis healthChecker) *HealthHandler {
 	return &HealthHandler{
 		db:     db,
 		redis:  redis,
