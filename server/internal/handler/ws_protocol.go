@@ -16,6 +16,7 @@ const (
 	wsTypeLeave    = "leave"    // client → server：離開房間
 	wsTypeLeaveOK  = "leave_ok" // server → client：離開房間成功
 	wsTypePresence = "presence" // server → client：房間人數（每 5 秒推一次）
+	wsTypeResync   = "resync"   // server → client：server 的 Redis 訂閱剛重建過，這段期間可能漏訊息，請重新撈歷史
 
 	wsCodeWriteForbidden  = "ws_write_forbidden"
 	wsMsgWriteForbidden   = "請透過 POST /rooms/{public_id}/messages 發送"
@@ -73,6 +74,18 @@ func encodePresence(room string, count int) []byte {
 	msg, err := json.Marshal(wsEnvelope{
 		Type:    wsTypePresence,
 		Payload: wsPresencePayload{Room: room, Count: count},
+	})
+	if err != nil {
+		return nil
+	}
+	return msg
+}
+
+// resync envelope 的 frame（payload 沿用 wsRoomPayload）：編碼失敗回傳 nil，呼叫端不可把 nil 交給 Hub.Broadcast（理由同 encodePresence）
+func encodeResync(room string) []byte {
+	msg, err := json.Marshal(wsEnvelope{
+		Type:    wsTypeResync,
+		Payload: wsRoomPayload{Room: room},
 	})
 	if err != nil {
 		return nil

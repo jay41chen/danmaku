@@ -46,4 +46,41 @@ var (
 		},
 		[]string{"auth"},
 	)
+	// 以下幾個 metric 都沒有 room label：room 是 client 傳來的字串，每個值都會變成一條新的時間序列（見 ADR 0007）
+	// 發到 Redis 失敗的次數（POST 訊息之後的廣播）；心跳的 publish 不算，那是 watchdog 自己的事
+	PublishFailedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "redis_publish_failed_total",
+			Help: "Total number of failed Redis PUBLISH calls for message broadcast (heartbeat excluded)",
+		},
+	)
+	// watchdog 判定 PubSub 聾掉（連續收不到自己發的心跳）而重建的次數
+	PubSubDeafTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "redis_pubsub_deaf_total",
+			Help: "Total number of times the PubSub connection was judged deaf and rebuilt",
+		},
+	)
+	// 重建 PubSub 之後，每個還有人在看的房間從重設到重新訂閱確認花的時間
+	PubSubResubscribeDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "redis_pubsub_resubscribe_duration_seconds",
+			Help:    "Time from PubSub rebuild until a room's subscription is confirmed again",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+	// 累計接受的 WS 連線數（Hub.Register 成功才算，連線數滿被拒的不算）
+	WebsocketConnectionsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "websocket_connections_total",
+			Help: "Total number of accepted WebSocket connections",
+		},
+	)
+	// 送出 resync frame 的次數（PubSub 重建時 viewers > 0 的房間，每個房間每次重建最多一次，不是每條連線）
+	WebsocketResyncTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "websocket_resync_sent_total",
+			Help: "Total number of resync frames broadcast after a PubSub rebuild (rooms with viewers > 0 at rebuild time, at most once per room per rebuild)",
+		},
+	)
 )

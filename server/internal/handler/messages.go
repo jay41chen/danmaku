@@ -12,10 +12,16 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 )
 
 // 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
 const publishTimeout = 500 * time.Millisecond
+
+// GET 歷史訊息回幾則（最新的幾則，新到舊查出來再反轉成舊到新）
+// 重連後 client 靠這支補撈斷線期間的洞：100 則在熱門房間（約 50 則/秒）約涵蓋 2 秒
+// 不用 200：回應會到約 23 KB，本機實測 2,000 GET/s 時 p99 從 5ms 變 227ms
+const historyLimit = 100
 
 // 限流規則（機制在 ratelimit.go），key 是 user id
 // 兩條一起用：burst 擋瞬間洗版，sustain 擋持續慢慢刷（每秒 3 則剛好卡在 burst 下面也會被 sustain 擋）
@@ -79,7 +85,7 @@ func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	msgs, err := this.db.QueryMessage(r.Context(), room.ID, 50)
+	msgs, err := this.db.QueryMessage(r.Context(), room.ID, historyLimit)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "query messages failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -88,6 +94,13 @@ func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, 
 
 	// DB query出來的是新到舊
 	slices.Reverse(msgs)
+	// 只有 200 才加（404 / 500 不加，不然錯誤回應會被 CDN 快取）
+	// s-maxage 只對 CDN / 共用快取有作用，對瀏覽器沒有作用；TTL 1 秒是為了讓重連補撈拿得到剛發生的洞（同一秒內大量重連的人共用一份回應，不會一起打到 DB）
+	// 上限：快照最多舊 1 秒，所以接上 CDN 後，每次補撈最多可能漏最後約 1 秒；到時再決定補撈要不要繞過快取
+	// 現在 prod 前面沒有 CDN，這行沒有作用也沒有風險
+	// 之後前面放 CDN 或 nginx 時：要避免快取到期瞬間全部回源，要開 stale-while-updating 類設定
+	// （實測 nginx 只開 proxy_cache_lock 時，EXPIRED 的 1000 個併發全部回源；加上 proxy_cache_use_stale updating 後最多 1 個）
+	w.Header().Set("Cache-Control", "public, s-maxage=1")
 	httpx.WriteJSON(w, r, this.logger, http.StatusOK, msgs)
 }
 
@@ -167,6 +180,7 @@ func (this *MessageHandler) broadcast(ctx context.Context, roomPublicID string, 
 		return
 	}
 	if err := this.redis.Publish(ctx, roomPublicID, string(data)); err != nil {
+		prom.PublishFailedTotal.Inc()
 		this.logger.ErrorContext(ctx, "publish to redis failed", "error", err)
 	}
 }

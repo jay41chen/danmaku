@@ -25,6 +25,7 @@ type fakeDBStore struct {
 	gotMsgContent    string
 	gotMsgRoomPublic string // spy：CreateMessage 收到的 room public id
 	gotQueryRoomID   int64  // spy：QueryMessage 收到的 room id
+	gotQueryLimit    int    // spy：QueryMessage 收到的 limit
 	queryMsgCalled   bool   // spy：QueryMessage 有沒有被呼叫（不能用 gotQueryRoomID == 0 判斷：零值 room 也會傳 0）
 	createMsgCalled  bool
 	onCreateMessage  func() // 不是 nil 時，CreateMessage 在回傳成功前先呼叫（test 用來模擬「INSERT 成功後 client 斷線」）
@@ -80,6 +81,7 @@ type fakeDBStore struct {
 func (f *fakeDBStore) QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error) {
 	f.queryMsgCalled = true
 	f.gotQueryRoomID = roomID
+	f.gotQueryLimit = limit
 	return f.msgs, f.err
 }
 
@@ -211,11 +213,12 @@ type fakeRedis struct {
 	// 不存 ctx 本身：broadcast 一回來就 defer cancel()，事後再看 Err() 一定是 canceled
 	publishCtxs []publishCtxSnapshot
 
-	mu      sync.Mutex
-	handler func(roomID, msg string) // Subscribe 收到的 handler，test 用 deliver 推訊息進去
-	joinErr error                    // 不是 nil 時 JoinRoom 回傳這個錯
-	joined  []string                 // spy：JoinRoom 收到過的 room id
-	left    []string                 // spy：LeaveRoom 收到過的 room id
+	mu       sync.Mutex
+	handler  func(roomID, msg string) // Subscribe 收到的 handler，test 用 deliver 推訊息進去
+	onResync func(roomID string)      // Subscribe 收到的 onResync，test 用 deliverResync 觸發
+	joinErr  error                    // 不是 nil 時 JoinRoom 回傳這個錯
+	joined   []string                 // spy：JoinRoom 收到過的 room id
+	left     []string                 // spy：LeaveRoom 收到過的 room id
 
 	// 不是 nil 時 JoinRoom 會先對 joinEntered 送一個訊號，再卡到 joinBlock 被 close 才回傳
 	// 用來在 test 裡把 JoinRoom 停在「Redis I/O 進行中」，製造 race 情境；兩個都是 nil 時不影響既有 test
@@ -240,10 +243,11 @@ func (f *fakeRedis) Publish(ctx context.Context, roomID, msg string) error {
 	return f.publishErr
 }
 
-func (f *fakeRedis) Subscribe(ctx context.Context, handler func(roomID, msg string)) error {
+func (f *fakeRedis) Subscribe(ctx context.Context, handler func(roomID, msg string), onResync func(roomID string)) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.handler = handler
+	f.onResync = onResync
 	return nil
 }
 
@@ -278,6 +282,14 @@ func (f *fakeRedis) deliver(roomID, msg string) {
 	h := f.handler
 	f.mu.Unlock()
 	h(roomID, msg)
+}
+
+// 模擬 PubSub 重建後某間房重新訂閱好了：呼叫 Subscribe 存下的 onResync（要先呼叫 StartBroadcast）
+func (f *fakeRedis) deliverResync(roomID string) {
+	f.mu.Lock()
+	r := f.onResync
+	f.mu.Unlock()
+	r(roomID)
 }
 
 func (f *fakeRedis) joinedRooms() []string {

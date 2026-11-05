@@ -32,6 +32,15 @@ func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
 	return m.GetGauge().GetValue()
 }
 
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
 // WS 寫入一律被拒絕：回 error envelope 給這條連線，連線保持開著，不 Publish
 func TestWebsocketWriteRejected(t *testing.T) {
 	redis := &fakeRedis{}
@@ -713,6 +722,29 @@ func TestWebsocketBroadcastFilteredByRoom(t *testing.T) {
 	conn2.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	if _, data, err := conn2.ReadMessage(); err == nil {
 		t.Fatalf("conn2 received %q, want nothing", data)
+	}
+}
+
+// onResync 只廣播給該房間的連線，frame 是 resync envelope，並且累計 metric
+func TestWebsocketResyncBroadcastToRoom(t *testing.T) {
+	redis := &fakeRedis{}
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"aaaAAA11111": true, "bbbBBB22222": true}})
+	h.StartBroadcast()
+	conn1 := dialWS(t, url)
+	conn2 := dialWS(t, url)
+	joinRoom(t, conn1, "aaaAAA11111")
+	joinRoom(t, conn2, "bbbBBB22222")
+	before := counterValue(t, prom.WebsocketResyncTotal)
+
+	redis.deliverResync("aaaAAA11111")
+
+	expectRoomFrame(t, conn1, wsTypeResync, "aaaAAA11111")
+	conn2.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, data, err := conn2.ReadMessage(); err == nil {
+		t.Fatalf("conn2 received %q, want nothing", data)
+	}
+	if got := counterValue(t, prom.WebsocketResyncTotal); got != before+1 {
+		t.Errorf("resync counter = %v, want %v", got, before+1)
 	}
 }
 

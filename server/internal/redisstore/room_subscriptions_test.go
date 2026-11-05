@@ -160,7 +160,7 @@ func testCtx(t *testing.T) context.Context {
 // 要測真正的背景 worker（run）時用 startWorker；同一個 subs 不能兩個都用（會變成兩個 worker）
 func newTestRoomSubscriptions(fake *fakePubSub, clock *fakeClock) *roomSubscriptions {
 	subs := newRoomSubscriptions(fake.subscribe, fake.unsubscribe, clock.afterFunc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	fake.confirm = subs.confirmSubscribed
+	fake.confirm = func(roomID string) { subs.confirmSubscribed(roomID) }
 	return subs
 }
 
@@ -854,10 +854,10 @@ func TestHandleSubscriptionIgnoresUnsubscribe(t *testing.T) {
 	waitViewers(t, subs, "a", 1)
 	drain(t, subs) // SUB 送出，state = subSent
 
-	store.handleSubscription(ctx, &redis.Subscription{Kind: "unsubscribe", Channel: roomChannel("a")})
+	store.handleSubscription(ctx, &redis.Subscription{Kind: "unsubscribe", Channel: roomChannel("a")}, func(string) {})
 	assertBlocked(t, x, "X")
 
-	store.handleSubscription(ctx, &redis.Subscription{Kind: "subscribe", Channel: roomChannel("a")})
+	store.handleSubscription(ctx, &redis.Subscription{Kind: "subscribe", Channel: roomChannel("a")}, func(string) {})
 	assertJoined(t, x, "X")
 }
 
@@ -883,5 +883,172 @@ func mustJoinBackground(t *testing.T, subs *roomSubscriptions, roomID string) {
 	t.Helper()
 	if err := subs.Join(testCtx(t), roomID); err != nil {
 		t.Fatalf("Join(%q) error = %v, want nil", roomID, err)
+	}
+}
+
+// PubSub 換新之後，已確認的房間不能再算「已確認」：重建後進房的人要等新連線的確認，
+// 不然會拿到舊的、早就 close 的 ready → 立刻 join_ok，但新連線根本還沒訂 → 漏訊息
+func TestResetAfterRebuildNewJoinWaitsForReconfirm(t *testing.T) {
+	fake := &fakePubSub{}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	ctx := testCtx(t)
+	mustJoin(t, subs, "a")
+
+	subs.resetAfterRebuild(time.Now())
+	fake.mu.Lock()
+	fake.manualConfirm = true
+	fake.mu.Unlock()
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 2)
+	drain(t, subs)
+	assertBlocked(t, x, "X")
+
+	subs.confirmSubscribed("a")
+	assertJoined(t, x, "X")
+}
+
+// 重設之後 worker 對還有人在看的房間重送 SUBSCRIBE（新連線什麼都沒訂）
+func TestResetAfterRebuildWorkerResendsSubscribe(t *testing.T) {
+	fake := &fakePubSub{}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	mustJoin(t, subs, "a")
+
+	subs.resetAfterRebuild(time.Now())
+	drain(t, subs)
+
+	if want := []string{"sub a", "sub a"}; !slices.Equal(fake.snapshot(), want) {
+		t.Errorf("calls = %v, want %v", fake.snapshot(), want)
+	}
+}
+
+// resync 每房只回報一次（since = 重設的時間）；沒有 reset 過的正常確認不回報
+// 「只報一次」要靠 confirmSubscribed 清掉 resyncSince 才成立：第二次確認前要先讓 state 回到 subSent
+// （同一個 entry：Leave、expire、worker 送 UNSUB 的當下有人重新 Join，worker 再送 SUB），
+// 否則第二次確認因為 state 已是 subConfirmed 提早回 false，測不到有沒有清
+func TestConfirmSubscribedReportsResyncOnlyOncePerReset(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	clock := &fakeClock{}
+	subs := newTestRoomSubscriptions(fake, clock)
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs)
+	if resync, _ := subs.confirmSubscribed("a"); resync {
+		t.Error("normal confirm reported resync, want false")
+	}
+	assertJoined(t, x, "X")
+
+	resetAt := time.Now()
+	subs.resetAfterRebuild(resetAt)
+	drain(t, subs) // 重送 SUB，state = subSent
+	resync, since := subs.confirmSubscribed("a")
+	if !resync || !since.Equal(resetAt) {
+		t.Errorf("confirm after reset = (%v, %v), want (true, %v)", resync, since, resetAt)
+	}
+	if resync, _ := subs.confirmSubscribed("a"); resync {
+		t.Error("second confirm reported resync again, want once per reset")
+	}
+
+	// 走一條回到 subSent 的路徑：X 離開、expire，worker 送 UNSUB 的當下 Y 進房，worker 再送 SUB
+	subs.Leave(ctx, "a")
+	clock.fire(unsubscribeDelay)
+	var y <-chan error
+	fake.beforeUnsub = func(string) {
+		y = joinAsync(ctx, subs, "a")
+		waitViewers(t, subs, "a", 1)
+	}
+	drain(t, subs)
+	if st, ok := stateOf(subs, "a"); !ok || st != subSent {
+		t.Fatalf("state = (%v, %v), want subSent on the same entry", st, ok)
+	}
+	if want := []string{"sub a", "sub a", "unsub a", "sub a"}; !slices.Equal(fake.snapshot(), want) {
+		t.Fatalf("calls = %v, want %v", fake.snapshot(), want)
+	}
+	if resync, _ := subs.confirmSubscribed("a"); resync {
+		t.Error("confirm after rejoin reported resync again, resyncSince was not cleared")
+	}
+	assertJoined(t, y, "Y")
+
+	// 再重建一次：又可以回報一次
+	subs.resetAfterRebuild(time.Now())
+	drain(t, subs)
+	if resync, _ := subs.confirmSubscribed("a"); !resync {
+		t.Error("confirm after second reset did not report resync")
+	}
+}
+
+// debounce 中（viewers = 0、timer 還在）的房間：reset 之後 worker 仍要重送 SUB（desired 還是要訂），
+// 但確認時不回報 resync：房裡沒有人可通知，之後回來的人要等 ready，join_ok 後本來就會 GET 歷史
+func TestResetAfterRebuildDebouncingRoomResubscribesWithoutResync(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	clock := &fakeClock{}
+	subs := newTestRoomSubscriptions(fake, clock)
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs)
+	subs.confirmSubscribed("a")
+	assertJoined(t, x, "X")
+	subs.Leave(ctx, "a") // viewers 0、timer 還在
+
+	subs.resetAfterRebuild(time.Now())
+	drain(t, subs)
+
+	if want := []string{"sub a", "sub a"}; !slices.Equal(fake.snapshot(), want) {
+		t.Errorf("calls = %v, want %v", fake.snapshot(), want)
+	}
+	if resync, _ := subs.confirmSubscribed("a"); resync {
+		t.Error("confirm of a room with no viewers reported resync, want false")
+	}
+}
+
+// 沒人要的房間（viewers = 0、timer = nil，等 worker 刪）：reset 不刪 entry、不重送 SUB，由 worker 刪掉
+// 也不送 UNSUB：新連線本來就沒訂這間房
+func TestResetAfterRebuildUnwantedRoomIsDeletedWithoutSubscribe(t *testing.T) {
+	fake := &fakePubSub{}
+	clock := &fakeClock{}
+	subs := newTestRoomSubscriptions(fake, clock)
+	mustJoin(t, subs, "a")
+	subs.Leave(testCtx(t), "a")
+	clock.fire(unsubscribeDelay) // expire：viewers 0、timer nil，還沒 drain
+
+	subs.resetAfterRebuild(time.Now())
+	if _, ok := stateOf(subs, "a"); !ok {
+		t.Fatal("reset deleted the entry, want only the worker to delete")
+	}
+	drain(t, subs)
+
+	if _, ok := stateOf(subs, "a"); ok {
+		t.Error("entry still exists after worker ran, want deleted")
+	}
+	if want := []string{"sub a"}; !slices.Equal(fake.snapshot(), want) {
+		t.Errorf("calls = %v, want %v", fake.snapshot(), want)
+	}
+}
+
+// 還在等確認的 Join（subSent，ready 還沒 close）：reset 不能換掉它的 ready，
+// 否則這個人永遠等不到；重送 SUB 的確認到達時要能叫醒它，並回報 resync
+func TestResetAfterRebuildKeepsPendingReadyAndWakesIt(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs) // subSent
+	assertBlocked(t, x, "X")
+
+	subs.resetAfterRebuild(time.Now())
+	drain(t, subs) // 重送 SUB
+	assertBlocked(t, x, "X")
+
+	if resync, _ := subs.confirmSubscribed("a"); !resync {
+		t.Error("confirm after reset did not report resync")
+	}
+	assertJoined(t, x, "X")
+	if want := []string{"sub a", "sub a"}; !slices.Equal(fake.snapshot(), want) {
+		t.Errorf("calls = %v, want %v", fake.snapshot(), want)
 	}
 }

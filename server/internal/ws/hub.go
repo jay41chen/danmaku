@@ -91,6 +91,7 @@ func (h *Hub) Register(ctx context.Context, c *Client) bool {
 	}
 	h.clients[c] = &clientState{}
 	prom.WebsocketConnections.Inc()
+	prom.WebsocketConnectionsTotal.Inc()
 	h.updateViewersGaugeLocked()
 	// request_id 在 upgrade 時產生，同一條連線的所有 log 共用，等同 connection ID
 	h.logger.InfoContext(ctx, "new client connected", "total", len(h.clients))

@@ -10,7 +10,7 @@ import (
 // roomSubscriptions：這台 server 上每個房間有幾條 WS 連線，決定要不要對 Redis SUBSCRIBE / UNSUBSCRIBE（lazy subscribe）
 //
 // 兩個角色（分兩個檔案）：
-//   - 事件端（這個檔案）：Join / Leave / expire / confirmSubscribed，很多 goroutine 呼叫，
+//   - 事件端（這個檔案）：Join / Leave / expire / confirmSubscribed / resetAfterRebuild，很多 goroutine 呼叫，
 //     在 mu 底下只改記憶體（viewers、timer、state），需要的話把房間標成 dirty，不做 I/O
 //   - worker（room_subscriptions_worker.go）：整台 server 一個 goroutine，把 dirty 的房間拿出來，
 //     比對 desired / actual，不一樣就在鎖外送 SUB / UNSUB（reconciliation loop，同 Kubernetes controller）
@@ -60,13 +60,17 @@ type roomSubscription struct {
 	gen uint64
 	// 「Redis 已經確認訂閱好了」的訊號：只用 close，不送值（close 一次就能叫醒所有在等的人，之後來讀的也立刻過）
 	//   - 建立：addViewer 建 entry 時一起 make（mu 底下）
-	//   - 換新的：worker 決定送 UNSUB 的那一刻（mu 底下）——「已確認」這句話從那一刻起就不成立了，
+	//   - 換新的：(1) resetAfterRebuild 時 state 是 subConfirmed（PubSub 換新了，舊的「已確認」不再成立）；
+	//     (2) worker 決定送 UNSUB 的那一刻（mu 底下）——「已確認」這句話從那一刻起就不成立了，
 	//     不換的話，UNSUB 進行中進來的人會拿到舊的、早就 close 的 ready → 立刻 join_ok → 漏訊息
 	//   - close：只有 confirmSubscribed（consumer 收到確認時，mu 底下）
 	//   - 等：Join 在鎖外 <-ready
 	ready    chan struct{}
-	state    subState // actual。只有 worker、confirmSubscribed、確認 timer 會改
-	failures int      // SUB 連續失敗次數，算 backoff；SUB 成功歸零
+	state    subState // actual。只有 worker、confirmSubscribed、確認 timer、resetAfterRebuild 會改
+	failures int      // SUB 連續失敗次數，算 backoff；SUB 成功歸零（resetAfterRebuild 也會歸零）
+	// PubSub 重建（resetAfterRebuild）的時間；零值 = 不需要 resync
+	// 重建到重新訂閱確認之間這間房的訊息收不到，確認那一刻通知 client 重新撈歷史（confirmSubscribed 回報一次後清掉）
+	resyncSince time.Time
 }
 
 // desired：有沒有人要這間房（有人在看，或還在 debounce 裡）。只看 viewers / timer，跟 state（actual）無關
@@ -169,29 +173,63 @@ func (this *roomSubscriptions) addViewer(roomID string) (<-chan struct{}, error)
 }
 
 // consumer 收到 Redis 對 SUBSCRIBE roomID 的確認時呼叫
+// 回傳 resync = true 表示這是 PubSub 重建後這間房第一次真的確認（subSent → subConfirmed）：since 是重建時間，
+// 呼叫端在鎖外通知 client 重新撈歷史、記恢復時間。只有重建當下還有人在看（viewers > 0）的房間會回報，每次重建最多一次；一般確認（沒有 reset 過）永遠回 false
+//
 // 同一間房可能被呼叫多次：go-redis 斷線重連後會自動重新 SUBSCRIBE 所有記住的 channel，每個都會再回一次確認；
 // 確認 timer 退回重送時也會再收到一次
 //
 // 不用先檢查 ready 是不是 close 過：只有 subSent → subConfirmed 這一步會 close，
-// 而要從 subConfirmed 再回到 subSent 一定要先經過「worker 決定 UNSUB」（換新的 ready）→ subSent 時 ready 一定還沒 close
-func (this *roomSubscriptions) confirmSubscribed(roomID string) {
+// 而要從 subConfirmed 再回到 subSent 一定要先經過「換新的 ready」——worker 決定 UNSUB，或 resetAfterRebuild（只換 subConfirmed 的）
+// → subSent 時 ready 一定還沒 close
+func (this *roomSubscriptions) confirmSubscribed(roomID string) (resync bool, since time.Time) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 	entry := this.rooms[roomID]
 	if entry == nil {
 		// 確認晚到，entry 已經不在了（worker 已經 UNSUB 完並刪掉）：沒人在等，忽略
-		return
+		return false, time.Time{}
 	}
 	if entry.state != subSent {
 		// 不是在等確認：重複的確認（subConfirmed）、過期的確認（subIdle）→ 不理
 		// subRetry 也不理：這時候不知道 SUB 到底有沒有送到，worker 等一下會重送（SUBSCRIBE 冪等），
 		// 那次的確認會在 subSent 時收到。維持「只有 subSent → subConfirmed 會 close ready」這條規則，
 		// 不用另外推理 retry 時收到的確認是哪一次 SUB 的；代價只是 Join 多等一次來回
-		return
+		return false, time.Time{}
 	}
 	// 正在等：簽收 + 叫醒所有在等的 Join
 	entry.state = subConfirmed
 	close(entry.ready)
+	if entry.resyncSince.IsZero() {
+		return false, time.Time{}
+	}
+	since = entry.resyncSince
+	entry.resyncSince = time.Time{} // 每房只回報一次
+	return true, since
+}
+
+// PubSub 被換掉之後（Subscribe 的 consumer 在舊 channel 收完後呼叫）：新連線什麼都還沒訂，把所有房間退回「還沒訂」讓 worker 重送 SUB
+// 對每個 entry：
+//   - 只有 subConfirmed 換新的 ready：舊的已經 close，不換的話重建後進房的人會拿到舊 ready 立刻 join_ok，但新連線根本還沒訂 → 漏訊息
+//     其他 state 的 ready 還沒 close（還有 Join 在等），不能換：換掉的話那些人永遠等不到
+//   - state = subIdle、failures = 0：worker 的 nextAction 會對還有人要的房間重送 SUB（subSent 的確認 timer 也會自己過期，無害）
+//   - 還有人在看的房間（viewers > 0）才記 resyncSince，確認回來時通知 client 補撈；
+//     debounce 中（viewers = 0、timer 還在）的不記：沒有人在房裡可通知，之後回來的人要等 ready，join_ok 後本來就會 GET 歷史
+//   - 標 dirty；不刪 entry：只有 worker 能刪，沒人要的房間 nextAction 會回 actionDelete，不會送 SUB
+func (this *roomSubscriptions) resetAfterRebuild(now time.Time) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	for roomID, entry := range this.rooms {
+		if entry.state == subConfirmed {
+			entry.ready = make(chan struct{})
+		}
+		entry.state = subIdle
+		entry.failures = 0
+		if entry.viewers > 0 {
+			entry.resyncSince = now
+		}
+		this.markDirtyLocked(roomID)
+	}
 }
 
 // 一條連線離開 roomID。不做 I/O：最後一個人離開只啟動 debounce timer

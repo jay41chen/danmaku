@@ -22,6 +22,15 @@ func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
 	return m.GetGauge().GetValue()
 }
 
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
 // 不需要網路的 Client：Hub 只會對它 Enqueue（讀 send）；這些 test 的路徑不會踢人，所以不會呼叫 Close（conn 是 nil）
 func newTestClient() *Client {
 	return &Client{ID: randx.URLText(8), send: make(chan []byte, SendBuffer), done: make(chan struct{})}
@@ -33,9 +42,14 @@ func TestUnregisterTwice(t *testing.T) {
 	c := newTestClient()
 	ctx := context.Background()
 	before := gaugeValue(t, prom.WebsocketConnections)
+	totalBefore := counterValue(t, prom.WebsocketConnectionsTotal)
 
 	if !h.Register(ctx, c) {
 		t.Fatal("Register = false, want true")
+	}
+	// 累計連線數：Register 成功就 +1，Unregister 不扣（counter 只增不減）
+	if got := counterValue(t, prom.WebsocketConnectionsTotal); got != totalBefore+1 {
+		t.Errorf("websocket_connections_total after Register = %v, want %v", got, totalBefore+1)
 	}
 	if room := h.Unregister(ctx, c); room != "" {
 		t.Errorf("first Unregister room = %q, want empty (never joined)", room)

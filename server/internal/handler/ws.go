@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
@@ -45,7 +46,7 @@ type wsStore interface {
 
 // 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
 type wsPubSub interface {
-	Subscribe(ctx context.Context, handler func(roomID, msg string)) error
+	Subscribe(ctx context.Context, handler func(roomID, msg string), onResync func(roomID string)) error
 	JoinRoom(ctx context.Context, roomID string) error // 委派給 roomSubscriptions.Join
 	LeaveRoom(ctx context.Context, roomID string)      // 委派給 roomSubscriptions.Leave
 }
@@ -259,6 +260,16 @@ func (this *WebsocketHandler) StartBroadcast() {
 	// 所以要用context.Background()
 	this.redis.Subscribe(context.Background(), func(roomID, msg string) {
 		this.hub.Broadcast(context.Background(), roomID, []byte(msg))
+	}, func(roomID string) {
+		// PubSub 重建後這間房重新訂閱好了：重建到訂閱好之間發的訊息不會再推來，叫房內的 client 自己重新撈歷史
+		frame := encodeResync(roomID)
+		if frame == nil {
+			// 不能把 nil 交給 Broadcast（會送出空 frame）；實務上這個固定結構不會失敗
+			// 沒送出就不計數：這個 metric 數的是「送出的 resync frame」
+			return
+		}
+		prom.WebsocketResyncTotal.Inc()
+		this.hub.Broadcast(context.Background(), roomID, frame)
 	})
 }
 

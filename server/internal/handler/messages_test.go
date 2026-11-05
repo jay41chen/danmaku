@@ -15,6 +15,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 )
 
 // 用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx（context key 沒有也不該 export setter）
@@ -285,6 +286,16 @@ func TestCreateMessage(t *testing.T) {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
 		}
 	})
+	t.Run("publish error increments failure metric", func(t *testing.T) {
+		h := NewMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
+		before := counterValue(t, prom.PublishFailedTotal)
+
+		serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
+
+		if got := counterValue(t, prom.PublishFailedTotal); got != before+1 {
+			t.Errorf("publish failed counter = %v, want %v", got, before+1)
+		}
+	})
 
 	// handler 沒經過 RequireAuth（route 註冊錯）：fail closed 回 500，不存任何東西
 	t.Run("missing user id in context returns 500", func(t *testing.T) {
@@ -336,6 +347,20 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
 			t.Errorf("got %+v, want oldest first [1 2]", got)
 		}
+		// s-maxage 只給 CDN / 共用快取，瀏覽器不存
+		if got := rec.Header().Get("Cache-Control"); got != "public, s-maxage=1" {
+			t.Errorf("Cache-Control = %q, want %q", got, "public, s-maxage=1")
+		}
+	})
+	t.Run("queries historyLimit messages", func(t *testing.T) {
+		db := &fakeDBStore{room: model.Room{ID: 9}, msgs: []model.Message{}}
+		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+
+		serve(h, "abcDEF12345")
+
+		if db.gotQueryLimit != 100 || historyLimit != 100 {
+			t.Errorf("QueryMessage limit = %d (historyLimit = %d), want 100", db.gotQueryLimit, historyLimit)
+		}
 	})
 	// 沒有發送者的訊息：user_id / username 要序列化成 null，不是省略也不是空字串
 	t.Run("user fields serialize as id/username or null", func(t *testing.T) {
@@ -375,6 +400,10 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		if db.queryMsgCalled {
 			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
 		}
+		// 錯誤回應不能帶快取 header，不然 CDN 會把 404 存起來
+		if got := rec.Header().Get("Cache-Control"); got != "" {
+			t.Errorf("Cache-Control = %q on 404, want empty", got)
+		}
 	})
 	t.Run("other room lookup error returns 500", func(t *testing.T) {
 		db := &fakeDBStore{getRoomErr: errors.New("db down")}
@@ -389,6 +418,9 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		if db.queryMsgCalled {
 			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
 		}
+		if got := rec.Header().Get("Cache-Control"); got != "" {
+			t.Errorf("Cache-Control = %q on 500, want empty", got)
+		}
 	})
 	t.Run("query messages error returns 500", func(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 9}, err: errors.New("db down")}
@@ -398,6 +430,9 @@ func TestHandleGetRoomMessages(t *testing.T) {
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "" {
+			t.Errorf("Cache-Control = %q on 500, want empty", got)
 		}
 	})
 	// 空房間：非 nil 的空 slice 會編成 []；不是 null（client 不用特別處理）
