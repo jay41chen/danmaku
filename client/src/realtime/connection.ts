@@ -200,6 +200,10 @@ function handleFrame(sock: WebSocket, raw: unknown) {
         room.setPresence(payload.count);
       }
       break;
+    case "resync":
+      // server 的 Redis 訂閱剛重建過，重建到重新訂閱好之間的訊息不會補推：重新撈歷史補洞（和已有的由 merge 去重）
+      if (payload?.room === ROOM_PUBLIC_ID) void fetchMessages();
+      break;
     case "pong":
       // 收到就代表連線還活著；不用渲染
       if (pongTimer !== null) {
@@ -214,6 +218,8 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       break;
     case "join_ok":
       room.set("joined");
+      // 真的被 server 收進房間才算連線成功，退避才歸零（理由見 onopen）
+      reconnectAttempt = 0;
       joinRetryAttempt = 0;
       clearJoinRetry();
       // WS open ≠ 已經在收廣播：open 到 join_ok（server SUBSCRIBE 完成）之間的訊息可能漏掉，
@@ -262,7 +268,8 @@ function connect() {
 
   sock.onopen = () => {
     if (sock !== ws) return;
-    reconnectAttempt = 0;
+    // 不在這裡把 reconnectAttempt 歸零：server 先 upgrade 才檢查 maxClients，滿了的連線也會觸發 onopen，
+    // 在這裡歸零會讓退避永遠不增加（實測 900 個被拒 client 約 1200 次/秒）。改在 join_ok 歸零
     startHeartbeat(sock);
     sendJoin(sock);
     syncAuth();
