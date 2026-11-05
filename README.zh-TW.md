@@ -14,6 +14,7 @@
 - **即時廣播**：WebSocket + Redis Pub/Sub（每個房間一個 channel），跨多台 server
 - **帳號**：註冊 / 登入、JWT access token、會 rotate 的 refresh token（偵測 token 被偷）
 - 不登入也能看；在已經連上的 WebSocket 裡登入就會升級身分
+- **自動恢復**：client 重連後補上最新訊息；server 收不到 Redis 訊息時會自己發現並恢復
 - **房間人數**：跨 server 計算，多個分頁算一人；掛掉的 server 上的觀眾會自己過期
 - **防濫用**：按 user、IP、username（登入）限流；登入防帳號列舉（timing）；認得 Unicode 的輸入驗證
 - **可維運**：JSON 結構化 log + request ID（WebSocket 也串得起來）、Prometheus metrics、panic recovery、graceful shutdown、啟動時自動跑 migration
@@ -32,6 +33,7 @@
 | 用 offset 分頁的話，列表在翻頁期間有增減就會重複或漏掉房間，而且越後面越慢 | 用 `(created_at, public_id)` 做 keyset 分頁並建 partial index；多撈一筆判斷有沒有下一頁；page token 對 client 是 opaque，server 嚴格解析（不認識的欄位、後面多接資料、版本、id 格式不對都回 400） | [0008](docs/design/0008-cursor-pagination.md) |
 | 一個 13 個方法的 store interface：每個 handler 都依賴用不到的方法，test 的 fake 少實作方法也能編譯，handler 還為了錯誤值 import Postgres 的 package | 每個 handler 自己宣告只含它會呼叫的方法的小 interface（Go 的 interface 是隱式符合）；domain error 放在不依賴任何東西的 `model`；Postgres 和 Redis 分成兩個 package，只有 `main.go` 知道底下用什麼 | [0009](docs/design/0009-consumer-side-interfaces.md) |
 | 跨 server 的人數要把同一個人的多個分頁算成一人，還要撐得過 server 沒清理就掛掉 | 每個房間一個 Redis Sorted Set，每條連線一筆；沒續期就過期，時間一律用 Redis 的；每台 server 只有一個 worker 比對 Hub 和上次寫入的內容，舊快照不會蓋掉新的；寫入失敗時寧可短暫少算，也不要留 30 秒的幽靈 | [0010](docs/design/0010-room-presence.md) |
+| PubSub 連線可能 half-open，整台 server 的所有房間靜靜收不到訊息，但 ping 和 HTTP 都正常 | 每台 server 定期發心跳給自己，再從那條連線收回；連續 2 次沒收到就重建連線，並通知 client 重新撈訊息。用「不斷線但不轉發」的 proxy 實測：35～44 秒恢復 | [0011](docs/design/0011-message-delivery-recovery.md) |
 
 ## 架構
 
@@ -76,7 +78,7 @@ main.go ──→ pgstore ─────→ model
 
 ## 進度
 
-2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數、限流、可觀測性，以及上面那些強化。接下來：角色和 ban、CI，然後是訊息補送（replay）和非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
+2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數、漏訊息的自動恢復、限流、可觀測性，以及上面那些強化。接下來：角色和 ban、壓測基準，然後依數字決定要不要做非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
 
 ## Tech Stack
 

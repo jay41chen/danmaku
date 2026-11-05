@@ -18,6 +18,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 - **Real-time broadcast** over WebSocket across multiple servers (Redis Pub/Sub, one channel per room)
 - **Accounts**: register / login, JWT access tokens, rotating refresh tokens with theft detection
 - Anonymous viewers can watch; logging in over the open WebSocket upgrades the connection
+- **Recovery**: clients catch up on the latest messages after reconnecting; a server that stops receiving from Redis detects it and recovers by itself
 - **Viewer count** per room across servers: several tabs count as one person; viewers on a dead server
   expire on their own
 - **Abuse protection**: rate limits per user, per IP and per username (login); timing-safe login against
@@ -39,6 +40,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | Offset pagination repeats or skips rooms when the list changes, and gets slower the deeper you page | Keyset pagination on `(created_at, public_id)` with a partial index; fetch `limit+1` to detect the next page; an opaque page token that the server parses strictly (unknown fields, trailing data, version, id format → 400) | [0008](docs/design/0008-cursor-pagination.md) |
 | One 13-method store interface: every handler depended on methods it never called, test fakes compiled while missing methods, and handlers imported the Postgres package just for its errors | Each handler declares a small interface with only the methods it calls (Go interfaces are satisfied implicitly); domain errors live in a dependency-free `model`; Postgres and Redis code in separate packages, so only `main.go` knows the backends | [0009](docs/design/0009-consumer-side-interfaces.md) |
 | A viewer count across servers has to dedupe people with several tabs and survive a server dying without cleaning up | One Redis sorted set per room with a member per connection; entries expire unless renewed, using Redis time; a single worker per server reconciles the Hub against what it last wrote, so an old snapshot can't overwrite a new one; failed writes favor a brief undercount over a 30 s ghost | [0010](docs/design/0010-room-presence.md) |
+| A Pub/Sub connection can go half-open and silently stop delivering to every room on a server, while pings and HTTP keep working | Each server publishes a heartbeat to itself and expects it back on that connection; two misses rebuild the connection and tell clients to fetch again. Measured with a proxy that stops forwarding without closing: recovered in 35–44 s | [0011](docs/design/0011-message-delivery-recovery.md) |
 
 ## Architecture
 
@@ -97,8 +99,9 @@ main.go ──→ pgstore ─────→ model
 ## Status
 
 Started 2026-10-08. Done so far: real-time messaging across multiple servers, auth with refresh-token
-rotation, rooms with a paginated room list, cross-server viewer counts, rate limiting, observability, and
-the hardening described above. Next: roles and bans, CI, then message replay and async persistence. See the
+rotation, rooms with a paginated room list, cross-server viewer counts, recovery from missed messages, rate
+limiting, observability, and the hardening described above. Next: roles and bans, a load-test baseline, then
+async persistence if the numbers call for it. See the
 [milestones in ROADMAP.md](ROADMAP.md#milestones2026-11-03-訂暫定) (in Chinese).
 
 ## Getting started

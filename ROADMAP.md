@@ -9,7 +9,7 @@
 | M1 房間可瀏覽 ✅ | 房間列表（`GET /rooms` cursor 分頁、`/me/rooms`）+ 選房間 UI（2026-11-04 完成，[ADR 0008](docs/design/0008-cursor-pagination.md)） | 0.5 ～ 0.75 | 11/6 ～ 11/8 |
 | M2 房間有人氣 ✅ | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前；2026-11-04 完成，[ADR 0010](docs/design/0010-room-presence.md)） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
 | M3 Git hook ✅ | pre-commit：`gofmt` / `go vet` / 前端 lint；pre-push：全部測試（只用 `danmaku_test`）+ 前端 build（2026-11-04 完成） | < 0.1 | 11/4 ～ 11/5 |
-| M4 不漏訊息 | replay + auto-reconnect（含 `after`）+ half-open watchdog + 證明它有效的 SLI metrics（漏訊息數、重連 / 補撈次數、送達延遲）；設計 replay 時要先想好「已廣播、還沒存進 DB」 | 1 ～ 1.5 | 11/11 ～ 11/16 |
+| M4 不漏訊息 ✅ | 重連補最新 100 則 + `s-maxage=1` 快取 header + 重連退避修正 + PubSub half-open watchdog + 重建後 `resync` + SLI metrics；不做 `after`、Redis List、client timer（2026-11-05 完成，[ADR 0011](docs/design/0011-message-delivery-recovery.md)） | 1 ～ 1.5 | 11/11 ～ 11/16 |
 | M5 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/18 ～ 11/26 |
 | M6 壓測基準 | 自己寫腳本在本機模擬大量流量（不打 prod、只用測試環境），記下同步寫入的基準數字，決定 M7 要不要做；同一台 Mac 的數字只用來比較前後，不當容量上限 | 0.5 ～ 0.75 | 11/22 ～ 12/2 |
 | M7 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗）；**看 M6 結果決定要不要做** | 1 ～ 1.25 | 11/29 ～ 12/10 |
@@ -196,16 +196,19 @@
 
 ## W6 — CI/CD + 進階穩定性
 
-> 順序（2026-11-04 重排，以上方 Milestones 為準）：跨 server 人數（M2）→ replay + auto-reconnect + half-open watchdog（M4）→ 壓測基準（M6）→ 非同步保存（M7）→ 最小 CI + multi-stage（M9）→ 故障情境 + 壓測驗收（M10）；其餘 W6 項目為選做（見上方 Milestones）
+> 順序（2026-11-04 重排，以上方 Milestones 為準）：跨 server 人數（M2）→ 補撈 + half-open watchdog（M4）→ 壓測基準（M6）→ 非同步保存（M7）→ 最小 CI + multi-stage（M9）→ 故障情境 + 壓測驗收（M10）；其餘 W6 項目為選做（見上方 Milestones）
 
 - [ ] CI/CD（GitHub Actions）：範圍見 M9（2026-11-04 定）。自己一個人開發，不走 PR，部署也不等 CI；要改成擋部署時再調整
 - [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
-- [ ] Redis List replay（搭配前端 auto-reconnect）
+- [x] 訊息補撈（M4 定案，2026-11-05）：重連 `GET` 最新 100 則，不做 `after`、不做 Redis List，理由見 [ADR 0011](docs/design/0011-message-delivery-recovery.md)。以下是當時的候選，留作紀錄
   - 補漏的 API 候選：`GET /rooms/{public_id}/messages?after=<id>`（2026-11-03 從 W5 Pagination 移來）跟 Redis List replay 二選一或並用，這裡一起決定
     - store 加方向參數：`WHERE id > $1 ORDER BY id ASC`；方向不能用 `$1` 傳（placeholder 只能放值），用 typed enum + switch 對應到寫死的 `ASC` / `DESC`
     - 「選哪 N 則」（store，ORDER BY + LIMIT）跟「回傳順序」（API 契約，handler）是兩件事，不要用一個 order 參數同時控制
-  - 也要涵蓋「server 自己的 PubSub 重連、WS 沒斷」：go-redis 重連那段時間的訊息會漏（本機 kill pubsub 連線實驗每次漏 1–2 則），client 不知道要補撈。server 拿得到訊號（已 ready 的房間又收到 subscribe 確認 = 剛重連過），可對該房 client 送 resync frame 讓它 `GET after=<id>`
-- [ ] PubSub 連線 half-open 偵測：對方消失沒送 RST 時，go-redis 的 health check 只看 PING 寫不寫得出去、`Receive` 沒有 read deadline → 偵測不到，整台 server 所有房間靜默全漏，直到 TCP 自己逾時（可能十幾分鐘；proxy 丟包 10 秒實驗：0/20 收到、沒有重連）。方向：應用層 watchdog（定期 PUBLISH 給自己的 heartbeat channel，N 秒沒收到就拆掉重連），或 dialer 設 `TCP_USER_TIMEOUT` / 較短 keepalive。跟 presence 的 heartbeat 同一套觀念
+  - 「server 自己的 PubSub 重連、WS 沒斷」（本機 kill pubsub 連線實驗每次漏 1–2 則）：M4 決定接受、不解（Q296）。之後要解的話，重用 M4 的 `resync` frame：已 ready 的房間又收到 subscribe 確認 = 剛重連過
+- [x] PubSub 連線 half-open 偵測（M4，2026-11-05）：每 15 秒 PUBLISH 給自己的心跳 channel，連續 2 次沒收到就重建 PubSub，訂閱確認後送 `resync`；用「不斷線但不轉發」的 proxy 實測 35～44 秒恢復，見 [ADR 0011](docs/design/0011-message-delivery-recovery.md)
+- [ ] Redis 不回應時 `POST` 可能卡約 5 秒（2026-11-05 M4 驗收時發現，既有行為）：`publishTimeout` 的 500ms 擋不住 socket I/O，因為沒開 go-redis 的 `ContextTimeoutEnabled`；要開的話影響所有 Redis 呼叫，先確認 pool 和 PubSub 的行為再做
+- [ ] 接 CDN（要先有自訂網域；有流量再做）：`GET .../messages` 已帶 `s-maxage=1`，application 不用改。**要另外確認 CDN 有類似 `proxy_cache_use_stale updating` 的設定**，實測只開 `proxy_cache_lock` 時，快取到期的 1,000 個併發全部回源
+- [ ] `maxClients` 每台 100、被拒的連線還是會先 upgrade：M6 壓測前要決定上限，以及要不要在 upgrade 前就拒絕（在 upgrade 前拒絕的話，`onopen` 不會觸發，滿房的人就看不到歷史，要一起想）
 - [ ] Store integration test 不能同時跑兩份：共用 `danmaku_test` / Redis db 15，3 個 Judge 同時跑時每次 fail 的 test 都不一樣（單獨跑都過）。CI 平行化時要每個 runner 各自的 DB / Redis db
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
