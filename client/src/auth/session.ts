@@ -2,6 +2,7 @@
 // 外部只送事件（bootstrap / login / logout / reportRejected ...），狀態由這裡自己決定。
 // 注意：這裡所有 log / error 都不可以帶 access token / refresh token。
 import { API_URL } from "../config";
+import { readError } from "../api/errors";
 
 export type SessionStatus = "anonymous" | "authenticated" | "refreshing";
 export interface User {
@@ -262,14 +263,6 @@ export function bootstrap(): Promise<void> {
   return bootstrapPromise;
 }
 
-async function readError(res: Response): Promise<string> {
-  try {
-    return (await res.text()).trim();
-  } catch {
-    return "";
-  }
-}
-
 export async function login(username: string, password: string): Promise<void> {
   let res: Response;
   try {
@@ -281,9 +274,13 @@ export async function login(username: string, password: string): Promise<void> {
   } catch {
     throw new Error("網路錯誤，請稍後再試");
   }
-  if (res.status === 400) throw new Error("帳號或密碼錯誤");
-  if (res.status === 429) throw new Error("嘗試次數過多，請稍後再試");
-  if (!res.ok) throw new Error(`登入失敗（${res.status}）`);
+  if (!res.ok) {
+    const e = await readError(res);
+    // 舊後端的 400 是純文字（code 為 null）：部署空窗期沿用「帳號或密碼錯誤」
+    if (e.status === 400 && e.code === null) throw new Error("帳號或密碼錯誤");
+    if (e.status === 429) throw new Error("嘗試次數過多，請稍後再試");
+    throw new Error(e.text);
+  }
   const data = (await res.json()) as TokenPair & { user: User };
   epoch++; // 讓任何進行中的舊 refresh 結果作廢
   applyTokens(data);
@@ -305,8 +302,7 @@ export async function register(
     throw new Error("網路錯誤，請稍後再試");
   }
   if (!res.ok) {
-    // server 錯誤 body 是純文字，直接顯示
-    throw new Error((await readError(res)) || `註冊失敗（${res.status}）`);
+    throw new Error((await readError(res)).text);
   }
   await login(username, password); // /register 不回 token
 }

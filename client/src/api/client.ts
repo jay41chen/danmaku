@@ -3,31 +3,31 @@
 // 否則 /refresh 的 401 會再觸發 refresh。
 import { API_URL } from "../config";
 import * as session from "../auth/session";
+import { genericErrorText, readError } from "./errors";
 
 export class ApiError extends Error {
   status: number;
+  code: string | null; // server 的錯誤 code；body 不是新格式（舊後端 / nginx / mux）時為 null
   retryAfter: number | null; // 秒；跨 origin 時 server 沒 expose header，會是 null
-  constructor(status: number, message: string, retryAfter: number | null) {
+  // message 是要顯示給使用者的文字（已翻譯，不含原始 body）
+  constructor(
+    status: number,
+    message: string,
+    retryAfter: number | null,
+    code: string | null = null,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
     this.retryAfter = retryAfter;
   }
 }
 
+// 把失敗的 Response 轉成 ApiError，解析與翻譯交給 errors.ts
 async function toApiError(res: Response): Promise<ApiError> {
-  let text = "";
-  try {
-    text = (await res.text()).trim();
-  } catch {
-    /* ignore */
-  }
-  const ra = Number.parseInt(res.headers.get("Retry-After") ?? "", 10);
-  return new ApiError(
-    res.status,
-    text || `HTTP ${res.status}`,
-    Number.isFinite(ra) ? ra : null,
-  );
+  const e = await readError(res);
+  return new ApiError(e.status, e.text, e.retryAfter, e.code);
 }
 
 export async function apiFetch(
@@ -38,7 +38,7 @@ export async function apiFetch(
   let retried = false;
   for (;;) {
     const token = opts.auth ? session.getAccessToken() : null;
-    if (opts.auth && !token) throw new ApiError(401, "not logged in", null);
+    if (opts.auth && !token) throw new ApiError(401, genericErrorText(401), null);
     const headers = new Headers(init.headers);
     if (token) headers.set("Authorization", `Bearer ${token}`);
     const res = await fetch(`${API_URL}${path}`, { ...init, headers });
@@ -65,7 +65,7 @@ export async function apiFetch(
       }
       // 重送後仍 401，或新 token 仍被拒：清 session，跳回登入
       void session.logout();
-      throw new ApiError(401, "unauthorized", null);
+      throw new ApiError(401, genericErrorText(401), null);
     }
     throw await toApiError(res);
   }
