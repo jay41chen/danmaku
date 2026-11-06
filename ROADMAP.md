@@ -167,22 +167,25 @@
     - 之後再做：房主看自己已刪除的房間要能分辨「已刪除」（例如之後的恢復功能），觀眾一律只看到 404
   - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
   - [x] 房間人數（M2，2026-11-04，[ADR 0010](docs/design/0010-room-presence.md)、go-notes 3.27）：每個房間一個 Redis Sorted Set `room:<public_id>:members`，member = `conn_id:user_id`（綁連線不綁 user；匿名 user_id = 0，依 conn_id 算），score = 最後續期時間（Redis `TIME`）。每台 server 一個 worker：Hub 有變動只寫 diff，每 10 秒全部續期 + `EXPIRE 30`，每 5 秒算人數推給自己的觀眾；算不到就不推，client 沿用上一次的數字
-- [ ] HTTP 錯誤格式統一（2026-11-03 從 W5 併入，排在 RBAC 前）：目前 `http.Error` 只回純文字，同一個 status 分不出原因（例如 403 可能是「被 ban」或「房間數到上限」）。改成 status + 機器判斷用的 `code` + 給人看的 `message`（WS 已經是 `{code, message}`；可參考 RFC 9457 Problem Details），所有 endpoint 一次換
-- [ ] Authorization（RBAC）
+- [x] HTTP 錯誤格式統一（M5，2026-11-06）：所有 endpoint 回 `{"error": {"code", "message"}}`，`code` 是 client 的翻譯 key、發布後不能改名，`message` 是後備文字。status 不變；錯誤一律 `Cache-Control: no-store`、`nosniff`。不做 RFC 9457、i18n 套件、攔截 mux 內建的 404 / 405（client 碰到非 JSON 只看 status，不顯示 body）。刻意不分細：`invalid_credentials`、`unauthorized`、`room_not_found`、`invalid_refresh_token`
+- [ ] Authorization（RBAC，M5 定案，2026-11-06）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
-  - 做法同 Ban：執行動作時查每台 server 記憶體裡的 role cache，變更時 Pub/Sub 通知 + 定期從 DB 同步
-  - 房主 / curator 可以透過 WS 直送彈幕（W4-3 起一般 user 只能走 `POST /rooms/{public_id}/messages`，WS 寫入一律回 error）
+  - `room_roles(room_id, user_id, role, assigned_by, created_at, PRIMARY KEY (room_id, user_id))`，`role` 是 `moderator` / `banned`；房主看 `rooms.owner_id`，沒有列就是一般觀眾。一人一房一列，不會同時是房管又被 ban
+  - 階級：房主 > 房管 > 一般觀眾，只能上對下；只有房主能指派 / 撤銷房管。房主 ban 房管 = 那一列改成 `banned`，解除後是一般觀眾；指派被 ban 的人回 409
+  - 查 DB，不做記憶體 role cache：頻率低，也不用同步。還沒談：API 路徑、client 怎麼知道自己的角色
 - [x] 彈幕內容過濾（C1，2026-11-03）：輸入層用 PRECIS Freeform（`golang.org/x/text/secure/precis`，RFC 8264）擋控制字元、零寬字元、雙向控制字元（RLO 等）；**只檢查不改寫**（拿 precis 的 error、丟掉輸出，存原樣）。profile 另外設定：檢查前先移除 VS15 / VS16（U+FE0E / U+FE0F，手機鍵盤送的 ❤️ 帶 U+FE0F，PRECIS 預設會拒絕）+ `DisallowEmpty`（只有選擇符的字串變空 → 拒絕），都是 PRECIS 自己的擴充點（AdditionalMapping），不在 validator 裡加特例。房名比彈幕嚴：頭尾空白直接拒絕（不再 trim）、不可連續空白、combining mark（Mn + Me）最多連續 2 個。驗證集中在 `handler/text_validation.go`，回傳的 sentinel 文字直接給 client。輸出層：前端 `<bdi>` 隔離 + `overflow: hidden` 擋 Zalgo（見 go-notes 3.36）
   - Known：ZWJ emoji 序列（👨‍👩‍👧、👩‍💻）會被拒（PRECIS 的 contextual rule）；PRECIS 拒絕未指派碼位 → Unicode 新增的 emoji 要等 `x/text` 升級才收；舊資料沒有回頭清理；「看起來是空白、但不是 Unicode 空白」的字元擋不到：U+2800（點字空白）、U+1D159、`"\uFE0F "`（選擇符 + 空白，彈幕會通過）；VS15 / VS16 是**任何位置**都移除後才檢查，不限 emoji 後面 → 彈幕可以夾帶最多約 99 個看不見的 U+FE0F（房名受 mark 上限擋，最多連 2 個），選擇符也能插在 PRECIS contextual rule 檢查的兩個字之間讓檢查看不到它（Judge 全掃 U+0000–U+2FFFF：不含選擇符的輸入 0 個行為改變）→ 之後跟內容審核一起處理（要一份「視覺空白」清單）
   - 之後：關鍵字過濾 / 內容審核要「先正規化再比對」（防零寬字元或全形字繞過），正規化只用在比對，不改存的資料
 - [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
-- [ ] Ban（封鎖使用者，含 shadow ban）
-  - 重用 `user_credential_state`（refresh token 修正時建的）：ban / 強制登出 = `revokeAllCredentials`；access token（JWT）也可以用 `iat <= valid_after` 擋，跟下面的記憶體 ban set 一起考慮
-  - 背景：access token 在本機驗證、不查 DB，撤銷 refresh token 後，被封鎖的人在 access token 過期前還能繼續動作；效期也壓不到秒等級（refresh 流量會暴增）→ 封鎖要另外一層
-  - 每台 server 在**記憶體**維護 ban set（人數極少），每個 request 查記憶體即可，不查 DB / Redis
-  - 同步：ban / unban 時用 Redis Pub/Sub 廣播。Pub/Sub 是 at-most-once（subscription 斷線、部署中都會掉）→ DB 是 source of truth：啟動時、subscription 重連時、每 60 秒從 DB 全量重新載入
-  - 三層保險：Pub/Sub（秒級）→ 定期同步（≤ 60 秒）→ refresh token 已撤銷，access token 過期後換不到新的（≤ access token 效期）
-  - WS：連線建立時才驗 token，之後的訊息不經過 middleware → 收到 ban 時要主動關掉該 user 的連線，或在每則訊息檢查 ban set
+- [ ] Room ban（M5 定案，2026-11-06）：房間級 shadow ban，只擋別人看到他的彈幕，不撤銷登入、不碰 JWT
+  - 發彈幕：照常存，`CreateMessage` 同一條 SQL 查是否被 ban，回 201，被 ban 就不 PUBLISH。不存在 `room_banned` 這種 code
+  - 拿彈幕：`NOT EXISTS` 在讀取時過濾，不標記彈幕本身；解除後全部回來，包括被 ban 期間發的（接受，只有還在最新 100 則內的看得到）
+  - ban 當下：廣播 `user_hidden {user_id}`，client 移除畫面上他的彈幕；server 不發給本人；掉了不補（退回 F5 或被新彈幕擠掉才消失）
+  - 解除：房主全部都能解；房管能解房主 ban 的以外（看 `assigned_by`）。房管重複 ban 不覆蓋房主那一列，房主重複 ban 要覆蓋
+  - Known：作者本人 F5、換房或開無痕就會發現（`GET` 是 `public, s-maxage=1`，不能依使用者回不同內容）；刪帳號後 `user_id` 變 NULL，隱藏會失效（現在沒有刪帳號功能）
+  - 不做：記憶體 ban set + Pub/Sub 同步（原本是為全站封鎖、每個 request 都要查設計的，現在只有 `POST` 要查，而它本來就會碰 DB）。**M7 如果改成非同步寫入，`POST` 不再經過 DB，到時要加快取，表和讀取過濾不用改**
+  - 驗收：重測 `GET` 延遲，尤其是被 ban 的人還在狂發的情況
+  - 全站封鎖（site ban）不在 M5：要做時才考慮 `revokeAllCredentials`、`iat <= valid_after` 和記憶體 ban set
 
 ## W5 — 已拆分（2026-11-03）
 
@@ -207,7 +210,7 @@
   - 「server 自己的 PubSub 重連、WS 沒斷」（本機 kill pubsub 連線實驗每次漏 1–2 則）：M4 決定接受、不解（Q296）。之後要解的話，重用 M4 的 `resync` frame：已 ready 的房間又收到 subscribe 確認 = 剛重連過
 - [x] PubSub 連線 half-open 偵測（M4，2026-11-05）：每 15 秒 PUBLISH 給自己的心跳 channel，連續 2 次沒收到就重建 PubSub，訂閱確認後送 `resync`；用「不斷線但不轉發」的 proxy 實測 35～44 秒恢復，見 [ADR 0011](docs/design/0011-message-delivery-recovery.md)
 - [ ] Redis 不回應時 `POST` 可能卡約 5 秒（2026-11-05 M4 驗收時發現，既有行為）：`publishTimeout` 的 500ms 擋不住 socket I/O，因為沒開 go-redis 的 `ContextTimeoutEnabled`；要開的話影響所有 Redis 呼叫，先確認 pool 和 PubSub 的行為再做
-- [ ] 接 CDN（要先有自訂網域；有流量再做）：`GET .../messages` 已帶 `s-maxage=1`，application 不用改。**要另外確認 CDN 有類似 `proxy_cache_use_stale updating` 的設定**，實測只開 `proxy_cache_lock` 時，快取到期的 1,000 個併發全部回源
+- [ ] 接 CDN（要先有自訂網域；有流量再做）：`GET .../messages` 已帶 `s-maxage=1`，application 不用改。**要另外確認 CDN 有類似 `proxy_cache_use_stale updating` 的設定**，實測只開 `proxy_cache_lock` 時，快取到期的 1,000 個併發全部回源。錯誤回應已是 `no-store`，但也要確認 CDN 對 404 這類錯誤的預設行為
 - [ ] `maxClients` 每台 100、被拒的連線還是會先 upgrade：M6 壓測前要決定上限，以及要不要在 upgrade 前就拒絕（在 upgrade 前拒絕的話，`onopen` 不會觸發，滿房的人就看不到歷史，要一起想）
 - [ ] Store integration test 不能同時跑兩份：共用 `danmaku_test` / Redis db 15，3 個 Judge 同時跑時每次 fail 的 test 都不一樣（單獨跑都過）。CI 平行化時要每個 runner 各自的 DB / Redis db
 - [ ] 彈幕非同步保存（量大時）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
@@ -250,6 +253,8 @@
 ## Backlog
 
 > 知道、刻意先不做（2026-11-03 從 W5 移入）
+
+- [ ] 房主 / 房管透過 WS 直送彈幕（2026-11-06 從 RBAC 移出，不一定會做）：好處只有少一次 HTTP，要多一條寫入路徑、自己做 ack 和去重、降級時處理已連上的連線。等 M6 顯示 `POST` 真的太慢再談
 
 - [ ] 彈幕往上捲載入更舊的（`GET /rooms/{public_id}/messages?before=<id>`，`WHERE id < $1 ORDER BY id DESC`）：直播彈幕很少往回翻；前端要處理往上插入時固定捲動位置。若之後做回放（彈幕綁影片時間軸），翻頁依據會變成時間點而不是 id，到時再設計
 - [ ] Login CAPTCHA（reCAPTCHA / Turnstile 等，接外部服務前先討論選型）

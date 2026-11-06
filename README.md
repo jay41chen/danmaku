@@ -166,5 +166,8 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 | `GET` | `/ws` | | WebSocket: `join` / `leave` / `auth` / `ping` frames; receives `message` |
 | `GET` | `/healthcheck`, `/metrics` | | health, Prometheus |
 
+HTTP errors return `{"error": {"code": "...", "message": "..."}}` with `Cache-Control: no-store`. The exception is
+the mux's built-in plain-text `404` and `405` for an unknown path or wrong method.
+
 Full reference (status codes, WebSocket protocol and error codes, migrations, deployment, environment
 variables) is in the [Chinese README](README.zh-TW.md#api).

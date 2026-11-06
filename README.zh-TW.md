@@ -169,7 +169,7 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 | 任何 method | `/messages` | | **已移除**：回 `410 Gone`，請改用 `/rooms/{public_id}/messages` |
 | `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：1～30 字（彈幕的 100 字也一樣：以 Unicode code point 計，❤️ = U+2764 + U+FE0F 算 2 個），字元規則同彈幕，另外**頭尾不可有空白**（不幫忙 trim，直接回 `400`）、不可有連續空白、不可有超過 2 個連續的 combining mark；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
-| `GET` | `/rooms` | | 房間列表（未刪除，新的在前），cursor 分頁：`?limit=`（預設 20、最多 50）、`?page_token=`（上一頁回的 `next_page_token`，原樣帶回）。回 `{"rooms": [{"room_name", "public_id"}], "next_page_token"}`，沒有下一頁時不帶 `next_page_token`；`limit` 不合法回 `400 invalid limit`，token 不合法回 `400 invalid cursor` |
+| `GET` | `/rooms` | | 房間列表（未刪除，新的在前），cursor 分頁：`?limit=`（預設 20、最多 50）、`?page_token=`（上一頁回的 `next_page_token`，原樣帶回）。回 `{"rooms": [{"room_name", "public_id"}], "next_page_token"}`，沒有下一頁時不帶 `next_page_token`；`limit` 不合法回 `400`（`invalid_limit`），token 不合法回 `400`（`invalid_cursor`） |
 | `GET` | `/me/rooms` | ✓ | 自己的房間列表，參數和回應同 `GET /rooms`。`Cache-Control: no-store` |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上後要送 `join` 進房才收得到該房間的彈幕；連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
@@ -178,7 +178,8 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 | `GET` | `/healthcheck`、`/metrics` | | 健康檢查、Prometheus metrics |
 
 - 要登入的 endpoint 帶 `Authorization: Bearer <access token>`。沒帶、token 無效或過期一律回同一個 `401`（`WWW-Authenticate: Bearer`），client 用 refresh token 換新的再重送
-- `/login` 失敗（格式不合法、帳號不存在、密碼錯）一律回同一個 `400 invalid username or password`，不是 `401`：讓 `401` 只代表 access token 失效，client 的自動 refresh 不用排除 `/login`
+- HTTP 錯誤一律回 `{"error": {"code": "...", "message": "..."}}`，`Cache-Control: no-store`。`code` 給程式判斷、client 用來對應翻譯，`message` 是後備文字。例外：打錯路徑或用錯 method 時，mux 內建的 `404` / `405` 是純文字
+- `/login` 失敗（格式不合法、帳號不存在、密碼錯）一律回同一個 `400`（`invalid_credentials`），不是 `401`：讓 `401` 只代表 access token 失效，client 的自動 refresh 不用排除 `/login`
 - WS 訊息格式是 `{"type": ..., "payload": ...}`：
   - `message`：新彈幕，payload 跟 `POST /rooms/{public_id}/messages` 的回應相同
   - `error`：只送給那條連線，連線不會斷，`code` 有：
