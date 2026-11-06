@@ -375,3 +375,30 @@ func TestBroadcastExceptUserUsesCurrentIdentity(t *testing.T) {
 	default:
 	}
 }
+
+// Hub 的連線上限就是建構時給的數字：滿了 Register 回 false、不加進 registry；有人離開後又有位置
+func TestHubHonoursMaxClients(t *testing.T) {
+	for _, limit := range []int{1, 3, 100} {
+		h := NewHub(limit)
+		ctx := context.Background()
+		var clients []*Client
+		for i := range limit {
+			c := newTestClient()
+			if !h.Register(ctx, c) {
+				t.Fatalf("limit %d: Register #%d = false, want true", limit, i+1)
+			}
+			clients = append(clients, c)
+		}
+		extra := newTestClient()
+		if h.Register(ctx, extra) {
+			t.Fatalf("limit %d: Register beyond the cap = true, want false", limit)
+		}
+		if len(h.clients) != limit {
+			t.Errorf("limit %d: clients = %d, want %d (rejected one must not be added)", limit, len(h.clients), limit)
+		}
+		h.Unregister(ctx, clients[0])
+		if !h.Register(ctx, extra) {
+			t.Errorf("limit %d: Register after a disconnect = false, want true", limit)
+		}
+	}
+}

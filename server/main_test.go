@@ -9,9 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/handler"
+	"github.com/jay41chen/danmaku/server/internal/loadtiming"
+	"github.com/jay41chen/danmaku/server/internal/pgstore"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/redisstore"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -327,4 +331,80 @@ func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {
 			t.Errorf("duration sample count delta for {other, unmatched} = %d, want 1", got)
 		}
 	})
+}
+
+type fakeLimiter struct {
+	delay  time.Duration
+	err    error
+	resets int
+}
+
+func (f *fakeLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
+	time.Sleep(f.delay)
+	return true, 0, f.err
+}
+func (f *fakeLimiter) Reset(ctx context.Context, key string) error  { f.resets++; return nil }
+func (f *fakeLimiter) Refund(ctx context.Context, key string) error { return nil }
+
+type fakePublisher struct {
+	delay time.Duration
+	err   error
+	got   []string
+}
+
+func (f *fakePublisher) Publish(ctx context.Context, roomID, msg string) error {
+	time.Sleep(f.delay)
+	f.got = append(f.got, roomID+":"+msg)
+	return f.err
+}
+
+// 壓測計時 wrapper：每次呼叫記一筆耗時（錯誤另外計數），並且原樣轉給底下的實作
+func TestTimedLimiterAndPublisherObserve(t *testing.T) {
+	lh, ph := loadtiming.NewHistogram(), loadtiming.NewHistogram()
+	fl := &fakeLimiter{delay: 3 * time.Millisecond}
+	var lim messageLimiterAPI = timedLimiter{messageLimiterAPI: fl, hist: lh}
+	for range 2 {
+		if ok, _, err := lim.Allow(context.Background(), "k", 1, time.Second); !ok || err != nil {
+			t.Fatalf("Allow = %v, %v; want passthrough true, nil", ok, err)
+		}
+	}
+	lim.Reset(context.Background(), "k") // 沒覆寫的方法照轉給底下
+	fl.err = errors.New("redis down")
+	if _, _, err := lim.Allow(context.Background(), "k", 1, time.Second); err == nil {
+		t.Error("Allow error was swallowed")
+	}
+	snap := lh.Drain()
+	if snap.Count != 3 || snap.Errors != 1 || fl.resets != 1 || snap.SumMs < 8 {
+		t.Errorf("limiter hist count/errors = %d/%d resets = %d sum = %.1fms, want 3/1, 1, >= 9ms of sleeps", snap.Count, snap.Errors, fl.resets, snap.SumMs)
+	}
+
+	fp := &fakePublisher{delay: 2 * time.Millisecond}
+	var pub messagePublisherAPI = timedPublisher{messagePublisherAPI: fp, hist: ph}
+	if err := pub.Publish(context.Background(), "room", "m"); err != nil || len(fp.got) != 1 || fp.got[0] != "room:m" {
+		t.Fatalf("Publish passthrough: err = %v got = %v", err, fp.got)
+	}
+	fp.err = errors.New("boom")
+	if err := pub.Publish(context.Background(), "room", "m"); err == nil {
+		t.Error("Publish error was swallowed")
+	}
+	snap = ph.Drain()
+	if snap.Count != 2 || snap.Errors != 1 || snap.SumMs < 3.5 {
+		t.Errorf("publish hist count/errors = %d/%d sum = %.1fms, want 2/1, >= 4ms", snap.Count, snap.Errors, snap.SumMs)
+	}
+}
+
+// 沒開 LOADTEST_TIMING_LOG：原封不動回傳 db / redis，沒有任何 wrapper（也不會啟動背景 goroutine，nil 的 db 不會被碰到）
+func TestMessageDepsForTimingOffIsUnwrapped(t *testing.T) {
+	var db *pgstore.DBStore
+	var rs *redisstore.RedisStore
+	d := messageDepsFor(db, rs, false)
+	if _, ok := d.store.(*pgstore.DBStore); !ok {
+		t.Errorf("store = %T, want the bare *pgstore.DBStore", d.store)
+	}
+	if _, ok := d.publisher.(*redisstore.RedisStore); !ok {
+		t.Errorf("publisher = %T, want the bare *redisstore.RedisStore", d.publisher)
+	}
+	if _, ok := d.limiter.(*redisstore.RedisStore); !ok {
+		t.Errorf("limiter = %T, want the bare *redisstore.RedisStore", d.limiter)
+	}
 }

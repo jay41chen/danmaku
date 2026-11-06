@@ -24,6 +24,9 @@ func TestLoad(t *testing.T) {
 			CORSOrigins:    []string{"*"},
 			ClientIPHeader: "",
 			JWTSecret:      validSecret,
+			// 鎖住預設值：不設這些 env 時 production 行為不變
+			WSMaxClients:      100,
+			LoadtestTimingLog: false,
 		}
 		assertConfig(t, cfg, want)
 	})
@@ -36,18 +39,23 @@ func TestLoad(t *testing.T) {
 			"CORS_ORIGINS":     "https://a.com,http://localhost:5173",
 			"CLIENT_IP_HEADER": "X-Real-IP",
 			"JWT_SECRET":       validSecret,
+
+			"WS_MAX_CLIENTS":      "6000",
+			"LOADTEST_TIMING_LOG": "1",
 		}))
 
 		if err != nil {
 			t.Fatalf("Load() error = %v, want nil", err)
 		}
 		want := Config{
-			Port:           "9000",
-			DatabaseURL:    "postgres://u:p@db:5432/x",
-			RedisURL:       "redis://cache:6379",
-			CORSOrigins:    []string{"https://a.com", "http://localhost:5173"},
-			ClientIPHeader: "X-Real-IP",
-			JWTSecret:      validSecret,
+			WSMaxClients:      6000,
+			LoadtestTimingLog: true,
+			Port:              "9000",
+			DatabaseURL:       "postgres://u:p@db:5432/x",
+			RedisURL:          "redis://cache:6379",
+			CORSOrigins:       []string{"https://a.com", "http://localhost:5173"},
+			ClientIPHeader:    "X-Real-IP",
+			JWTSecret:         validSecret,
 		}
 		assertConfig(t, cfg, want)
 	})
@@ -62,6 +70,14 @@ func TestLoadErrors(t *testing.T) {
 	}{
 		{"jwt secret missing", map[string]string{}, []string{"JWT_SECRET"}},
 		{"jwt secret too short", map[string]string{"JWT_SECRET": "short-s3kr1t"}, []string{"JWT_SECRET"}},
+		{"ws max clients zero", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "0"}, []string{"WS_MAX_CLIENTS"}},
+		{"ws max clients negative", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "-5"}, []string{"WS_MAX_CLIENTS"}},
+		{"ws max clients not a number", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "many"}, []string{"WS_MAX_CLIENTS"}},
+		{"ws max clients decimal", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "1.5"}, []string{"WS_MAX_CLIENTS"}},
+		{"ws max clients too large", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "99999999999"}, []string{"WS_MAX_CLIENTS"}},
+		{"timing log not a bool", map[string]string{"JWT_SECRET": validSecret, "LOADTEST_TIMING_LOG": "maybe"}, []string{"LOADTEST_TIMING_LOG"}},
+		{"reports every invalid load test setting at once", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "0", "LOADTEST_TIMING_LOG": "x"},
+			[]string{"WS_MAX_CLIENTS", "LOADTEST_TIMING_LOG"}},
 		{"invalid cors origins", map[string]string{"JWT_SECRET": validSecret, "CORS_ORIGINS": "https://a.com/path"}, []string{"CORS_ORIGINS"}},
 		// 一次回報全部：不能遇到第一個錯就 return
 		{"reports all errors at once", map[string]string{"CORS_ORIGINS": "https://a.com/path"}, []string{"JWT_SECRET", "CORS_ORIGINS"}},

@@ -13,8 +13,10 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/config"
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
+	"github.com/jay41chen/danmaku/server/internal/loadtiming"
 	logging "github.com/jay41chen/danmaku/server/internal/logging"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/pgstore"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/redisstore"
@@ -33,16 +35,19 @@ func main() {
 		os.Exit(1)
 	}
 	logClientIPHeader(cfg.ClientIPHeader)
+	logLoadtestSettings(cfg)
 	tokens := initTokenIssuer(cfg.JWTSecret)
 
 	db := initDatabase(cfg.DatabaseURL)
 	redis := initRedis(cfg.RedisURL)
 
 	// RedisStore 同時實作 Pub/Sub 和 rateLimiter，同一條連線共用
-	wsHandler := handler.NewWebsocketHandler(redis, db, tokens)
+	wsHandler := handler.NewWebsocketHandler(redis, db, tokens, handler.WithMaxClients(cfg.WSMaxClients))
+	msgDeps := messageDepsFor(db, redis, cfg.LoadtestTimingLog)
+	messageHandler := handler.NewMessageHandler(msgDeps.store, msgDeps.publisher, msgDeps.limiter)
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
-		messages: handler.NewMessageHandler(db, redis, redis),
+		messages: messageHandler,
 		rooms:    handler.NewRoomHandler(db),
 		roles:    handler.NewRoleHandler(db, redis),
 		health:   handler.NewHealthHandler(db, redis),
@@ -53,6 +58,104 @@ func main() {
 	go wsHandler.StartPresence(redis)
 
 	startServer(mux, cfg.Port, cfg.CORSOrigins)
+}
+
+// 訊息 handler 需要的三個依賴；型別是 handler 那邊 messageStore / messagePublisher / rateLimiter 的超集合，
+// 所以可以直接傳給 NewMessageHandler
+type messageStoreAPI interface {
+	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, bool, error)
+	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)
+	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
+}
+
+type messagePublisherAPI interface {
+	Publish(ctx context.Context, roomID, msg string) error
+}
+
+type messageLimiterAPI interface {
+	Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error)
+	Reset(ctx context.Context, key string) error
+	Refund(ctx context.Context, key string) error
+}
+
+type messageDeps struct {
+	store     messageStoreAPI
+	publisher messagePublisherAPI
+	limiter   messageLimiterAPI
+}
+
+// 壓測用的計時：LOADTEST_TIMING_LOG 沒開時原封不動回傳 db / redis（沒有 wrapper、沒有背景 goroutine）；
+// 開了才用 wrapper 包住 CreateMessage、限流 Allow、Redis PUBLISH 各自計時，並啟動每 5 秒 log 一行的 goroutine
+func messageDepsFor(db *pgstore.DBStore, redis *redisstore.RedisStore, timingLog bool) messageDeps {
+	if !timingLog {
+		return messageDeps{store: db, publisher: redis, limiter: redis}
+	}
+	slog.Warn("LOADTEST_TIMING_LOG on: logging DB / limiter / publish timing every 5s (load test only)")
+	hists := loadtiming.Hists{Create: loadtiming.NewHistogram(), Limiter: loadtiming.NewHistogram(), Publish: loadtiming.NewHistogram()}
+	go loadtiming.Run(context.Background(), slog.Default().With("component", "loadtiming"), loadtiming.DefaultInterval, hists,
+		func() loadtiming.PoolSample {
+			s := db.PoolStat()
+			return loadtiming.PoolSample{
+				AcquireCount:         s.AcquireCount(),
+				AcquireDuration:      s.AcquireDuration(),
+				EmptyAcquireCount:    s.EmptyAcquireCount(),
+				CanceledAcquireCount: s.CanceledAcquireCount(),
+				Acquired:             s.AcquiredConns(),
+				Idle:                 s.IdleConns(),
+				Max:                  s.MaxConns(),
+			}
+		})
+	return messageDeps{
+		store:     timedStore{DBStore: db, hist: hists.Create},
+		publisher: timedPublisher{messagePublisherAPI: redis, hist: hists.Publish},
+		limiter:   timedLimiter{messageLimiterAPI: redis, hist: hists.Limiter},
+	}
+}
+
+// 只覆寫 CreateMessage 計時，其餘方法沿用內嵌的 *pgstore.DBStore
+type timedStore struct {
+	*pgstore.DBStore
+	hist *loadtiming.Histogram
+}
+
+func (s timedStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, bool, error) {
+	start := time.Now()
+	msg, banned, err := s.DBStore.CreateMessage(ctx, roomPublicID, userID, content)
+	s.hist.Observe(time.Since(start), err != nil)
+	return msg, banned, err
+}
+
+// 只覆寫 Allow 計時（POST 每次問兩條規則，所以每個 POST 記兩筆），Reset / Refund 沿用內嵌的 limiter
+type timedLimiter struct {
+	messageLimiterAPI
+	hist *loadtiming.Histogram
+}
+
+func (l timedLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
+	start := time.Now()
+	allowed, retryAfter, err := l.messageLimiterAPI.Allow(ctx, key, limit, window)
+	l.hist.Observe(time.Since(start), err != nil)
+	return allowed, retryAfter, err
+}
+
+// 只覆寫 Publish 計時
+type timedPublisher struct {
+	messagePublisherAPI
+	hist *loadtiming.Histogram
+}
+
+func (p timedPublisher) Publish(ctx context.Context, roomID, msg string) error {
+	start := time.Now()
+	err := p.messagePublisherAPI.Publish(ctx, roomID, msg)
+	p.hist.Observe(time.Since(start), err != nil)
+	return err
+}
+
+// 壓測用的設定一旦偏離 production 預設就在啟動時 log 出來，免得測完忘了、或拿壓測的 server 當成正常設定
+func logLoadtestSettings(cfg config.Config) {
+	if cfg.WSMaxClients != config.DefaultWSMaxClients {
+		slog.Warn("non-default load test settings", "ws_max_clients", cfg.WSMaxClients)
+	}
 }
 
 func initApp() {

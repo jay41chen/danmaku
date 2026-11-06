@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	maxClients = 100
-	rateLimit  = 5
+	// 沒指定 WithMaxClients 時的連線上限；production 由 config 的 WS_MAX_CLIENTS（預設同為 100）傳進來
+	defaultMaxClients = 100
+	rateLimit         = 5
 
 	// auth frame 查 DB（GetUserByID）的上限，卡住時不能一直佔著這條連線的讀取迴圈
 	wsAuthDBTimeout = 3 * time.Second
@@ -84,13 +85,33 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// WebsocketHandler 的選項：不傳就是 production 預設
+type WebsocketOption func(*websocketOptions)
+
+type websocketOptions struct {
+	maxClients int
+}
+
+// 設定這台 server 的 WS 連線上限（Hub 的 cap）；n <= 0 視為沒設，沿用預設（config 已經擋掉不合法的值）
+func WithMaxClients(n int) WebsocketOption {
+	return func(o *websocketOptions) {
+		if n > 0 {
+			o.maxClients = n
+		}
+	}
+}
+
 // constructor
-func NewWebsocketHandler(redis wsPubSub, db wsStore, tokens AccessTokenClaimsParser) *WebsocketHandler {
+func NewWebsocketHandler(redis wsPubSub, db wsStore, tokens AccessTokenClaimsParser, opts ...WebsocketOption) *WebsocketHandler {
+	options := websocketOptions{maxClients: defaultMaxClients}
+	for _, opt := range opts {
+		opt(&options)
+	}
 	return &WebsocketHandler{
 		redis:  redis,
 		db:     db,
 		tokens: tokens,
-		hub:    ws.NewHub(maxClients),
+		hub:    ws.NewHub(options.maxClients),
 		logger: slog.Default().With("component", "websocket"),
 
 		pingPeriod: wsPingPeriod,

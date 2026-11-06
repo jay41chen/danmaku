@@ -16,3 +16,11 @@ server/server
 # Personal notes
 docs/go-notes.md
 docs/devlog.md
+
+# Load test results (cmd/loadtest default -out; written to wherever the tool is run from)
+loadtest-*.json
+loadtest-*.json.tmp
+
+# Load test tool build artifact (go build ./cmd/loadtest, from server/ or from the package dir)
+server/loadtest
+server/cmd/loadtest/loadtest

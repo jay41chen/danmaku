@@ -156,13 +156,15 @@ type fakeRateLimiter struct {
 	blocks     map[string]time.Duration // 多個 key 同時被擋時用：key → 該 key 的等待時間
 	err        error                    // 不是 nil 就直接回傳這個錯（模擬 Redis 掛了）
 
-	allowKeys  []string // spy：Allow 收到過的 key
-	resetKeys  []string // spy：Reset 收到過的 key
-	refundKeys []string // spy：Refund 收到過的 key
+	allowKeys   []string // spy：Allow 收到過的 key
+	allowLimits []int    // spy：Allow 收到過的 limit（跟 allowKeys 同順序）
+	resetKeys   []string // spy：Reset 收到過的 key
+	refundKeys  []string // spy：Refund 收到過的 key
 }
 
 func (f *fakeRateLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
 	f.allowKeys = append(f.allowKeys, key) // spy：記下被問過的 key
+	f.allowLimits = append(f.allowLimits, limit)
 	if f.err != nil {
 		return false, 0, f.err // 模擬 Redis 掛了；有 err 時呼叫端不看前兩個值
 	}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
 // 讀出 gauge 目前的值（/metrics 輸出背後就是這個 dto.Metric 結構）
@@ -869,4 +870,74 @@ func TestWebsocketMalformedUserHiddenDropped(t *testing.T) {
 	if got := readRawFrame(t, conn, 2*time.Second); got != `{"type":"message","payload":"ok"}` {
 		t.Errorf("first frame = %s, want only the valid message", got)
 	}
+}
+
+// Hub 的連線上限：沒設時是 production 的 100（鎖住預設值）；WithMaxClients 設了就照設的
+func TestWebsocketHandlerMaxClients(t *testing.T) {
+	fill := func(h *WebsocketHandler, n int) (lastOK bool) {
+		for range n {
+			lastOK = h.hub.Register(context.Background(), ws.NewClient(nil, time.Second, time.Second))
+		}
+		return lastOK
+	}
+
+	t.Run("default is 100", func(t *testing.T) {
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil)
+		if !fill(h, 100) {
+			t.Fatal("the 100th Register failed, want default cap 100")
+		}
+		if fill(h, 1) {
+			t.Error("the 101st Register succeeded, want it rejected at the default cap")
+		}
+	})
+
+	t.Run("WithMaxClients is honoured", func(t *testing.T) {
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, WithMaxClients(3))
+		if !fill(h, 3) {
+			t.Fatal("the 3rd Register failed, want cap 3")
+		}
+		if fill(h, 1) {
+			t.Error("the 4th Register succeeded, want it rejected at cap 3")
+		}
+	})
+
+	t.Run("non-positive value keeps the default", func(t *testing.T) {
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, WithMaxClients(0))
+		if !fill(h, 100) || fill(h, 1) {
+			t.Error("cap is not the default 100")
+		}
+	})
+
+	// 整條路徑：真的 WS 連線，超過上限的那條會被伺服器關掉，沒超過的保持開著
+	t.Run("over the cap is closed over a real connection", func(t *testing.T) {
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, WithMaxClients(2))
+		srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
+		defer srv.Close()
+		url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+		var conns []*websocket.Conn
+		for range 3 {
+			c, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer c.Close()
+			conns = append(conns, c)
+		}
+		// 第 3 條：server 立刻關掉 → 讀取很快就收到 error，而且不是 timeout
+		conns[2].SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := conns[2].ReadMessage(); err == nil {
+			t.Error("3rd connection read succeeded, want it closed by the server")
+		} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+			t.Errorf("3rd connection was not closed within 2s: %v", err)
+		}
+		// 前兩條還活著：沒有資料可讀，所以是 timeout
+		for i := range 2 {
+			conns[i].SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_, _, err := conns[i].ReadMessage()
+			if ne, ok := err.(interface{ Timeout() bool }); !ok || !ne.Timeout() {
+				t.Errorf("connection %d: read err = %v, want a timeout (still open)", i, err)
+			}
+		}
+	})
 }

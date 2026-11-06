@@ -564,3 +564,30 @@ func TestCreateMessageBannedAuthorGets201WithoutPublish(t *testing.T) {
 		t.Errorf("rate-limited banned author status = %d, want 429", rec.Code)
 	}
 }
+
+// 發彈幕的限流規則鎖住：burst 3 次 / 1 秒、sustain 20 次 / 10 秒；兩條都問 limiter，key 是 user id
+func TestCreateMessageRateLimitRules(t *testing.T) {
+	const userID = int64(7)
+	if messageBurstRule.limit != 3 || messageBurstRule.window != time.Second {
+		t.Errorf("burst rule = %d / %v, want 3 / 1s", messageBurstRule.limit, messageBurstRule.window)
+	}
+	if messageSustainRule.limit != 20 || messageSustainRule.window != 10*time.Second {
+		t.Errorf("sustain rule = %d / %v, want 20 / 10s", messageSustainRule.limit, messageSustainRule.window)
+	}
+
+	limiter := &fakeRateLimiter{}
+	h := NewMessageHandler(&fakeDBStore{}, &fakeRedis{}, limiter)
+
+	rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	id := strconv.FormatInt(userID, 10)
+	if want := []string{messageBurstRule.key(id), messageSustainRule.key(id)}; !slices.Equal(limiter.allowKeys, want) {
+		t.Errorf("allow keys = %v, want %v", limiter.allowKeys, want)
+	}
+	if want := []int{3, 20}; !slices.Equal(limiter.allowLimits, want) {
+		t.Errorf("limits passed to limiter = %v, want %v", limiter.allowLimits, want)
+	}
+}
