@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 )
 
@@ -14,7 +15,7 @@ func requireUserID(w http.ResponseWriter, r *http.Request, logger *slog.Logger) 
 	if !ok {
 		// server 設定錯誤、不是 client 的錯：這個 route 忘了用 get/post 註冊（誤用 publicGet/publicPost）
 		logger.ErrorContext(r.Context(), "no user id in context, route must be registered with get/post, not publicGet/publicPost")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return 0, false
 	}
 	return userID, true

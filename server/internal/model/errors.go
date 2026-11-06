@@ -73,3 +73,18 @@ func (e *RefreshTokenRevokedError) Error() string {
 func (e *RefreshTokenRevokedError) Is(target error) bool {
 	return target == ErrRefreshTokenInvalid
 }
+
+// --- coded error ---
+
+// 帶穩定 code 的錯誤：Code 給程式判斷、給 client 當翻譯 key，Message 是後備文字
+// 用途：驗證錯誤自己帶著 code，handler 不用再對應一次；這裡不放 HTTP status，由 handler 決定
+// Code 發布後就是 API 合約，不能改名；Message 會原樣回給 client，不能放內部資訊
+type CodedError struct {
+	Code    string
+	Message string
+}
+
+// 實作 error 介面（Go 只比對 method 名稱和簽名），讓它可以當一般 error 回傳，也能被 errors.Is / errors.As 比對
+func (this *CodedError) Error() string {
+	return this.Message
+}

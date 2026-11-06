@@ -27,14 +27,15 @@ func TestHandleRegister(t *testing.T) {
 		body       string
 		createErr  error
 		wantStatus int
+		wantCode   string
 	}{
-		{"broken json", http.MethodPost, `{"username":"jay",}`, model.ErrUsernameTaken, http.StatusBadRequest},
-		{"invalid username", http.MethodPost, `{"username":"a","password":"kq7vz2mx"}`, model.ErrUsernameTaken, http.StatusBadRequest},
-		{"too short password", http.MethodPost, `{"username":"jay","password":"jayjay"}`, model.ErrUsernameTaken, http.StatusBadRequest},
-		{"common password", http.MethodPost, `{"username":"jay","password":"12345678"}`, model.ErrUsernameTaken, http.StatusBadRequest},
+		{"broken json", http.MethodPost, `{"username":"jay",}`, model.ErrUsernameTaken, http.StatusBadRequest, "invalid_json"},
+		{"invalid username", http.MethodPost, `{"username":"a","password":"kq7vz2mx"}`, model.ErrUsernameTaken, http.StatusBadRequest, "username_invalid"},
+		{"too short password", http.MethodPost, `{"username":"jay","password":"jayjay"}`, model.ErrUsernameTaken, http.StatusBadRequest, "password_length"},
+		{"common password", http.MethodPost, `{"username":"jay","password":"12345678"}`, model.ErrUsernameTaken, http.StatusBadRequest, "password_too_common"},
 		// 以下 body 要完全合法，才走得到 CreateUser
-		{"username taken", http.MethodPost, validBody, model.ErrUsernameTaken, http.StatusConflict},
-		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError},
+		{"username taken", http.MethodPost, validBody, model.ErrUsernameTaken, http.StatusConflict, "username_taken"},
+		{"db error", http.MethodPost, validBody, errors.New("db down"), http.StatusInternalServerError, "internal_error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +48,9 @@ func TestHandleRegister(t *testing.T) {
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if got := decodeErrorBody(t, rec).Code; got != tc.wantCode {
+				t.Errorf("code = %q, want %q", got, tc.wantCode)
 			}
 		})
 	}
@@ -106,15 +110,15 @@ func TestHandleLogin(t *testing.T) {
 		user       model.User
 		getErr     error
 		wantStatus int
-		wantBody   string
+		wantCode   string
 	}{
-		{"broken json", http.MethodPost, `{"username":"jay",}`, stored, nil, http.StatusBadRequest, ""},
+		{"broken json", http.MethodPost, `{"username":"jay",}`, stored, nil, http.StatusBadRequest, "invalid_json"},
 		// 這兩個 case 要回一模一樣的 status 和訊息，不能讓人分辨帳號存不存在
-		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, model.ErrUserNotFound, http.StatusBadRequest, msgInvalidCredentials},
-		{"wrong password", http.MethodPost, body("jay", "wrong-password"), stored, nil, http.StatusBadRequest, msgInvalidCredentials},
-		{"db error", http.MethodPost, body("jay", password), model.User{}, errors.New("db down"), http.StatusInternalServerError, ""},
+		{"unknown user", http.MethodPost, body("nobody", password), model.User{}, model.ErrUserNotFound, http.StatusBadRequest, "invalid_credentials"},
+		{"wrong password", http.MethodPost, body("jay", "wrong-password"), stored, nil, http.StatusBadRequest, "invalid_credentials"},
+		{"db error", http.MethodPost, body("jay", password), model.User{}, errors.New("db down"), http.StatusInternalServerError, "internal_error"},
 		// DB 裡的 hash 壞掉是系統錯誤，不是密碼錯
-		{"corrupt hash", http.MethodPost, body("jay", password), model.User{ID: 7, Username: "Jay", PasswordHash: "not-a-hash"}, nil, http.StatusInternalServerError, ""},
+		{"corrupt hash", http.MethodPost, body("jay", password), model.User{ID: 7, Username: "Jay", PasswordHash: "not-a-hash"}, nil, http.StatusInternalServerError, "internal_error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,9 +132,8 @@ func TestHandleLogin(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
-			// http.Error 會在訊息後面補一個換行
-			if tc.wantBody != "" && strings.TrimSpace(rec.Body.String()) != tc.wantBody {
-				t.Errorf("body = %q, want %q", rec.Body.String(), tc.wantBody)
+			if got := decodeErrorBody(t, rec).Code; got != tc.wantCode {
+				t.Errorf("code = %q, want %q", got, tc.wantCode)
 			}
 		})
 	}
@@ -149,8 +152,8 @@ func TestHandleLogin(t *testing.T) {
 
 		h.HandleLogin(rec, req)
 
-		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != msgInvalidCredentials {
-			t.Errorf("response = %d %q, want 400 %q", rec.Code, rec.Body.String(), msgInvalidCredentials)
+		if rec.Code != http.StatusBadRequest || decodeErrorBody(t, rec).Code != "invalid_credentials" {
+			t.Errorf("response = %d %q, want 400 invalid_credentials", rec.Code, rec.Body.String())
 		}
 		if len(gotHashes) != 1 || gotHashes[0] != dummyHash {
 			t.Errorf("checkPassword hashes = %q, want exactly [dummyHash]", gotHashes)
@@ -169,8 +172,8 @@ func TestHandleLogin(t *testing.T) {
 
 		h.HandleLogin(rec, req)
 
-		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != msgInvalidCredentials {
-			t.Errorf("response = %d %q, want 400 %q", rec.Code, rec.Body.String(), msgInvalidCredentials)
+		if rec.Code != http.StatusBadRequest || decodeErrorBody(t, rec).Code != "invalid_credentials" {
+			t.Errorf("response = %d %q, want 400 invalid_credentials", rec.Code, rec.Body.String())
 		}
 		if len(gotHashes) != 1 || gotHashes[0] != stored.PasswordHash {
 			t.Errorf("checkPassword hashes = %q, want exactly [user's PasswordHash]", gotHashes)
@@ -316,8 +319,8 @@ func TestHandleLoginRateLimit(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 			}
-			if got := strings.TrimSpace(rec.Body.String()); got != msgInvalidCredentials {
-				t.Errorf("body = %q, want %q", got, msgInvalidCredentials)
+			if got := decodeErrorBody(t, rec).Code; got != "invalid_credentials" {
+				t.Errorf("code = %q, want %q", got, "invalid_credentials")
 			}
 			if !slices.Equal(limiter.allowKeys, []string{ipKey}) {
 				t.Errorf("Allow keys = %q, want only %q", limiter.allowKeys, []string{ipKey})

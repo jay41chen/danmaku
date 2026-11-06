@@ -77,18 +77,18 @@ func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, 
 	room, err := this.db.GetRoomByPublicID(r.Context(), roomPublicID)
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404（跟 HandleGetRoom 一樣）
-		http.Error(w, "room not found", http.StatusNotFound)
+		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "get room failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	msgs, err := this.db.QueryMessage(r.Context(), room.ID, historyLimit)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "query messages failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -124,14 +124,14 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 
 	var req createMessageRequest
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 
 	// client 也會檢查，但那只是 UX；server 才是防線（curl 可以繞過 client）
 	// 只檢查、不改寫：存的是原始 content（不 trim、不正規化）
 	if err := validateMessageContent(req.Content); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
 		return
 	}
 
@@ -143,7 +143,7 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	msg, err := this.db.CreateMessage(r.Context(), roomPublicID, userID, req.Content)
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 房間不存在或已刪除（兩者都不讓外人分辨）
-		http.Error(w, "room not found", http.StatusNotFound)
+		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
 	}
 	if errors.Is(err, model.ErrMessageUserNotFound) {
@@ -154,7 +154,7 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "create message failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 

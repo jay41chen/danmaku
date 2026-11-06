@@ -400,9 +400,9 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		if db.queryMsgCalled {
 			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
 		}
-		// 錯誤回應不能帶快取 header，不然 CDN 會把 404 存起來
-		if got := rec.Header().Get("Cache-Control"); got != "" {
-			t.Errorf("Cache-Control = %q on 404, want empty", got)
+		// 錯誤回應一律 no-store，不然 CDN 可能把 404 存起來
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q on 404, want no-store", got)
 		}
 	})
 	t.Run("other room lookup error returns 500", func(t *testing.T) {
@@ -418,8 +418,8 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		if db.queryMsgCalled {
 			t.Errorf("QueryMessage called with room id %d, want not called", db.gotQueryRoomID)
 		}
-		if got := rec.Header().Get("Cache-Control"); got != "" {
-			t.Errorf("Cache-Control = %q on 500, want empty", got)
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q on 500, want no-store", got)
 		}
 	})
 	t.Run("query messages error returns 500", func(t *testing.T) {
@@ -431,8 +431,8 @@ func TestHandleGetRoomMessages(t *testing.T) {
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 		}
-		if got := rec.Header().Get("Cache-Control"); got != "" {
-			t.Errorf("Cache-Control = %q on 500, want empty", got)
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q on 500, want no-store", got)
 		}
 	})
 	// 空房間：非 nil 的空 slice 會編成 []；不是 null（client 不用特別處理）

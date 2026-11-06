@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/ws"
@@ -173,17 +174,17 @@ func (this *WebsocketHandler) encodeEnvelope(ctx context.Context, env wsEnvelope
 func (this *WebsocketHandler) errorFrame(ctx context.Context, code, message string) []byte {
 	return this.encodeEnvelope(ctx, wsEnvelope{
 		Type:    wsTypeError,
-		Payload: wsError{Code: code, Message: message},
+		Payload: httpx.ErrorDetail{Code: code, Message: message},
 	})
 }
 
 // 解析 payload、確認房間存在、向 Redis JoinRoom。不碰鎖。
 // 成功回傳 room 的 public_id；失敗回傳要給 client 的 error（nil = 成功）
-func (this *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage) (string, *wsError) {
+func (this *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage) (string, *httpx.ErrorDetail) {
 	var p wsRoomPayload
 	if err := json.Unmarshal(raw, &p); err != nil || p.Room == "" {
 		this.logger.InfoContext(ctx, "ws join rejected", "reason", "malformed payload")
-		return "", &wsError{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
+		return "", &httpx.ErrorDetail{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
 	}
 	if wsErr := this.lookupRoom(ctx, p.Room); wsErr != nil {
 		return "", wsErr
@@ -195,27 +196,27 @@ func (this *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage
 }
 
 // 查 DB 確認房間存在，包 wsJoinTimeout。不碰鎖。nil = 房間存在
-func (this *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *wsError {
+func (this *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
 	dbCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
 	if _, err := this.db.GetRoomByPublicID(dbCtx, roomID); err != nil {
 		if errors.Is(err, model.ErrRoomNotFound) {
 			this.logger.InfoContext(ctx, "ws join rejected", "reason", "room not found", "room", roomID)
-			return &wsError{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
+			return &httpx.ErrorDetail{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
 		}
 		this.logger.ErrorContext(ctx, "ws join get room failed", "error", err, "room", roomID)
-		return &wsError{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
+		return &httpx.ErrorDetail{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
 	}
 	return nil
 }
 
 // 對 Redis 做 JoinRoom，包 wsJoinTimeout。不碰鎖。nil = 成功
-func (this *WebsocketHandler) subscribeRoom(ctx context.Context, roomID string) *wsError {
+func (this *WebsocketHandler) subscribeRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
 	joinCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
 	if err := this.redis.JoinRoom(joinCtx, roomID); err != nil {
 		this.logger.ErrorContext(ctx, "ws join room failed", "error", err, "room", roomID)
-		return &wsError{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
+		return &httpx.ErrorDetail{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
 	}
 	return nil
 }

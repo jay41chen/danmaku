@@ -39,12 +39,6 @@ type wsEnvelope struct {
 	Payload any    `json:"payload"`
 }
 
-// type = "error" 的 payload：code 給程式判斷，message 給人看
-type wsError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
 // type = "auth" 的 payload（client → server）
 type wsAuthPayload struct {
 	Token string `json:"token"`

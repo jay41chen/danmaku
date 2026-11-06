@@ -1,14 +1,19 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
@@ -302,4 +307,25 @@ func (f *fakeRedis) leftRooms() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.left)
+}
+
+// 解析錯誤回應 {"error":{"code":..,"message":..}}：用 DisallowUnknownFields 嚴格解，欄位多一個少一個都會失敗
+// 同時確認 Content-Type 是 JSON，handler test 比對錯誤用 status + code，不比文字
+func decodeErrorBody(t *testing.T, rec *httptest.ResponseRecorder) httpx.ErrorDetail {
+	t.Helper()
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json (body: %q)", ct, rec.Body.String())
+	}
+	var resp struct {
+		Error httpx.ErrorDetail `json:"error"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(rec.Body.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&resp); err != nil {
+		t.Fatalf("error body is not {\"error\":{code,message}}: %v (body: %q)", err, rec.Body.String())
+	}
+	if resp.Error.Code == "" || resp.Error.Message == "" {
+		t.Fatalf("error body has empty code or message: %q", rec.Body.String())
+	}
+	return resp.Error
 }

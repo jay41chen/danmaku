@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
@@ -61,8 +62,8 @@ func TestWebsocketWriteRejected(t *testing.T) {
 		}
 		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		var env struct {
-			Type    string  `json:"type"`
-			Payload wsError `json:"payload"`
+			Type    string            `json:"type"`
+			Payload httpx.ErrorDetail `json:"payload"`
 		}
 		if err := conn.ReadJSON(&env); err != nil {
 			t.Fatalf("read #%d: %v", i, err)
@@ -198,7 +199,7 @@ func expectAuthOK(t *testing.T, conn *websocket.Conn, wantID int64, wantName str
 func expectErrorCode(t *testing.T, conn *websocket.Conn, wait time.Duration, wantCode string) {
 	t.Helper()
 	f := readFrame(t, conn, wait)
-	var e wsError
+	var e httpx.ErrorDetail
 	if f.Type != wsTypeError || json.Unmarshal(f.Payload, &e) != nil || e.Code != wantCode {
 		t.Fatalf("frame = %s %s, want error %q", f.Type, f.Payload, wantCode)
 	}

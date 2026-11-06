@@ -47,6 +47,8 @@ func TestRequireAuthRejects(t *testing.T) {
 		{"parser rejects token", "Bearer expired-or-tampered"},
 	}
 
+	// 所有失敗 body 必須逐字等於這份：code 寫錯（例如某條路徑多出 token_expired）會被抓到
+	const wantBody = "{\"error\":{\"code\":\"unauthorized\",\"message\":\"unauthorized\"}}\n"
 	var firstBody string
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,6 +70,12 @@ func TestRequireAuthRejects(t *testing.T) {
 			}
 			if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
 				t.Errorf("WWW-Authenticate = %q, want %q", got, "Bearer")
+			}
+			if got := rec.Body.String(); got != wantBody {
+				t.Errorf("body = %q, want %q", got, wantBody)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
 			}
 			// 所有 401 body 相同：client 分辨不出是哪一種失敗
 			if i == 0 {

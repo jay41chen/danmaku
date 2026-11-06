@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"time"
 
@@ -21,7 +20,7 @@ import (
 const pageTokenVersion = 1
 
 // 任何一項不合格都回這個，不告訴 client 是哪一項壞掉
-var errInvalidPageToken = errors.New("invalid cursor")
+var errInvalidPageToken = &model.CodedError{Code: "invalid_cursor", Message: "invalid cursor"}
 
 // token 裡的 JSON；只在 handler 內部用，不對外
 type pageToken struct {

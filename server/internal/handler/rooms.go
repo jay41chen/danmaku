@@ -67,14 +67,14 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 
 	var req createRoomRequest
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 
 	// 只檢查、不改寫：存的是原樣（頭尾有空白直接拒絕，不幫忙 trim）
 	name := req.RoomName
 	if err := validateRoomName(name); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
 		return
 	}
 
@@ -82,8 +82,8 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 	if errors.Is(err, model.ErrRoomLimitReached) {
 		// 額度是「權限」問題，所以回 403：
 		//   409 是「跟現有資料衝突」（例如帳號重複）；422 是「請求內容本身有問題」，這裡請求內容沒錯
-		// 目前 HTTP error 都是純文字，client 還分不出 403 的原因，之後要做成結構化錯誤（ROADMAP W5）
-		http.Error(w, "room limit reached", http.StatusForbidden)
+		// 403 的原因由 body 的 code（room_limit_reached）告訴 client
+		httpx.WriteError(w, http.StatusForbidden, "room_limit_reached", "room limit reached")
 		return
 	}
 	if errors.Is(err, model.ErrRoomOwnerNotFound) {
@@ -93,7 +93,7 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "create room failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -105,12 +105,12 @@ func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
 	room, err := this.db.GetRoomByPublicID(r.Context(), r.PathValue("public_id"))
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404、不是 410：不讓外人知道「這個房間曾經存在過」
-		http.Error(w, "room not found", http.StatusNotFound)
+		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "get room failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -145,7 +145,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 	if query.Has("limit") {
 		n, err := strconv.Atoi(query.Get("limit"))
 		if err != nil || n < 1 || n > model.MaxRoomListLimit {
-			http.Error(w, "invalid limit", http.StatusBadRequest)
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_limit", "invalid limit")
 			return
 		}
 		limit = n
@@ -157,7 +157,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 		cursor, err := decodePageToken(raw)
 		if err != nil {
 			// 不說是哪一項壞掉
-			http.Error(w, errInvalidPageToken.Error(), http.StatusBadRequest)
+			httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errInvalidPageToken)
 			return
 		}
 		after = &cursor
@@ -166,7 +166,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 	rooms, next, err := this.db.GetRoomLists(r.Context(), userID, after, limit)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "list rooms failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -179,7 +179,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 		token, err := encodePageToken(*next)
 		if err != nil {
 			this.logger.ErrorContext(r.Context(), "encode page token failed", "error", err)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 		resp.NextPageToken = token

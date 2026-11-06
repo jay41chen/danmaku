@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 )
 
@@ -67,9 +68,9 @@ func writeTooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
 	// 無條件進位到秒，至少 1 秒：剩 0.4 秒不能回 0（client 會以為現在就能再試）
 	seconds := max(int(math.Ceil(retryAfter.Seconds())), 1)
 
-	// header 要在 http.Error 之前設，它會把 header 送出去
+	// header 要在 WriteError 之前設，WriteError 一寫出 status 就把 header 送出去了
 	w.Header().Set("Retry-After", strconv.Itoa(seconds))
-	http.Error(w, "too many requests", http.StatusTooManyRequests)
+	httpx.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 }
 
 // 回傳 true = 可以繼續；false = 已經回了 429，handler 要直接 return

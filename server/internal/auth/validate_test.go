@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 func TestValidateUsername(t *testing.T) {
@@ -98,4 +101,30 @@ func TestValidateJWTSecretLength(t *testing.T) {
 			t.Errorf("error = %v, want error without the secret", err)
 		}
 	})
+}
+
+// 驗證 sentinel 的 code 是 API 合約：每個失敗情況都要回預期的 code，改名會被這裡抓到
+func TestValidationErrorCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		got  error
+		want string
+	}{
+		{"username too short", ValidateUsername("a"), "username_invalid"},
+		{"username bad chars", ValidateUsername("bad name"), "username_invalid"},
+		{"password too short", ValidatePassword("short"), "password_length"},
+		{"password too long", ValidatePassword(strings.Repeat("a", 73)), "password_length"},
+		{"password too common", ValidatePassword("12345678"), "password_too_common"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var coded *model.CodedError
+			if !errors.As(tc.got, &coded) || coded.Code != tc.want {
+				t.Errorf("err = %v, want CodedError with code %q", tc.got, tc.want)
+			}
+			if coded != nil && coded.Message == "" {
+				t.Error("message is empty")
+			}
+		})
+	}
 }

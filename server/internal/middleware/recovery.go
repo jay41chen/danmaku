@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 )
 
 // panic可以視為exception
@@ -23,7 +25,7 @@ func RecoverPanic(next http.Handler) http.Handler {
 				case rec != nil:
 					// 印出stacktrace方便查bug
 					slog.ErrorContext(r.Context(), "panic recovered", "panic", rec, "method", r.Method, "path", r.URL.Path, "stacktrace", string(debug.Stack()))
-					http.Error(w, "internal server error", http.StatusInternalServerError)
+					httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 				}
 			}()
 

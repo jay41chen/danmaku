@@ -15,7 +15,7 @@ import (
 // HTTP 規則：status 一定在 body 之前送出，送出後就不能改。常見的呼叫順序：
 //
 //	200 成功           只有 Write（第一次 Write 時 net/http 自動補上 200）
-//	非 200（http.Error）WriteHeader(code) → Write
+//	非 200（httpx.WriteError）WriteHeader(code) → Write
 //	204 No Content     只有 WriteHeader(204)，沒有 body
 //	什麼都沒寫         handler return 時 net/http 自動送出 200
 //	WebSocket          Hijack → 記成 101

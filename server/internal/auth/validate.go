@@ -1,12 +1,12 @@
 package auth
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
 	_ "embed" // 底線 import：沒有直接用到 embed 這個 package，但 go:embed 需要它
+	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
 const (
@@ -33,21 +33,28 @@ var (
 	usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{3,32}$`)
 )
 
-// 只允許3~32位的英數
+// 驗證失敗回傳的 sentinel：帶 code，handler 用 httpx.WriteCodedError 直接寫成錯誤回應
+var (
+	errUsernameInvalid   = &model.CodedError{Code: "username_invalid", Message: "username must be 3-32 characters of letters, digits or _"}
+	errPasswordLength    = &model.CodedError{Code: "password_length", Message: "password must be 8-72 bytes"}
+	errPasswordTooCommon = &model.CodedError{Code: "password_too_common", Message: "password is too common"}
+)
+
+// 只允許3~32位的英數；失敗回 errUsernameInvalid
 func ValidateUsername(username string) error {
 	if !usernamePattern.MatchString(username) {
-		return errors.New("username must be 3-32 characters of letters, digits or _")
+		return errUsernameInvalid
 	}
 	return nil
 }
 
-// 只允許8~72byte的任意輸入
+// 只允許8~72byte的任意輸入；長度不符回 errPasswordLength，太常見回 errPasswordTooCommon
 func ValidatePassword(password string) error {
 	if len(password) < 8 || len(password) > 72 {
-		return errors.New("password must be 8-72 bytes")
+		return errPasswordLength
 	}
 	if _, inList := commonPasswords[strings.ToLower(password)]; inList {
-		return errors.New("password is too common")
+		return errPasswordTooCommon
 	}
 	return nil
 }

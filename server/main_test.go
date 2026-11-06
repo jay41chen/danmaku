@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +109,12 @@ func TestRoutes(t *testing.T) {
 
 			if rec.Code != http.StatusGone {
 				t.Errorf("%s /messages status = %d, want %d", method, rec.Code, http.StatusGone)
+			}
+			var resp struct {
+				Error struct{ Code, Message string } `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.Error.Code != "gone" {
+				t.Errorf("%s /messages body = %q, want error code gone", method, rec.Body.String())
 			}
 			if !strings.Contains(rec.Body.String(), "/rooms/{public_id}/messages") {
 				t.Errorf("%s /messages body = %q, want it to point to /rooms/{public_id}/messages", method, rec.Body.String())

@@ -1,12 +1,12 @@
 package handler
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/secure/precis"
 	"golang.org/x/text/transform"
@@ -46,18 +46,18 @@ var freeform = precis.NewFreeform(
 	precis.DisallowEmpty,
 )
 
-// validateMessageContent / validateRoomName 回傳的錯誤，文字會直接回給 client（handler 用 err.Error()）
-// 所以兩個 validate 只能回傳這裡的 sentinel，不能把 precis 等內部 error 往外丟
+// validateMessageContent / validateRoomName 回傳的錯誤，code 和 message 會直接回給 client（handler 用 httpx.WriteCodedError）
+// 所以兩個 validate 只能回傳這裡的 sentinel（都是 *model.CodedError），不能把 precis 等內部 error 往外丟
 var (
-	errContentEmpty   = errors.New("content must not be empty")
-	errContentTooLong = errors.New("content too long")
-	errContentInvalid = errors.New("content contains invalid characters")
+	errContentEmpty   = &model.CodedError{Code: "content_empty", Message: "content must not be empty"}
+	errContentTooLong = &model.CodedError{Code: "content_too_long", Message: "content too long"}
+	errContentInvalid = &model.CodedError{Code: "content_invalid", Message: "content contains invalid characters"}
 
-	errRoomNameLength            = fmt.Errorf("room_name must be 1 to %d characters", maxRoomNameRunes)
-	errRoomNameInvalid           = errors.New("room_name contains invalid characters")
-	errRoomNameSurroundingSpace  = errors.New("room_name must not start or end with whitespace")
-	errRoomNameConsecutiveSpaces = errors.New("room_name must not contain consecutive whitespace")
-	errRoomNameTooManyMarks      = errors.New("room_name contains too many combining marks")
+	errRoomNameLength            = &model.CodedError{Code: "room_name_length", Message: fmt.Sprintf("room_name must be 1 to %d characters", maxRoomNameRunes)}
+	errRoomNameInvalid           = &model.CodedError{Code: "room_name_invalid", Message: "room_name contains invalid characters"}
+	errRoomNameSurroundingSpace  = &model.CodedError{Code: "room_name_surrounding_space", Message: "room_name must not start or end with whitespace"}
+	errRoomNameConsecutiveSpaces = &model.CodedError{Code: "room_name_consecutive_spaces", Message: "room_name must not contain consecutive whitespace"}
+	errRoomNameTooManyMarks      = &model.CodedError{Code: "room_name_too_many_marks", Message: "room_name contains too many combining marks"}
 )
 
 // 彈幕內容。頭尾空白、連續空白、Zalgo 都允許（彈幕文化常用；版面交給前端）

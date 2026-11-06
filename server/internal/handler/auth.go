@@ -126,17 +126,17 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 
 	var req credentials
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 
 	if err := auth.ValidateUsername(req.Username); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
 		return
 	}
 
 	if err := auth.ValidatePassword(req.Password); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
 		return
 	}
 
@@ -145,19 +145,19 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		// 只記 err，不能記 req.Password
 		this.logger.ErrorContext(r.Context(), "hash password failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
 	id, err := this.db.CreateUser(r.Context(), req.Username, hash)
 	// 先比對已知的 sentinel，剩下的才是真的系統錯誤
 	if errors.Is(err, model.ErrUsernameTaken) {
-		http.Error(w, "username already taken", http.StatusConflict)
+		httpx.WriteError(w, http.StatusConflict, "username_taken", "username already taken")
 		return
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "create user failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -175,14 +175,14 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	var req credentials
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 
 	// 格式規則是公開的（register 會回 400 告知），格式不合法的帳號不可能存在，所以直接回、不洩漏帳號是否存在
 	// 放在 username 限流之前：不讓超長字串變成 Redis key；也不跑 bcrypt、不查 DB
 	if err := auth.ValidateUsername(req.Username); err != nil {
-		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
 		return
 	}
 
@@ -199,12 +199,12 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		// 結果不重要，目的是花跟「密碼錯」一樣的時間
 		// 借以避免讓攻擊者知道錯誤
 		_, _ = this.checkPassword(dummyHash, req.Password)
-		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
 		return
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "get user failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -212,17 +212,17 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	success, err := this.checkPassword(user.PasswordHash, req.Password)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "check password failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	if !success {
-		http.Error(w, msgInvalidCredentials, http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
 		return
 	}
 
 	tokens, err := this.completeLogin(r, user.ID, username, ip)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -281,7 +281,7 @@ func (this *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "get user by id failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 

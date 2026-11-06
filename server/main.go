@@ -12,6 +12,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/config"
 	"github.com/jay41chen/danmaku/server/internal/handler"
+	"github.com/jay41chen/danmaku/server/internal/httpx"
 	logging "github.com/jay41chen/danmaku/server/internal/logging"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/pgstore"
@@ -144,7 +145,7 @@ func (this *routes) publicPost(path string, h http.Handler) {
 // pattern 不帶 METHOD，所有 method 都比對得到（CORS preflight 一樣先被外層 CORS middleware 回掉）
 func (this *routes) removed(path, replacement string) {
 	this.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "gone: use "+replacement, http.StatusGone)
+		httpx.WriteError(w, http.StatusGone, "gone", "gone: use "+replacement)
 	}))
 }
 

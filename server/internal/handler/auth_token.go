@@ -44,7 +44,7 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	var req refreshRequest
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 
@@ -59,7 +59,7 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
 	tokens, err := this.withAccessToken(r, userID, newPlain)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -76,11 +76,11 @@ func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request
 		// 被撤銷的憑證又出現（多半是攻擊者手上的舊 token）；不記 token 本身
 		this.logger.WarnContext(r.Context(), "refresh token issued before credentials revoked was used",
 			"user_id", revoked.UserID, "client_ip", ip)
-		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+		httpx.WriteError(w, http.StatusUnauthorized, "invalid_refresh_token", "invalid refresh token")
 		return
 	}
 	if errors.Is(err, model.ErrRefreshTokenInvalid) {
-		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+		httpx.WriteError(w, http.StatusUnauthorized, "invalid_refresh_token", "invalid refresh token")
 		return
 	}
 	var dupUse *model.RefreshTokenDuplicateUseError
@@ -89,11 +89,11 @@ func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request
 		// IP 用 httpx.ClientIP：RemoteAddr 在 nginx 後面只會是 nginx 的 IP
 		this.logger.WarnContext(r.Context(), "refresh token duplicate use detected, revoked all tokens of user",
 			"user_id", dupUse.UserID, "client_ip", ip)
-		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+		httpx.WriteError(w, http.StatusUnauthorized, "invalid_refresh_token", "invalid refresh token")
 		return
 	}
 	this.logger.ErrorContext(r.Context(), "rotate refresh token failed", "error", err)
-	http.Error(w, "internal server error", http.StatusInternalServerError)
+	httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
 // 只作廢這一個 refresh token（這台裝置登出）
@@ -102,14 +102,14 @@ func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request
 func (this *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := httpx.DecodeJSONBody(w, r, &req); err != nil || req.RefreshToken == "" {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 
 	if err := this.db.RevokeRefreshToken(r.Context(), auth.HashRefreshToken(req.RefreshToken)); err != nil {
 		// DB 壞了要回 500：回 204 的話 client 以為登出了，token 其實還有效
 		this.logger.ErrorContext(r.Context(), "revoke refresh token failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

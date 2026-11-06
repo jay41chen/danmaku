@@ -166,6 +166,9 @@ func TestHandleCreateRoom(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
 		}
+		if got := decodeErrorBody(t, rec).Code; got != "room_limit_reached" {
+			t.Errorf("code = %q, want room_limit_reached", got)
+		}
 	})
 
 	t.Run("deleted owner returns same 401 as RequireAuth", func(t *testing.T) {
@@ -338,8 +341,8 @@ func TestHandleListRooms(t *testing.T) {
 					if rec.Code != http.StatusBadRequest {
 						t.Errorf("limit=%q: status = %d, want 400", v, rec.Code)
 					}
-					if !strings.Contains(rec.Body.String(), "invalid limit") {
-						t.Errorf("limit=%q: body = %q, want it to contain %q", v, rec.Body.String(), "invalid limit")
+					if got := decodeErrorBody(t, rec).Code; got != "invalid_limit" {
+						t.Errorf("limit=%q: code = %q, want %q", v, got, "invalid_limit")
 					}
 					if db.listRoomsCalls != 0 {
 						t.Errorf("limit=%q: store called %d times, want 0", v, db.listRoomsCalls)
@@ -355,8 +358,8 @@ func TestHandleListRooms(t *testing.T) {
 					if rec.Code != http.StatusBadRequest {
 						t.Errorf("page_token=%q: status = %d, want 400", v, rec.Code)
 					}
-					if !strings.Contains(rec.Body.String(), "invalid cursor") {
-						t.Errorf("page_token=%q: body = %q, want it to contain %q", v, rec.Body.String(), "invalid cursor")
+					if got := decodeErrorBody(t, rec).Code; got != "invalid_cursor" {
+						t.Errorf("page_token=%q: code = %q, want %q", v, got, "invalid_cursor")
 					}
 					if db.listRoomsCalls != 0 {
 						t.Errorf("page_token=%q: store called %d times, want 0", v, db.listRoomsCalls)
