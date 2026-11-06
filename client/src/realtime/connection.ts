@@ -194,6 +194,14 @@ function handleFrame(sock: WebSocket, raw: unknown) {
     case "message":
       if (messages.isMessage(frame.payload)) messages.merge([frame.payload]);
       break;
+    case "user_hidden":
+      // 該使用者在本房被 ban：只在本地移除他的彈幕，不 refetch（GET 本來就會過濾）
+      // 自己的 id 一律忽略：server 只在 Hub 認得出本人時才不發給他；連線還是匿名（token 過期等）時
+      // 他會收到，若照做，他自己的彈幕會消失而看出被 ban
+      if (typeof payload?.user_id === "number" && payload.user_id !== session.getSnapshot().user?.id) {
+        messages.removeByUser(payload.user_id);
+      }
+      break;
     case "presence":
       // 只收目前房間的；count 不合法就忽略（保留上一個數字）
       if (payload?.room === ROOM_PUBLIC_ID && room.isPresenceCount(payload.count)) {
@@ -271,8 +279,10 @@ function connect() {
     // 不在這裡把 reconnectAttempt 歸零：server 先 upgrade 才檢查 maxClients，滿了的連線也會觸發 onopen，
     // 在這裡歸零會讓退避永遠不增加（實測 900 個被拒 client 約 1200 次/秒）。改在 join_ok 歸零
     startHeartbeat(sock);
-    sendJoin(sock);
+    // 先 auth 再 join：server 依序處理 frame，這樣 join 完成、開始收廣播時連線已經有身分（user_hidden 才不會發給本人）
+    // auth 失敗只降回訪客、不斷線，join 照常；auth 要查 DB，join_ok 最多晚約 3 秒（wsAuthDBTimeout），仍小於 JOIN_TIMEOUT_MS
     syncAuth();
+    sendJoin(sock);
     // 先 WS 連上、再 GET：寧可重疊（merge 去重）也不要留空隙漏訊息。
     // 這次仍然需要：部署時前端先上線，舊 backend 永遠不會送 join_ok；
     // join_ok 後的第二次 fetch 負責補 open→subscribe 的空隙，重疊由 merge 去重

@@ -3,9 +3,11 @@ import * as session from "./auth/session";
 import { AuthForm } from "./components/AuthForm";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
+import { RoleRoster } from "./components/RoleRoster";
 import { RoomList } from "./components/RoomList";
 import { fetchMyRooms, fetchRooms } from "./api/rooms";
 import { ROOM_PUBLIC_ID } from "./config";
+import { useRoleSync } from "./hooks/useMyRole";
 import { useRoomPresence, useRoomStatus } from "./hooks/useRoomStatus";
 import { useSession } from "./hooks/useSession";
 import * as connection from "./realtime/connection";
@@ -14,6 +16,7 @@ function App() {
   const { status, user } = useSession();
   const roomStatus = useRoomStatus();
   const presence = useRoomPresence();
+  useRoleSync(); // 登入狀態變動時重抓本房角色
   // 登出可能要等進行中的 refresh 結束（最多約 10 秒），期間按鈕停用並顯示「登出中…」
   const [loggingOut, setLoggingOut] = useState(false);
 
@@ -60,6 +63,7 @@ function App() {
       ) : (
         <>
           {presence !== null && <div>{presence} 人在線</div>}
+          <RoleRoster />
           <MessageList />
           <Composer />
         </>

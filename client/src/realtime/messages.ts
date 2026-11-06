@@ -35,3 +35,11 @@ export function merge(incoming: readonly Message[]) {
   items = [...byId.values()].sort((a, b) => a.id - b.id).slice(-MAX_MESSAGES);
   listeners.forEach((l) => l());
 }
+
+// 移除某使用者的所有彈幕（user_hidden frame 或自己剛 ban 完）；沒有符合的就不通知
+export function removeByUser(userId: number) {
+  const next = items.filter((m) => m.user_id !== userId);
+  if (next.length === items.length) return;
+  items = next;
+  listeners.forEach((l) => l());
+}

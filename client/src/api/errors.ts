@@ -27,6 +27,11 @@ const CODE_TEXT: Record<string, string> = {
   content_invalid: "訊息內容不符規定",
   invalid_limit: "分頁數量不正確",
   invalid_cursor: "分頁位置無效，請重新整理",
+  room_forbidden: "你沒有權限執行此操作",
+  room_target_forbidden: "無法對此使用者執行此操作",
+  room_role_conflict: "此使用者目前的身分不允許這個操作",
+  user_not_found: "找不到此使用者",
+  invalid_role: "身分不正確",
 };
 
 // 只依 status 產生的通用文字；body 不可信（可能是 HTML 或舊版純文字），永遠不顯示
