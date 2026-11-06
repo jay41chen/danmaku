@@ -260,6 +260,17 @@ func (this *WebsocketHandler) StartBroadcast() {
 	// Redis subscribe 是 server 層級的長期任務，不屬於任何 request
 	// 所以要用context.Background()
 	this.redis.Subscribe(context.Background(), func(roomID, msg string) {
+		// 同一個 room channel 上有兩種 payload：訊息（原樣轉給房內所有人）和 user_hidden
+		// （轉給房內「不是這個 user」的連線；本人不能知道自己被 ban，所以由 server 過濾，不交給 client）
+		// 前綴對得上卻解析失敗的 payload 直接丟掉：fall through 的話會被當訊息廣播給所有人（包括本人）
+		if userID, isHidden, valid := parseUserHidden(msg); isHidden {
+			if valid {
+				this.hub.BroadcastExceptUser(context.Background(), roomID, userID, []byte(msg))
+			} else {
+				this.logger.Warn("malformed user_hidden payload dropped", "room", roomID)
+			}
+			return
+		}
 		this.hub.Broadcast(context.Background(), roomID, []byte(msg))
 	}, func(roomID string) {
 		// PubSub 重建後這間房重新訂閱好了：重建到訂閱好之間發的訊息不會再推來，叫房內的 client 自己重新撈歷史

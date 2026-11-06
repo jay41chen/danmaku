@@ -95,3 +95,36 @@ func TestDecodePageToken(t *testing.T) {
 		})
 	}
 }
+
+func TestRoleTokenRoundTripAndRejections(t *testing.T) {
+	created := time.Date(2030, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	tok, err := encodeRoleToken(model.RoleCursor{CreatedAt: created, UserID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeRoleToken(tok)
+	if err != nil || got.UserID != 42 || !got.CreatedAt.Equal(created) {
+		t.Fatalf("decodeRoleToken = (%+v, %v), want user 42 at %v", got, err, created)
+	}
+	// 房間列表的 token 不能當角色 token，角色 token 也不能當房間 token
+	roomTok, _ := encodePageToken(model.RoomCursor{CreatedAt: created, PublicID: "abcdefghijk"})
+	if _, err := decodeRoleToken(roomTok); err != errInvalidPageToken {
+		t.Errorf("room token accepted as role token: %v", err)
+	}
+	if _, err := decodePageToken(tok); err != errInvalidPageToken {
+		t.Errorf("role token accepted as room token: %v", err)
+	}
+	const ts = `"2030-01-02T03:04:05Z"`
+	for name, raw := range map[string]string{
+		"user_id zero":     `{"v":1,"created_at":` + ts + `,"user_id":0}`,
+		"user_id missing":  `{"v":1,"created_at":` + ts + `}`,
+		"user_id negative": `{"v":1,"created_at":` + ts + `,"user_id":-1}`,
+		"both tiebreaks":   `{"v":1,"created_at":` + ts + `,"user_id":1,"public_id":"abcdefghijk"}`,
+		"version 2":        `{"v":2,"created_at":` + ts + `,"user_id":1}`,
+		"trailing":         `{"v":1,"created_at":` + ts + `,"user_id":1}{}`,
+	} {
+		if _, err := decodeRoleToken(rawToken(raw)); err != errInvalidPageToken {
+			t.Errorf("%s: err = %v, want errInvalidPageToken", name, err)
+		}
+	}
+}

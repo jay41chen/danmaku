@@ -307,3 +307,71 @@ func TestPresenceWakeNonBlocking(t *testing.T) {
 		t.Error("signals should coalesce into one")
 	}
 }
+
+// BroadcastExceptUser：同房間裡，登入身分等於 exceptUserID 的連線（包含同一人的多個分頁）收不到；
+// 其他會員、匿名連線、都收得到；別間房的人收不到
+func TestBroadcastExceptUser(t *testing.T) {
+	h := NewHub(10)
+	ctx := context.Background()
+	mk := func(room string, userID int64) *Client {
+		c := newTestClient()
+		if !h.Register(ctx, c) {
+			t.Fatal("Register failed")
+		}
+		if userID != 0 {
+			h.Authenticate(ctx, c, userID, "u", time.Now().Add(time.Hour), nil, nil)
+		}
+		h.Join(ctx, c, room, nil)
+		return c
+	}
+	tab1, tab2 := mk("r1", 7), mk("r1", 7)
+	other, anon := mk("r1", 8), mk("r1", 0)
+	elsewhere := mk("r2", 8)
+	frame := []byte("hidden")
+
+	h.BroadcastExceptUser(ctx, "r1", 7, frame)
+
+	received := func(c *Client) bool {
+		select {
+		case got := <-c.send:
+			return string(got) == "hidden"
+		default:
+			return false
+		}
+	}
+	if received(tab1) || received(tab2) {
+		t.Error("the banned user's connection received the frame")
+	}
+	if !received(other) {
+		t.Error("another member did not receive the frame")
+	}
+	if !received(anon) {
+		t.Error("anonymous connection did not receive the frame (documented limitation: server cannot tell who it is)")
+	}
+	if received(elsewhere) {
+		t.Error("a client in another room received the frame")
+	}
+}
+
+// 排除的 user 登出 / 降回匿名後，身分以當下為準
+func TestBroadcastExceptUserUsesCurrentIdentity(t *testing.T) {
+	h := NewHub(10)
+	ctx := context.Background()
+	c := newTestClient()
+	h.Register(ctx, c)
+	h.Join(ctx, c, "r1", nil)
+
+	h.BroadcastExceptUser(ctx, "r1", 7, []byte("x"))
+	select {
+	case <-c.send:
+	default:
+		t.Fatal("anonymous client should receive")
+	}
+	h.Authenticate(ctx, c, 7, "u", time.Now().Add(time.Hour), nil, nil)
+	h.BroadcastExceptUser(ctx, "r1", 7, []byte("x"))
+	select {
+	case <-c.send:
+		t.Fatal("authenticated client of the excluded user should not receive")
+	default:
+	}
+}

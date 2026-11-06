@@ -14,7 +14,7 @@ const (
 	headerRequestMethod = "Access-Control-Request-Method"
 
 	headerAllowMethods  = "Access-Control-Allow-Methods"
-	corsAllowMethods    = "GET, POST, OPTIONS"
+	corsAllowMethods    = "GET, POST, PUT, DELETE, OPTIONS"
 	headerAllowHeaders  = "Access-Control-Allow-Headers"
 	corsAllowHeaders    = "Content-Type, Authorization"
 	headerExposeHeaders = "Access-Control-Expose-Headers"

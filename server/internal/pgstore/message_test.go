@@ -58,7 +58,7 @@ func TestCreateMessage(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "Jay")
 
-		msg, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, userID, "哈哈")
+		msg, _, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, userID, "哈哈")
 
 		if err != nil {
 			t.Fatalf("CreateMessage error = %v, want nil", err)
@@ -85,7 +85,7 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("nonexistent user returns model.ErrMessageUserNotFound and inserts nothing", func(t *testing.T) {
 		s := newTestDBStore(t)
 
-		_, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, 999999, "hi")
+		_, _, err := s.CreateMessage(t.Context(), model.LegacyRoomPublicID, 999999, "hi")
 
 		if !errors.Is(err, model.ErrMessageUserNotFound) {
 			t.Fatalf("CreateMessage error = %v, want model.ErrMessageUserNotFound", err)
@@ -114,7 +114,7 @@ func TestCreateMessageRooms(t *testing.T) {
 			t.Fatalf("setup CreateRoom: %v", err)
 		}
 
-		msg, err := s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
+		msg, _, err := s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
 
 		if err != nil {
 			t.Fatalf("CreateMessage error = %v, want nil", err)
@@ -132,7 +132,7 @@ func TestCreateMessageRooms(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
 
-		_, err := s.CreateMessage(t.Context(), "nope0000000", userID, "hi")
+		_, _, err := s.CreateMessage(t.Context(), "nope0000000", userID, "hi")
 
 		if !errors.Is(err, model.ErrRoomNotFound) {
 			t.Fatalf("CreateMessage error = %v, want model.ErrRoomNotFound", err)
@@ -146,7 +146,7 @@ func TestCreateMessageRooms(t *testing.T) {
 	t.Run("nonexistent room and user returns model.ErrRoomNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
-		_, err := s.CreateMessage(t.Context(), "nope0000000", 999999, "hi")
+		_, _, err := s.CreateMessage(t.Context(), "nope0000000", 999999, "hi")
 
 		if !errors.Is(err, model.ErrRoomNotFound) {
 			t.Fatalf("CreateMessage error = %v, want model.ErrRoomNotFound", err)
@@ -164,7 +164,7 @@ func TestCreateMessageRooms(t *testing.T) {
 			t.Fatalf("soft delete room: %v", err)
 		}
 
-		_, err = s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
+		_, _, err = s.CreateMessage(t.Context(), room.PublicID, userID, "hi")
 
 		if !errors.Is(err, model.ErrRoomNotFound) {
 			t.Fatalf("CreateMessage error = %v, want model.ErrRoomNotFound", err)
@@ -182,7 +182,7 @@ func TestCreateMessageRooms(t *testing.T) {
 			t.Fatalf("setup CreateRoom: %v", err)
 		}
 
-		_, err = s.CreateMessage(t.Context(), room.PublicID, 999999, "hi")
+		_, _, err = s.CreateMessage(t.Context(), room.PublicID, 999999, "hi")
 
 		if !errors.Is(err, model.ErrMessageUserNotFound) {
 			t.Fatalf("CreateMessage error = %v, want model.ErrMessageUserNotFound", err)
@@ -206,7 +206,7 @@ func TestQueryMessageRooms(t *testing.T) {
 			room    string
 			content string
 		}{{roomA.PublicID, "a1"}, {roomB.PublicID, "b1"}, {roomA.PublicID, "a2"}} {
-			if _, err := s.CreateMessage(t.Context(), c.room, userID, c.content); err != nil {
+			if _, _, err := s.CreateMessage(t.Context(), c.room, userID, c.content); err != nil {
 				t.Fatalf("setup CreateMessage %q: %v", c.content, err)
 			}
 		}

@@ -120,7 +120,7 @@ func TestCORSPreflight(t *testing.T) {
 			// header 名稱寫字面值而不是用 cors.go 的 const：
 			// const 打錯（如 "Allow-methods"）時，test 才抓得到
 			wantPreflight := map[string]string{
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+				"Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
 				"Access-Control-Allow-Headers": "Content-Type, Authorization",
 				"Access-Control-Max-Age":       "600",
 			}

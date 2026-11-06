@@ -524,3 +524,43 @@ func TestCreateMessageRateLimit(t *testing.T) {
 		})
 	}
 }
+
+// shadow ban：被 ban 的作者照常拿 201 和同樣的 body、一樣吃限流，只是不廣播
+func TestCreateMessageBannedAuthorGets201WithoutPublish(t *testing.T) {
+	const userID = int64(7)
+	uid, name := userID, "Jay"
+	msg := model.Message{ID: 42, UserID: &uid, Username: &name, Content: "哈哈", CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
+
+	run := func(banned bool, limiter *fakeRateLimiter) (*httptest.ResponseRecorder, *fakeRedis, *fakeDBStore) {
+		db := &fakeDBStore{createdMsg: msg, createBanned: banned}
+		redis := &fakeRedis{}
+		h := NewMessageHandler(db, redis, limiter)
+		return serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("哈哈")), redis, db
+	}
+
+	okRec, okRedis, _ := run(false, &fakeRateLimiter{})
+	banRec, banRedis, banDB := run(true, &fakeRateLimiter{})
+
+	if banRec.Code != http.StatusCreated {
+		t.Fatalf("banned author status = %d, want 201 (body %q)", banRec.Code, banRec.Body.String())
+	}
+	if banRec.Body.String() != okRec.Body.String() {
+		t.Errorf("banned body = %q, differs from normal %q", banRec.Body.String(), okRec.Body.String())
+	}
+	if len(okRedis.published) != 1 {
+		t.Errorf("non-banned author published %d, want 1", len(okRedis.published))
+	}
+	if len(banRedis.published) != 0 {
+		t.Errorf("banned author published %q, want nothing", banRedis.published)
+	}
+	if !banDB.createMsgCalled {
+		t.Error("banned author's message was not stored")
+	}
+
+	// 限流對被 ban 的人一樣有效
+	limiter := &fakeRateLimiter{blockKey: messageBurstRule.key(strconv.FormatInt(userID, 10)), retryAfter: time.Second}
+	rec, _, _ := run(true, limiter)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("rate-limited banned author status = %d, want 429", rec.Code)
+	}
+}

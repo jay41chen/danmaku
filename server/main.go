@@ -44,6 +44,7 @@ func main() {
 	registerRoutes(mux, tokens, appHandlers{
 		messages: handler.NewMessageHandler(db, redis, redis),
 		rooms:    handler.NewRoomHandler(db),
+		roles:    handler.NewRoleHandler(db, redis),
 		health:   handler.NewHealthHandler(db, redis),
 		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),
 		ws:       wsHandler,
@@ -115,6 +116,7 @@ func initTokenIssuer(secret string) *auth.TokenIssuer {
 type appHandlers struct {
 	messages *handler.MessageHandler
 	rooms    *handler.RoomHandler
+	roles    *handler.RoleHandler
 	health   *handler.HealthHandler
 	auth     *handler.AuthHandler
 	ws       *handler.WebsocketHandler
@@ -131,6 +133,10 @@ type routes struct {
 func (this *routes) get(path string, h http.Handler) { this.handle(http.MethodGet, path, this.auth(h)) }
 func (this *routes) post(path string, h http.Handler) {
 	this.handle(http.MethodPost, path, this.auth(h))
+}
+func (this *routes) put(path string, h http.Handler) { this.handle(http.MethodPut, path, this.auth(h)) }
+func (this *routes) delete(path string, h http.Handler) {
+	this.handle(http.MethodDelete, path, this.auth(h))
 }
 func (this *routes) publicGet(path string, h http.Handler) {
 	this.handle(http.MethodGet, path, h)
@@ -170,6 +176,12 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	r.publicGet("/rooms/{public_id}", http.HandlerFunc(h.rooms.HandleGetRoom))
 	// 公開：列出所有人的房間（分頁）
 	r.publicGet("/rooms", http.HandlerFunc(h.rooms.HandleListRooms))
+
+	// 房間角色（房管 / 房間級 shadow ban）：都要登入，權限由 store 的 transaction 判斷
+	r.put("/rooms/{public_id}/roles/{user_id}", http.HandlerFunc(h.roles.HandleSetRole))
+	r.delete("/rooms/{public_id}/roles/{user_id}", http.HandlerFunc(h.roles.HandleDeleteRole))
+	r.get("/rooms/{public_id}/roles", http.HandlerFunc(h.roles.HandleListRoles))
+	r.get("/rooms/{public_id}/me", http.HandlerFunc(h.roles.HandleMyRole))
 
 	r.publicGet("/healthcheck", http.HandlerFunc(h.health.HandleHealthCheck))
 	// 公開 route：任何人都能連（匿名）；連上後可以在連線內送 auth frame 升級成登入身分（選擇性）

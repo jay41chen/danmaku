@@ -811,3 +811,62 @@ func waitForLeftRooms(t *testing.T, redis *fakeRedis, timeout time.Duration) []s
 	}
 	return redis.leftRooms()
 }
+
+// ---- user_hidden ----
+
+// 從 Redis 收到 user_hidden：同房間的其他人（含匿名）收到原樣的 frame，被 ban 的人所有分頁都收不到
+func TestWebsocketUserHiddenSkipsTheBannedUser(t *testing.T) {
+	redis := &fakeRedis{}
+	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}, rooms: map[string]bool{"aaaAAA11111": true}}
+	h, url := newRoomTestServer(t, redis, db)
+	h.StartBroadcast()
+	login := func(token string, wantID int64, wantName string) *websocket.Conn {
+		c := dialWS(t, url)
+		sendAuth(t, c, token)
+		expectAuthOK(t, c, wantID, wantName)
+		joinRoom(t, c, "aaaAAA11111")
+		return c
+	}
+	jayTab1, jayTab2 := login("user7", 7, "jay"), login("user7", 7, "jay")
+	amy := login("user8", 8, "amy")
+	anon := dialWS(t, url)
+	joinRoom(t, anon, "aaaAAA11111")
+
+	const frame = `{"type":"user_hidden","payload":{"user_id":7}}`
+	redis.deliver("aaaAAA11111", frame)
+	for name, c := range map[string]*websocket.Conn{"amy": amy, "anonymous": anon} {
+		if got := readRawFrame(t, c, 2*time.Second); got != frame {
+			t.Errorf("%s received %s, want %s", name, got, frame)
+		}
+	}
+	// 之後的訊息照樣送到被 ban 者的連線，而且是他們收到的第一個 frame：證明前面那一個是被過濾掉、不是延遲
+	redis.deliver("aaaAAA11111", `{"type":"message","payload":"hi"}`)
+	for name, c := range map[string]*websocket.Conn{"jay tab 1": jayTab1, "jay tab 2": jayTab2} {
+		if got := readRawFrame(t, c, 2*time.Second); got != `{"type":"message","payload":"hi"}` {
+			t.Errorf("%s first frame = %s, want the message (user_hidden must not reach the banned user)", name, got)
+		}
+	}
+}
+
+// 前綴是 user_hidden 但 payload 壞掉：丟掉，不能當一般訊息廣播給所有人（包括本人）
+func TestWebsocketMalformedUserHiddenDropped(t *testing.T) {
+	redis := &fakeRedis{}
+	h, url := newRoomTestServer(t, redis, &wsFakeDB{rooms: map[string]bool{"aaaAAA11111": true}})
+	h.StartBroadcast()
+	conn := dialWS(t, url)
+	joinRoom(t, conn, "aaaAAA11111")
+
+	for _, bad := range []string{
+		`{"type":"user_hidden","payload":{"user_id":"x"}}`,
+		`{"type":"user_hidden","payload":{"user_id":0}}`,
+		`{"type":"user_hidden","payload":{}}`,
+		`{"type":"user_hidden"`,
+	} {
+		redis.deliver("aaaAAA11111", bad)
+	}
+	redis.deliver("aaaAAA11111", `{"type":"message","payload":"ok"}`)
+
+	if got := readRawFrame(t, conn, 2*time.Second); got != `{"type":"message","payload":"ok"}` {
+		t.Errorf("first frame = %s, want only the valid message", got)
+	}
+}

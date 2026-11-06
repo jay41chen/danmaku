@@ -140,15 +140,9 @@ func (this *RoomHandler) HandleListMyRooms(w http.ResponseWriter, r *http.Reques
 func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userID *int64) {
 	query := r.URL.Query()
 
-	// 沒帶才用預設值；帶了就一定要合法（?limit= 空字串也算帶了 → 400）
-	limit := defaultRoomListLimit
-	if query.Has("limit") {
-		n, err := strconv.Atoi(query.Get("limit"))
-		if err != nil || n < 1 || n > model.MaxRoomListLimit {
-			httpx.WriteError(w, http.StatusBadRequest, "invalid_limit", "invalid limit")
-			return
-		}
-		limit = n
+	limit, ok := parseListLimit(w, r)
+	if !ok {
+		return
 	}
 
 	// 沒帶或空字串 = 第一頁
@@ -186,4 +180,20 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 	}
 
 	httpx.WriteJSON(w, r, this.logger, http.StatusOK, resp)
+}
+
+// 列表 endpoint 共用：解析 query 的 limit（房間列表、角色名單都用）
+// 沒帶才用預設值；帶了就一定要合法（?limit= 空字串也算帶了 → 400 invalid_limit）
+// 回傳 false = 已經回了 400，呼叫端直接 return
+func parseListLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	limit := defaultRoomListLimit
+	if r.URL.Query().Has("limit") {
+		n, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil || n < 1 || n > model.MaxRoomListLimit {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_limit", "invalid limit")
+			return 0, false
+		}
+		limit = n
+	}
+	return limit, true
 }

@@ -282,6 +282,21 @@ func (h *Hub) Broadcast(ctx context.Context, room string, frame []byte) {
 	}
 }
 
+// 把 frame 送給 room 裡「身分不是 exceptUserID」的連線；匿名連線（userID 0）一定收得到
+// 用途：user_hidden 不能發給被 ban 的本人（包含他開的每個分頁）。身分以 server 這邊 Hub 記的為準（auth frame 驗過的 token）
+// 限制：本人若用匿名連線（沒送 auth frame）或另一個帳號看，server 認不出來，會收到
+// 鎖規則同 Broadcast：只排 outbox、不做 I/O；frame 是共用的 slice，只讀不改
+func (h *Hub) BroadcastExceptUser(ctx context.Context, room string, exceptUserID int64, frame []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.rooms[room] {
+		if st, ok := h.clients[c]; ok && exceptUserID != 0 && st.userID == exceptUserID {
+			continue
+		}
+		h.enqueueLocked(ctx, c, room, frame)
+	}
+}
+
 // 排 frame（呼叫時要持有 h.mu）；frame == nil = 呼叫端編碼失敗，什麼都不送
 func (h *Hub) sendLocked(ctx context.Context, c *Client, st *clientState, frame []byte) {
 	if frame == nil {

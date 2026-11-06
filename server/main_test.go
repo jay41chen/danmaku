@@ -42,6 +42,7 @@ func newTestMux() *http.ServeMux {
 	registerRoutes(mux, rejectAllParser{}, appHandlers{
 		messages: handler.NewMessageHandler(nil, nil, nil),
 		rooms:    handler.NewRoomHandler(nil),
+		roles:    handler.NewRoleHandler(nil, nil),
 		health:   handler.NewHealthHandler(healthyDB{}, healthyRedis{}),
 		auth:     handler.NewAuthHandler(nil, nil, "", nil),
 		ws:       handler.NewWebsocketHandler(nil, nil, nil),
@@ -186,6 +187,22 @@ func TestRoutes(t *testing.T) {
 
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("GET /rooms?limit=abc status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+	// 房間角色的四條 route 都要登入（守 r.put / r.delete / r.get 的接法）
+	t.Run("room role routes without token return 401", func(t *testing.T) {
+		cases := []struct{ method, path string }{
+			{http.MethodPut, "/rooms/abcDEF12345/roles/5"},
+			{http.MethodDelete, "/rooms/abcDEF12345/roles/5"},
+			{http.MethodGet, "/rooms/abcDEF12345/roles"},
+			{http.MethodGet, "/rooms/abcDEF12345/me"},
+		}
+		for _, tc := range cases {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, http.StatusUnauthorized)
+			}
 		}
 	})
 	t.Run("GET /me without token returns 401", func(t *testing.T) {

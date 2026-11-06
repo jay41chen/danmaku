@@ -26,6 +26,7 @@ type fakeDBStore struct {
 	// CreateMessage 用
 	createdMsg       model.Message
 	createMsgErr     error
+	createBanned     bool  // CreateMessage 回傳的「作者被 ban」
 	gotMsgUserID     int64 // spy：CreateMessage 收到的 user id
 	gotMsgContent    string
 	gotMsgRoomPublic string // spy：CreateMessage 收到的 room public id
@@ -90,13 +91,13 @@ func (f *fakeDBStore) QueryMessage(ctx context.Context, roomID int64, limit int)
 	return f.msgs, f.err
 }
 
-func (f *fakeDBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
+func (f *fakeDBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, bool, error) {
 	f.createMsgCalled = true
 	f.gotMsgRoomPublic, f.gotMsgUserID, f.gotMsgContent = roomPublicID, userID, content
 	if f.onCreateMessage != nil {
 		f.onCreateMessage()
 	}
-	return f.createdMsg, f.createMsgErr
+	return f.createdMsg, f.createBanned, f.createMsgErr
 }
 
 func (f *fakeDBStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {

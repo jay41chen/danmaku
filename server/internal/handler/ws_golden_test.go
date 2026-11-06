@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,4 +140,27 @@ func TestWebsocketErrorFramesOnTheWire(t *testing.T) {
 			t.Errorf("frame = %s, want %s", got, want)
 		}
 	})
+}
+
+// user_hidden frame 的合約：client 用字面字串 "user_hidden" 和 payload.user_id；frame 和 Redis 上的前綴都寫成字面值
+func TestUserHiddenFrameGolden(t *testing.T) {
+	const want = `{"type":"user_hidden","payload":{"user_id":123}}`
+	if wsTypeUserHidden != "user_hidden" {
+		t.Errorf("wsTypeUserHidden = %q, want user_hidden", wsTypeUserHidden)
+	}
+	// production 的路徑：userHiddenEnvelope → publishEnvelope（json.Marshal）→ Redis
+	got, err := json.Marshal(userHiddenEnvelope(123))
+	if err != nil || string(got) != want {
+		t.Errorf("frame = %s (err %v), want %s", got, err, want)
+	}
+	if !strings.HasPrefix(want, userHiddenPrefix) || userHiddenPrefix != `{"type":"user_hidden"` {
+		t.Errorf("userHiddenPrefix = %q does not match frame", userHiddenPrefix)
+	}
+	// 一般訊息的 frame 開頭不能被當成 user_hidden
+	if strings.HasPrefix(`{"type":"message","payload":{"id":1}}`, userHiddenPrefix) {
+		t.Error("message frame matches user_hidden prefix")
+	}
+	if id, isHidden, valid := parseUserHidden(want); id != 123 || !isHidden || !valid {
+		t.Errorf("parseUserHidden = (%d, %v, %v), want (123, true, true)", id, isHidden, valid)
+	}
 }

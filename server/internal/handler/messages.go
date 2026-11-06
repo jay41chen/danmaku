@@ -38,7 +38,7 @@ type messagePublisher interface {
 
 // 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
 type messageStore interface {
-	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error)
+	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (msg model.Message, banned bool, err error)
 	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)
 	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
 }
@@ -140,7 +140,7 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	msg, err := this.db.CreateMessage(r.Context(), roomPublicID, userID, req.Content)
+	msg, banned, err := this.db.CreateMessage(r.Context(), roomPublicID, userID, req.Content)
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 房間不存在或已刪除（兩者都不讓外人分辨）
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
@@ -160,7 +160,10 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 
 	// DB 已經存好了：廣播失敗只記 log、仍回 201（回 5xx 的話 client 重送會變成重複的訊息）
 	// 沒收到即時廣播的人下次載入歷史訊息時還是看得到
-	this.broadcast(r.Context(), roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
+	// 被 ban（shadow ban）的作者：訊息已存，照常回 201，但不廣播，別人看不到；對他自己看不出任何差別
+	if !banned {
+		this.broadcast(r.Context(), roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
+	}
 
 	// body 是 msg 本身，不是 envelope：envelope 是 WS 的格式
 	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, msg)
@@ -172,16 +175,22 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 // WithoutCancel 會連 deadline 一起拿掉 → 自己加 publishTimeout，Redis 卡住時不會無限等
 // （client 在等 201，最多多等 500ms）；WithoutCancel 保留 ctx 的 value（request_id 等），log 仍串得起來
 func (this *MessageHandler) broadcast(ctx context.Context, roomPublicID string, env wsEnvelope) {
+	publishEnvelope(ctx, this.logger, this.redis, roomPublicID, env)
+}
+
+// 把 envelope 編碼後發到房間的 Redis channel；失敗只記 log 並計數、不回傳 error（呼叫端的 DB 已經 commit，沒有補救的辦法）
+// 抽成共用函式：訊息廣播和 user_hidden 廣播走同一條路，timeout / 失敗計數的規則只有一份
+func publishEnvelope(ctx context.Context, logger *slog.Logger, pub messagePublisher, roomPublicID string, env wsEnvelope) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout)
 	defer cancel()
 	data, err := json.Marshal(env)
 	if err != nil {
-		this.logger.ErrorContext(ctx, "marshal ws envelope failed", "error", err)
+		logger.ErrorContext(ctx, "marshal ws envelope failed", "error", err)
 		return
 	}
-	if err := this.redis.Publish(ctx, roomPublicID, string(data)); err != nil {
+	if err := pub.Publish(ctx, roomPublicID, string(data)); err != nil {
 		prom.PublishFailedTotal.Inc()
-		this.logger.ErrorContext(ctx, "publish to redis failed", "error", err)
+		logger.ErrorContext(ctx, "publish to redis failed", "error", err)
 	}
 }
 

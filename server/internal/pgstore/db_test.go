@@ -32,7 +32,7 @@ func newTestDBStore(t *testing.T) *DBStore {
 	// 所以不能 TRUNCATE rooms / users（rooms 有 FK 指向 users、messages 指向 rooms），改成依 FK 順序刪：
 	//   messages、refresh_tokens 先清空 → 刪 legacy 以外的房間 → 刪 admin 以外的 user
 	if _, err := s.dbPool.Exec(ctx, `
-		TRUNCATE messages, refresh_tokens;
+		TRUNCATE messages, refresh_tokens, room_roles;
 		DELETE FROM rooms WHERE public_id <> 'legacy00000';
 		DELETE FROM users WHERE username <> 'admin';
 	`); err != nil {
