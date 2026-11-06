@@ -11,8 +11,9 @@
 | M3 Git hook ✅ | pre-commit：`gofmt` / `go vet` / 前端 lint；pre-push：全部測試（只用 `danmaku_test`）+ 前端 build（2026-11-04 完成） | < 0.1 | 11/4 ～ 11/5 |
 | M4 不漏訊息 ✅ | 重連補最新 100 則 + `s-maxage=1` 快取 header + 重連退避修正 + PubSub half-open watchdog + 重建後 `resync` + SLI metrics；不做 `after`、Redis List、client timer（2026-11-05 完成，[ADR 0011](docs/design/0011-message-delivery-recovery.md)） | 1 ～ 1.5 | 11/11 ～ 11/16 |
 | M5 房間有秩序 ✅ | HTTP 錯誤格式統一 → RBAC → 房間級 shadow ban（2026-11-06 完成，[ADR 0012](docs/design/0012-room-moderation.md)） | 1 ～ 1.5 | 11/18 ～ 11/26 |
-| M6 壓測基準 | 自己寫腳本在本機模擬大量流量（不打 prod、只用測試環境），記下同步寫入的基準數字，決定 M7 要不要做；同一台 Mac 的數字只用來比較前後，不當容量上限 | 0.5 ～ 0.75 | 11/22 ～ 12/2 |
-| M7 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗）；**看 M6 結果決定要不要做** | 1 ～ 1.25 | 11/29 ～ 12/10 |
+| M6 壓測基準 | 自己寫腳本在本機模擬大量流量（不打 prod、只用測試環境），記下同步寫入的基準數字，決定 M7 要不要做；同一台 Mac 的數字只用來比較前後，不當容量上限。工具 `server/cmd/loadtest` 完成（2026-11-06），**基準還沒跑，要在 Mac 閒置時跑**。判斷：純寫入 100 則／秒 `POST` p99 ≤ 200 ms → 不做 M7；否則看混合情境最後一級有效數據的時間拆分，寫入確實先倒才做 | 0.5 ～ 0.75 | 11/22 ～ 12/2 |
+| M6.5 結構整理 | `main.go` 移到 `cmd/server/`；所有業務操作進 use case 層（一個領域一個 struct，不碰 HTTP；`/healthcheck`、`/metrics`、middleware 不用進），handler 測試先不改、當作行為沒變的證據；順序：角色 → 房間 → 彈幕 → WS `join` → auth（有 timing 防護，最後做），一個領域一個 commit；角色那條由自己寫當範本，其他交給 subagent | 0.5 ～ 1 | 日期待重算 |
+| M7 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗）；**看 M6 結果決定要不要做** | 1 ～ 1.25 | 日期待重算 |
 | M8 依人數排序 | 房間列表依人數排序（從 M2 移出，見下方 W4b） | 0.5 ～ 0.75 | 12/2 ～ 12/16 |
 | M9 最小 CI | 精簡 GitHub Actions（只跑測試，不擋部署、不走 PR）+ multi-stage Dockerfile | 0.1 ～ 0.25 | 12/3 ～ 12/17 |
 | M10 驗收 | 本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞）+ 重跑 M6 的壓測，檢查不漏訊息、人數恢復、重連成功 | 0.5 ～ 0.75 | 12/7 ～ 12/23 |
@@ -263,6 +264,8 @@
 ## Backlog
 
 > 知道、刻意先不做（2026-11-03 從 W5 移入）
+
+- [ ] 用 k6 寫壓測情境（2026-11-06，M6 決定先用 Go 自己寫）：業界常見，之後想學工具或壓 HTTP API 時再試
 
 - [ ] 房主 / 房管透過 WS 直送彈幕（2026-11-06 從 RBAC 移出，不一定會做）：好處只有少一次 HTTP，要多一條寫入路徑、自己做 ack 和去重、降級時處理已連上的連線。等 M6 顯示 `POST` 真的太慢再談
 

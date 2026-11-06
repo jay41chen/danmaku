@@ -151,6 +151,13 @@ git config core.hooksPath .githooks
 docker exec danmaku-db createdb -U danmaku danmaku_test
 ```
 
+### Load test tool
+
+`server/cmd/loadtest` checks locally whether writes are the first bottleneck. There's no baseline yet, and numbers
+from one Mac are for comparisons, not capacity. It only accepts localhost, the `danmaku_test` database and Redis db 15,
+sends at a fixed rate with latency timed from the scheduled send, and marks a step invalid when the machine is busy.
+Usage is in the [Chinese README](README.zh-TW.md).
+
 ## API overview
 
 | Method | Path | Auth | |

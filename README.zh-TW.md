@@ -161,6 +161,24 @@ git config core.hooksPath .githooks
 docker exec danmaku-db createdb -U danmaku danmaku_test
 ```
 
+### 壓測工具
+
+`server/cmd/loadtest` 用來在本機判斷「寫入是不是第一個瓶頸」。目前還沒有基準數字。同一台 Mac 的數字只能比較前後，不代表容量上限。
+
+- **只打本機：** 只接受 `localhost` / `127.0.0.1`、`danmaku_test` 和 Redis db 15，其他一律拒絕，結束時只清掉自己這次建立的資料。
+- **情境：** `write`（純寫入）、`mixed`（單間熱門房，流量逐步加大）、`fanout`（大量觀眾、少量彈幕）、`rooms`（500 間小房）。
+- **延遲：** 以固定速率發送，從排程時間開始算，所以 server 變慢不會讓延遲被低估；timeout 也計入 p99。
+- **有效性：** 機器不夠閒、工具自己來不及、錯誤達 1% 時，那一級會標成無效。要在 Mac 閒置時跑。
+
+先起 2 台 server，都連 `danmaku_test`，並設 `LOADTEST_TIMING_LOG=true`、`WS_MAX_CLIENTS=6000` 和同一把 `JWT_SECRET`。工具用同樣的 `JWT_SECRET`、`TEST_DATABASE_URL`、`TEST_REDIS_URL`：
+
+```bash
+cd server && go build -o /tmp/loadtest ./cmd/loadtest
+/tmp/loadtest -scenario write -write-rate 100 \
+  -servers http://127.0.0.1:6388,http://127.0.0.1:6389 \
+  -server-pids "$PID1,$PID2" -server-logs s1.log,s2.log -out write.json
+```
+
 ## API
 
 | Method | Path | 要登入 | 說明 |
@@ -345,5 +363,7 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 | `CLIENT_IP_HEADER` | 限流用的 client IP 從哪個 header 讀（如 `X-Real-IP`）；只能設成前面那層 proxy 會**覆蓋**的 header，否則 client 可以偽造。沒設時用連線的 RemoteAddr，在 proxy 後面會變成所有人共用同一個計數 | 空（用 RemoteAddr） |
 | `JWT_SECRET` | 簽 access token（JWT，HS256）用的 secret，**至少 32 bytes**，所有 server instance 要用同一把；沒設或太短時拒絕啟動。產生方式：`openssl rand -base64 48` | **必填**，無預設值 |
 | `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；全小寫、不寫預設 port；不可與 `*` 混用 | `*` |
+| `WS_MAX_CLIENTS` | 每台 server 的 WS 連線上限，1 到 1,000,000 的整數；壓測時才需要調高 | `100` |
+| `LOADTEST_TIMING_LOG` | 設成 true 時，每 5 秒輸出一行 `loadtest_timing`（DB 連線池、`CreateMessage`、限流、`PUBLISH` 的耗時）。**只給壓測用**；關閉時沒有額外的 wrapper 和 goroutine | `false` |
 | `VITE_API_URL` | 前端 API 位址 | `http://localhost:8080` |
 | `VITE_WS_URL` | 前端 WebSocket 位址 | `ws://localhost:8080/ws` |
