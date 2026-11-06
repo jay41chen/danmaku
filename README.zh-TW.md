@@ -34,6 +34,7 @@
 | 一個 13 個方法的 store interface：每個 handler 都依賴用不到的方法，test 的 fake 少實作方法也能編譯，handler 還為了錯誤值 import Postgres 的 package | 每個 handler 自己宣告只含它會呼叫的方法的小 interface（Go 的 interface 是隱式符合）；domain error 放在不依賴任何東西的 `model`；Postgres 和 Redis 分成兩個 package，只有 `main.go` 知道底下用什麼 | [0009](docs/design/0009-consumer-side-interfaces.md) |
 | 跨 server 的人數要把同一個人的多個分頁算成一人，還要撐得過 server 沒清理就掛掉 | 每個房間一個 Redis Sorted Set，每條連線一筆；沒續期就過期，時間一律用 Redis 的；每台 server 只有一個 worker 比對 Hub 和上次寫入的內容，舊快照不會蓋掉新的；寫入失敗時寧可短暫少算，也不要留 30 秒的幽靈 | [0010](docs/design/0010-room-presence.md) |
 | PubSub 連線可能 half-open，整台 server 的所有房間靜靜收不到訊息，但 ping 和 HTTP 都正常 | 每台 server 定期發心跳給自己，再從那條連線收回；連續 2 次沒收到就重建連線，並通知 client 重新撈訊息。用「不斷線但不轉發」的 proxy 實測：35～44 秒恢復 | [0011](docs/design/0011-message-delivery-recovery.md) |
+| 房主擋不了搗亂的人，而舊計畫的全站記憶體封鎖又和每間房各自的角色對不上 | 房間級 shadow ban，讀取時才過濾，誤 ban 可以完全復原；`room_roles` 一人一列；階級規則集中在一個預設拒絕的純函式；檢查順序讓一般觀眾無法探測 user；所有 API 都不會告訴他被 ban。用兩台 server + 真 Redis 和瀏覽器實測 | [0012](docs/design/0012-room-moderation.md) |
 
 ## 架構
 
@@ -78,7 +79,7 @@ main.go ──→ pgstore ─────→ model
 
 ## 進度
 
-2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數、漏訊息的自動恢復、限流、可觀測性，以及上面那些強化。接下來：角色和 ban、壓測基準，然後依數字決定要不要做非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
+2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性，以及上面那些強化。接下來：壓測基準，然後依數字決定要不要做非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
 
 ## Tech Stack
 
@@ -171,6 +172,10 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
 | `GET` | `/rooms` | | 房間列表（未刪除，新的在前），cursor 分頁：`?limit=`（預設 20、最多 50）、`?page_token=`（上一頁回的 `next_page_token`，原樣帶回）。回 `{"rooms": [{"room_name", "public_id"}], "next_page_token"}`，沒有下一頁時不帶 `next_page_token`；`limit` 不合法回 `400`（`invalid_limit`），token 不合法回 `400`（`invalid_cursor`） |
 | `GET` | `/me/rooms` | ✓ | 自己的房間列表，參數和回應同 `GET /rooms`。`Cache-Control: no-store` |
+| `GET` | `/rooms/{public_id}/me` | ✓ | 自己在這間房的角色 `{"role": "owner" \| "moderator" \| "viewer"}`；被 ban 的人也回 `viewer`。`Cache-Control: no-store` |
+| `GET` | `/rooms/{public_id}/roles` | ✓ | 房管和被 ban 的人（只有房主和房管能看，否則 `403 room_forbidden`），分頁參數同 `GET /rooms`。回 `{"roles": [{"user_id", "username", "role", "assigned_by", "assigned_by_username", "created_at"}], "next_page_token"}`。`Cache-Control: no-store` |
+| `PUT` | `/rooms/{public_id}/roles/{user_id}` | ✓ | 指派房管或 ban：`{"role": "moderator" \| "banned"}`，回 `204`，可重送。規則見下方 |
+| `DELETE` | `/rooms/{public_id}/roles/{user_id}` | ✓ | 撤銷房管或解除 ban，回 `204`，可重送 |
 | `GET` | `/ws` | | WebSocket，接收即時廣播。連上後要送 `join` 進房才收得到該房間的彈幕；連上是匿名，可在連線內送 auth frame 登入（見下方） |
 | `POST` | `/register`、`/login` | | 註冊 / 登入，`/login` 回 access token + refresh token |
 | `GET` | `/me` | ✓ | 目前登入的 user `{"id", "username"}`；F5 後 client 用它取得身分。`Cache-Control: no-store` |
@@ -180,8 +185,11 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 - 要登入的 endpoint 帶 `Authorization: Bearer <access token>`。沒帶、token 無效或過期一律回同一個 `401`（`WWW-Authenticate: Bearer`），client 用 refresh token 換新的再重送
 - HTTP 錯誤一律回 `{"error": {"code": "...", "message": "..."}}`，`Cache-Control: no-store`。`code` 給程式判斷、client 用來對應翻譯，`message` 是後備文字。例外：打錯路徑或用錯 method 時，mux 內建的 `404` / `405` 是純文字
 - `/login` 失敗（格式不合法、帳號不存在、密碼錯）一律回同一個 `400`（`invalid_credentials`），不是 `401`：讓 `401` 只代表 access token 失效，client 的自動 refresh 不用排除 `/login`
+- 角色：房主 > 房管 > 一般觀眾，只能上對下；只有房主能指派或撤銷房管；房管能解除房主 ban 的以外的 ban。沒有權限回 `403 room_forbidden`，動不了這個對象回 `403 room_target_forbidden`，指派被 ban 的人回 `409 room_role_conflict`，對象不存在回 `404 user_not_found`，`role` 不合法回 `400 invalid_role`
+- Ban 是房間級的 shadow ban：被 ban 的人一樣回 `201`，但不廣播，`GET` 也會濾掉；解除後全部回來。不影響登入
 - WS 訊息格式是 `{"type": ..., "payload": ...}`：
   - `message`：新彈幕，payload 跟 `POST /rooms/{public_id}/messages` 的回應相同
+  - `user_hidden`：`{"user_id": ...}`，有人剛被 ban，client 移除他的彈幕。不發給本人，不保證送達
   - `error`：只送給那條連線，連線不會斷，`code` 有：
     - `ws_write_forbidden`：client 從 WS 送訊息（發彈幕要走 `POST /rooms/{public_id}/messages`）
     - `ws_auth_failed`：auth 失敗（token 無效、user 不存在），連線退回匿名
@@ -256,6 +264,7 @@ Schema 由 [golang-migrate](https://github.com/golang-migrate/migrate) 管理。
 | `000011_messages_room_id_drop_default` | 拿掉 `messages.room_id` 的 `DEFAULT 1`（expand / contract 的 contract 步驟），INSERT 一定要帶 `room_id`。上線後若要把後端退回 `2c17ac8` 之前的版本（INSERT 不帶 `room_id`），要先手動跑 000011 的 down |
 | `000012_create_user_credential_state` | `user_credential_state` 表（`user_id` PK/FK，`valid_after`）：refresh token 「撤銷全部」改成只寫 `valid_after`，`created_at` 在這之前（含）的 token 一律無效，不再 UPDATE `refresh_tokens`。並依既有的 `duplicate_use_detected` 資料 backfill `valid_after`（每個 user 取最晚的 `revoked_at` / `created_at`），舊 token 部署後再出現不會再觸發撤銷。只新增表，部署一次就好 |
 | `000013_rooms_created_at_public_id_idx` | `rooms(created_at, public_id) WHERE deleted_at IS NULL` 的 partial index，給房間列表的 cursor 分頁用（`ORDER BY created_at DESC, public_id DESC`，`public_id` 當 tiebreaker） |
+| `000014_create_room_roles` | `room_roles` 表（`room_id` + `user_id` PK，`role` 是 `moderator` / `banned`，`assigned_by`）：房管和房間級 ban。房主看 `rooms.owner_id` |
 
 ### 新增 migration
 

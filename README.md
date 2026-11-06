@@ -41,6 +41,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | One 13-method store interface: every handler depended on methods it never called, test fakes compiled while missing methods, and handlers imported the Postgres package just for its errors | Each handler declares a small interface with only the methods it calls (Go interfaces are satisfied implicitly); domain errors live in a dependency-free `model`; Postgres and Redis code in separate packages, so only `main.go` knows the backends | [0009](docs/design/0009-consumer-side-interfaces.md) |
 | A viewer count across servers has to dedupe people with several tabs and survive a server dying without cleaning up | One Redis sorted set per room with a member per connection; entries expire unless renewed, using Redis time; a single worker per server reconciles the Hub against what it last wrote, so an old snapshot can't overwrite a new one; failed writes favor a brief undercount over a 30 s ghost | [0010](docs/design/0010-room-presence.md) |
 | A Pub/Sub connection can go half-open and silently stop delivering to every room on a server, while pings and HTTP keep working | Each server publishes a heartbeat to itself and expects it back on that connection; two misses rebuild the connection and tell clients to fetch again. Measured with a proxy that stops forwarding without closing: recovered in 35–44 s | [0011](docs/design/0011-message-delivery-recovery.md) |
+| Room owners couldn't stop a troll, and the old plan's site-wide, in-memory ban didn't fit per-room roles | Room-level shadow bans filtered at read time, so a mistaken ban is fully reversible; one `room_roles` row per person; hierarchy rules in one fail-closed pure function; checks ordered so a viewer can't probe users; no API response tells a banned user. Verified across two servers with real Redis and in a browser | [0012](docs/design/0012-room-moderation.md) |
 
 ## Architecture
 
@@ -99,9 +100,9 @@ main.go ──→ pgstore ─────→ model
 ## Status
 
 Started 2026-10-08. Done so far: real-time messaging across multiple servers, auth with refresh-token
-rotation, rooms with a paginated room list, cross-server viewer counts, recovery from missed messages, rate
-limiting, observability, and the hardening described above. Next: roles and bans, a load-test baseline, then
-async persistence if the numbers call for it. See the
+rotation, rooms with a paginated room list, cross-server viewer counts, recovery from missed messages, room
+roles and shadow bans, rate limiting, observability, and the hardening described above. Next: a load-test
+baseline, then async persistence if the numbers call for it. See the
 [milestones in ROADMAP.md](ROADMAP.md#milestones2026-11-03-訂暫定) (in Chinese).
 
 ## Getting started
@@ -161,6 +162,9 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 | `GET` | `/rooms/{public_id}` | | room info |
 | `GET` | `/rooms` | | list rooms, newest first (cursor pagination: `limit`, `page_token`) |
 | `GET` | `/me/rooms` | ✓ | list my rooms (same pagination) |
+| `GET` | `/rooms/{public_id}/me` | ✓ | my role in this room |
+| `GET` | `/rooms/{public_id}/roles` | ✓ | moderators and bans, for the owner and moderators (same pagination) |
+| `PUT`, `DELETE` | `/rooms/{public_id}/roles/{user_id}` | ✓ | make a moderator or ban (`{"role": ...}`); remove |
 | `GET` | `/rooms/{public_id}/messages` | | latest messages |
 | `POST` | `/rooms/{public_id}/messages` | ✓ | post a message (rate limited) |
 | `GET` | `/ws` | | WebSocket: `join` / `leave` / `auth` / `ping` frames; receives `message` |

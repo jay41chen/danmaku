@@ -10,7 +10,7 @@
 | M2 房間有人氣 ✅ | presence + 跨 server 不重複人數（同一套 TTL + heartbeat，從 W6 提前；2026-11-04 完成，[ADR 0010](docs/design/0010-room-presence.md)） | 0.75 ～ 1.25 | 11/12 ～ 11/17 |
 | M3 Git hook ✅ | pre-commit：`gofmt` / `go vet` / 前端 lint；pre-push：全部測試（只用 `danmaku_test`）+ 前端 build（2026-11-04 完成） | < 0.1 | 11/4 ～ 11/5 |
 | M4 不漏訊息 ✅ | 重連補最新 100 則 + `s-maxage=1` 快取 header + 重連退避修正 + PubSub half-open watchdog + 重建後 `resync` + SLI metrics；不做 `after`、Redis List、client timer（2026-11-05 完成，[ADR 0011](docs/design/0011-message-delivery-recovery.md)） | 1 ～ 1.5 | 11/11 ～ 11/16 |
-| M5 房間有秩序 | HTTP 錯誤格式統一 → RBAC → Ban | 1 ～ 1.5 | 11/18 ～ 11/26 |
+| M5 房間有秩序 ✅ | HTTP 錯誤格式統一 → RBAC → 房間級 shadow ban（2026-11-06 完成，[ADR 0012](docs/design/0012-room-moderation.md)） | 1 ～ 1.5 | 11/18 ～ 11/26 |
 | M6 壓測基準 | 自己寫腳本在本機模擬大量流量（不打 prod、只用測試環境），記下同步寫入的基準數字，決定 M7 要不要做；同一台 Mac 的數字只用來比較前後，不當容量上限 | 0.5 ～ 0.75 | 11/22 ～ 12/2 |
 | M7 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗）；**看 M6 結果決定要不要做** | 1 ～ 1.25 | 11/29 ～ 12/10 |
 | M8 依人數排序 | 房間列表依人數排序（從 M2 移出，見下方 W4b） | 0.5 ～ 0.75 | 12/2 ～ 12/16 |
@@ -168,21 +168,31 @@
   - Backlog：不公開但知道連結就能進的房間（YouTube 不公開影片、Google Docs「知道連結的任何人」= capability URL）。目前沒需求；要做時新增 `visibility` 欄位（`public` / `unlisted`）即可，`public_id` 已經猜不到，id 設計不用動
   - [x] 房間人數（M2，2026-11-04，[ADR 0010](docs/design/0010-room-presence.md)、go-notes 3.27）：每個房間一個 Redis Sorted Set `room:<public_id>:members`，member = `conn_id:user_id`（綁連線不綁 user；匿名 user_id = 0，依 conn_id 算），score = 最後續期時間（Redis `TIME`）。每台 server 一個 worker：Hub 有變動只寫 diff，每 10 秒全部續期 + `EXPIRE 30`，每 5 秒算人數推給自己的觀眾；算不到就不推，client 沿用上一次的數字
 - [x] HTTP 錯誤格式統一（M5，2026-11-06）：所有 endpoint 回 `{"error": {"code", "message"}}`，`code` 是 client 的翻譯 key、發布後不能改名，`message` 是後備文字。status 不變；錯誤一律 `Cache-Control: no-store`、`nosniff`。不做 RFC 9457、i18n 套件、攔截 mux 內建的 404 / 405（client 碰到非 JSON 只看 status，不顯示 body）。刻意不分細：`invalid_credentials`、`unauthorized`、`room_not_found`、`invalid_refresh_token`
-- [ ] Authorization（RBAC，M5 定案，2026-11-06）
+- [x] Authorization（RBAC，M5，2026-11-06，[ADR 0012](docs/design/0012-room-moderation.md)）
   - role **不放進 JWT**：角色是每個房間各自的（塞不進一個 claim），而且降級需要立刻生效（不能等 access token 過期）
   - `room_roles(room_id, user_id, role, assigned_by, created_at, PRIMARY KEY (room_id, user_id))`，`role` 是 `moderator` / `banned`；房主看 `rooms.owner_id`，沒有列就是一般觀眾。一人一房一列，不會同時是房管又被 ban
   - 階級：房主 > 房管 > 一般觀眾，只能上對下；只有房主能指派 / 撤銷房管。房主 ban 房管 = 那一列改成 `banned`，解除後是一般觀眾；指派被 ban 的人回 409
-  - 查 DB，不做記憶體 role cache：頻率低，也不用同步。還沒談：API 路徑、client 怎麼知道自己的角色
+  - 查 DB，不做記憶體 role cache：頻率低，也不用同步
+  - API：`PUT` / `DELETE /rooms/{public_id}/roles/{user_id}`（`{"role": "moderator" | "banned"}`，冪等，回 204）；`GET /rooms/{public_id}/roles`（房主和房管看全部，含 `assigned_by`）；`GET /rooms/{public_id}/me`（要登入、`no-store`，回 `owner` / `moderator` / `viewer`，被 ban 的人也回 `viewer`，shadow ban 才藏得住）
+  - 檢查順序：先看操作者，再看對象是否存在，最後比層級，否則一般觀眾能拿來探測 user 和房管。新增 code：`room_forbidden`、`room_target_forbidden`、`room_role_conflict`、`user_not_found`、`invalid_role`
+  - 用 `user_id` 指定對象，從彈幕上點：不做「依帳號查 user」的 API，所以要指派的人得先發過一則彈幕（接受）
+  - 前端最小版：彈幕旁的按鈕 + 可展開的名單；按鈕只是 UX，收到 403 就重抓角色，真正的防線是 server 每次查 DB
 - [x] 彈幕內容過濾（C1，2026-11-03）：輸入層用 PRECIS Freeform（`golang.org/x/text/secure/precis`，RFC 8264）擋控制字元、零寬字元、雙向控制字元（RLO 等）；**只檢查不改寫**（拿 precis 的 error、丟掉輸出，存原樣）。profile 另外設定：檢查前先移除 VS15 / VS16（U+FE0E / U+FE0F，手機鍵盤送的 ❤️ 帶 U+FE0F，PRECIS 預設會拒絕）+ `DisallowEmpty`（只有選擇符的字串變空 → 拒絕），都是 PRECIS 自己的擴充點（AdditionalMapping），不在 validator 裡加特例。房名比彈幕嚴：頭尾空白直接拒絕（不再 trim）、不可連續空白、combining mark（Mn + Me）最多連續 2 個。驗證集中在 `handler/text_validation.go`，回傳的 sentinel 文字直接給 client。輸出層：前端 `<bdi>` 隔離 + `overflow: hidden` 擋 Zalgo（見 go-notes 3.36）
   - Known：ZWJ emoji 序列（👨‍👩‍👧、👩‍💻）會被拒（PRECIS 的 contextual rule）；PRECIS 拒絕未指派碼位 → Unicode 新增的 emoji 要等 `x/text` 升級才收；舊資料沒有回頭清理；「看起來是空白、但不是 Unicode 空白」的字元擋不到：U+2800（點字空白）、U+1D159、`"\uFE0F "`（選擇符 + 空白，彈幕會通過）；VS15 / VS16 是**任何位置**都移除後才檢查，不限 emoji 後面 → 彈幕可以夾帶最多約 99 個看不見的 U+FE0F（房名受 mark 上限擋，最多連 2 個），選擇符也能插在 PRECIS contextual rule 檢查的兩個字之間讓檢查看不到它（Judge 全掃 U+0000–U+2FFFF：不含選擇符的輸入 0 個行為改變）→ 之後跟內容審核一起處理（要一份「視覺空白」清單）
   - 之後：關鍵字過濾 / 內容審核要「先正規化再比對」（防零寬字元或全形字繞過），正規化只用在比對，不改存的資料
 - [ ] 刪除帳號時區分「匿名舊彈幕」和「已刪除的使用者」：`messages.user_id = NULL` 目前有兩種來源（000009 之前的匿名彈幕、`ON DELETE SET NULL`），前端一律顯示「匿名」。做刪帳號功能時決定要不要區分（例如 migration 標記 legacy 列，或刪帳號時改寫 username 快照）
-- [ ] Room ban（M5 定案，2026-11-06）：房間級 shadow ban，只擋別人看到他的彈幕，不撤銷登入、不碰 JWT
+- [x] Room ban（M5，2026-11-06，[ADR 0012](docs/design/0012-room-moderation.md)）：房間級 shadow ban，只擋別人看到他的彈幕，不撤銷登入、不碰 JWT
   - 發彈幕：照常存，`CreateMessage` 同一條 SQL 查是否被 ban，回 201，被 ban 就不 PUBLISH。不存在 `room_banned` 這種 code
   - 拿彈幕：`NOT EXISTS` 在讀取時過濾，不標記彈幕本身；解除後全部回來，包括被 ban 期間發的（接受，只有還在最新 100 則內的看得到）
   - ban 當下：廣播 `user_hidden {user_id}`，client 移除畫面上他的彈幕；server 不發給本人；掉了不補（退回 F5 或被新彈幕擠掉才消失）
   - 解除：房主全部都能解；房管能解房主 ban 的以外（看 `assigned_by`）。房管重複 ban 不覆蓋房主那一列，房主重複 ban 要覆蓋
   - Known：作者本人 F5、換房或開無痕就會發現（`GET` 是 `public, s-maxage=1`，不能依使用者回不同內容）；刪帳號後 `user_id` 變 NULL，隱藏會失效（現在沒有刪帳號功能）
+  - Known：本人的第二個分頁看不到第一個分頁發的新彈幕（不廣播），也可能因此發現
+  - Known：ban 當下可能多留一則：ban 之前送出的 `GET` 比 `user_hidden` 晚回來，或 `POST` 剛好在 ban 前查過、`PUBLISH` 比較晚到；reload 就消失（只讀 code 推得，未重現）
+  - Known：被 ban 的人狂發時，`GET` 要跳過他的彈幕才湊得滿 100 則，成本隨數量線性增加：跳過 3,000 則多約 0.7ms，50,000 則單次約 12～16ms（`EXPLAIN ANALYZE`），以限流上限算約 7 小時累積到 50,000 則。目前可接受，沒有上限也沒有保留期限
+  - Known：滾動部署時，舊版 server 會把 `user_hidden` 原樣發給本人。部署時先上 server、全部換完再上 client，新 client 上線前不會有人按 ban
+  - 之後：`PUT` / `DELETE roles` 沒有 rate limit，房管反覆 ban / 解除可以刷 `user_hidden` 廣播，跟 W6 的 Rate limiting 一起處理
+  - 小瑕疵（Judge 2026-11-06，低優先）：管理名單 reload 失敗後按「重試」走的是載入更多，已移除的人可能留在名單上，下次異動或重新展開就恢復；`usePagedList` 的 `enabled` 參數目前沒有真實用途；同房新連線 F5 時仍是 join → auth，這段空窗內被 ban 只會讓本人提早看不到自己的彈幕
   - 不做：記憶體 ban set + Pub/Sub 同步（原本是為全站封鎖、每個 request 都要查設計的，現在只有 `POST` 要查，而它本來就會碰 DB）。**M7 如果改成非同步寫入，`POST` 不再經過 DB，到時要加快取，表和讀取過濾不用改**
   - 驗收：重測 `GET` 延遲，尤其是被 ban 的人還在狂發的情況
   - 全站封鎖（site ban）不在 M5：要做時才考慮 `revokeAllCredentials`、`iat <= valid_after` 和記憶體 ban set

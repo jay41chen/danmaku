@@ -17,5 +17,6 @@ fault-injection experiment.
 | [0009](0009-consumer-side-interfaces.md) | Consumer-side interfaces, domain errors in `model`, one package per backend | interface segregation, dependency direction, composition root, compile-time checks |
 | [0010](0010-room-presence.md) | Cross-server viewer count: one writer reconciling connections into Redis | presence, TTL vs explicit cleanup, desired vs actual, failure semantics |
 | [0011](0011-message-delivery-recovery.md) | Message delivery recovery: catch up on reconnect, detect a deaf Pub/Sub connection | half-open connections, watchdogs, shared-cache TTL, cache stampede, retry storms |
+| [0012](0012-room-moderation.md) | Room moderation: structured errors, hierarchical roles, read-time shadow bans | error contracts, information leaks through codes, one-to-many schema, fail-closed authorization, check ordering |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.
