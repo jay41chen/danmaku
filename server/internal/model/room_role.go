@@ -10,24 +10,27 @@ const (
 	RoomRoleViewer    RoomRole = "viewer"
 )
 
-// 角色變更的判斷結果，handler 依此決定要寫 DB，還是回哪種錯誤
+// 角色變更的判斷結果：store 依此決定要不要寫 DB，use case 依此決定回哪種錯誤
 type RoleDecision int
 
 const (
 	RoleChangeAllow           RoleDecision = iota // 要寫入 DB
-	RoleChangeNoop                                // 不用寫入，回 204（重送也安全）
-	RoleChangeForbidden                           // 403 room_forbidden：操作者沒有這個權限
-	RoleChangeTargetForbidden                     // 403 room_target_forbidden：有權限，但不能動這個對象
-	RoleChangeConflict                            // 409 room_role_conflict：要先解除 ban 才能指派
+	RoleChangeNoop                                // 不用寫入，視為成功（重送也安全）
+	RoleChangeForbidden                           // 操作者沒有這個權限
+	RoleChangeTargetForbidden                     // 有權限，但不能動這個對象
+	RoleChangeConflict                            // 要先解除 ban 才能指派
 )
 
+// 角色規則的函式型別：use case 把規則傳進 store，store 在 transaction 裡查完資料後呼叫
+type RoleDecider func(actor, target, desired RoomRole, bannedByOwner bool) RoleDecision
+
 // 判斷 actor 能不能把 target 目前的角色改成 desired，集中房間的階級規則：房主 > 房管 > 一般觀眾
-// 用途：handler 查完 DB 後呼叫；desired 是 Viewer 代表移除（DELETE）。
+// 用途：use case 傳給 store，store 查完 DB 後呼叫；desired 是 Viewer 代表移除角色。
 // bannedByOwner 只有 target 是 Banned 時才有意義：房主 ban 的，房管不能解除
 func DecideRoleChange(actor, target, desired RoomRole, bannedByOwner bool) RoleDecision {
 	// fail closed：沒預期到的值一律拒絕，否則會一路走到最後的 Allow
-	// handler 也會先擋 desired，這裡多一道是因為放行的代價太高（例如把別人變成房主）
-	if desired != RoomRoleModerator && desired != RoomRoleBanned && desired != RoomRoleViewer {
+	// use case 也會先擋 desired，這裡多一道是因為放行的代價太高（例如把別人變成房主）
+	if !desired.Assignable() {
 		return RoleChangeForbidden
 	}
 
@@ -69,4 +72,10 @@ func DecideRoleChange(actor, target, desired RoomRole, bannedByOwner bool) RoleD
 		return RoleChangeConflict
 	}
 	return RoleChangeAllow
+}
+
+// 能不能把人改成這個角色（owner 只來自 rooms.owner_id，不能指派）
+// 用途：use case 檢查 desired、DecideRoleChange 的 fail closed
+func (r RoomRole) Assignable() bool {
+	return r == RoomRoleModerator || r == RoomRoleBanned || r == RoomRoleViewer
 }

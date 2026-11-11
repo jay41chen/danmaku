@@ -11,7 +11,13 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
+
+// 組出接上 use case 和通知器的 RoleHandler，讓 handler 測試連同業務邏輯一起驗
+func newTestRoleHandler(store *fakeRoleStore, redis *fakeRedis) *RoleHandler {
+	return NewRoleHandler(usecase.NewRoleUseCase(store, NewRoomNotifier(redis)))
+}
 
 // 角色 handler 的假 store：依 actor 回不同結果，才測得到「被 ban 的人和一般觀眾回應一樣」
 type fakeRoleStore struct {
@@ -35,7 +41,7 @@ type fakeRoleStore struct {
 	gotListLim int
 }
 
-func (f *fakeRoleStore) ChangeRoomRole(ctx context.Context, room string, actor, target int64, desired model.RoomRole) (model.RoleChangeResult, error) {
+func (f *fakeRoleStore) ChangeRoomRole(ctx context.Context, room string, actor, target int64, desired model.RoomRole, decide model.RoleDecider) (model.RoleChangeResult, error) {
 	f.changeCalls++
 	f.gotRoom, f.gotActor, f.gotTarget, f.gotDesired = room, actor, target, desired
 	if res, ok := f.changeByActor[actor]; ok {
@@ -101,7 +107,7 @@ func TestSetRoleStatusMapping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewRoleHandler(&tc.store, &fakeRedis{})
+			h := newTestRoleHandler(&tc.store, &fakeRedis{})
 
 			rec := serveRole(t, h.HandleSetRole, http.MethodPut, 7, tc.path, tc.body)
 
@@ -121,7 +127,7 @@ func TestSetRoleStatusMapping(t *testing.T) {
 
 func TestSetRolePassesArgumentsToStore(t *testing.T) {
 	store := &fakeRoleStore{changeResult: model.RoleChangeResult{Decision: model.RoleChangeAllow}}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 
 	serveRole(t, h.HandleSetRole, http.MethodPut, 7, "/rooms/x/roles/5", `{"role":"banned"}`)
 	if store.gotRoom != testRoleRoom || store.gotActor != 7 || store.gotTarget != 5 || store.gotDesired != model.RoomRoleBanned {
@@ -151,7 +157,7 @@ func TestDeleteRoleStatusMapping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewRoleHandler(&tc.store, &fakeRedis{})
+			h := newTestRoleHandler(&tc.store, &fakeRedis{})
 			rec := serveRole(t, h.HandleDeleteRole, http.MethodDelete, 7, tc.path, "")
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
@@ -173,7 +179,7 @@ func TestBannedAndViewerAreIndistinguishable(t *testing.T) {
 		},
 		roleByUser: map[int64]model.RoomRole{bannedID: model.RoomRoleBanned},
 	}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 
 	same := func(name string, call func(userID int64) *httptest.ResponseRecorder) {
 		t.Helper()
@@ -208,7 +214,7 @@ func TestBannedAndViewerAreIndistinguishable(t *testing.T) {
 
 func TestMyRole(t *testing.T) {
 	store := &fakeRoleStore{roleByUser: map[int64]model.RoomRole{1: model.RoomRoleOwner, 2: model.RoomRoleModerator, 3: model.RoomRoleBanned}}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 	for id, want := range map[int64]string{1: "owner", 2: "moderator", 3: "viewer", 4: "viewer"} {
 		rec := serveRole(t, h.HandleMyRole, http.MethodGet, id, "/rooms/x/me", "")
 		if rec.Code != 200 || rec.Body.String() != `{"role":"`+want+"\"}\n" {
@@ -236,7 +242,7 @@ func TestListRoles(t *testing.T) {
 		},
 		listNext: &model.RoleCursor{CreatedAt: created, UserID: 8},
 	}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 
 	for _, actor := range []int64{1, 2} {
 		rec := serveRole(t, h.HandleListRoles, http.MethodGet, actor, "/rooms/x/roles", "")
@@ -273,7 +279,7 @@ func TestListRoles(t *testing.T) {
 
 func TestListRolesEmptyAndLastPage(t *testing.T) {
 	store := &fakeRoleStore{roleByUser: map[int64]model.RoomRole{1: model.RoomRoleOwner}}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 	rec := serveRole(t, h.HandleListRoles, http.MethodGet, 1, "/rooms/x/roles", "")
 	if rec.Body.String() != "{\"roles\":[]}\n" {
 		t.Errorf("empty body = %q, want {\"roles\":[]} (no null, no token)", rec.Body.String())
@@ -282,7 +288,7 @@ func TestListRolesEmptyAndLastPage(t *testing.T) {
 
 func TestListRolesQueryValidation(t *testing.T) {
 	store := &fakeRoleStore{roleByUser: map[int64]model.RoomRole{1: model.RoomRoleOwner}}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 	roomTok, _ := encodePageToken(model.RoomCursor{CreatedAt: time.Now(), PublicID: testRoleRoom})
 	roleTok, _ := encodeRoleToken(model.RoleCursor{CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), UserID: 4})
 
@@ -316,7 +322,7 @@ func TestListRolesQueryValidation(t *testing.T) {
 
 func TestListRolesErrors(t *testing.T) {
 	store := &fakeRoleStore{roleErr: model.ErrRoomNotFound}
-	h := NewRoleHandler(store, &fakeRedis{})
+	h := newTestRoleHandler(store, &fakeRedis{})
 	if rec := serveRole(t, h.HandleListRoles, http.MethodGet, 1, "/rooms/x/roles", ""); rec.Code != 404 || decodeErrorBody(t, rec).Code != "room_not_found" {
 		t.Errorf("missing room: %d %q", rec.Code, rec.Body.String())
 	}
@@ -350,7 +356,7 @@ func TestUserHiddenPublishedOnlyWhenNewlyBanned(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			redis := &fakeRedis{}
-			h := NewRoleHandler(&fakeRoleStore{changeResult: tc.res, changeErr: tc.err}, redis)
+			h := newTestRoleHandler(&fakeRoleStore{changeResult: tc.res, changeErr: tc.err}, redis)
 
 			serveRole(t, h.HandleSetRole, http.MethodPut, 7, "/rooms/x/roles/123", `{"role":"banned"}`)
 
@@ -371,7 +377,7 @@ func TestUserHiddenPublishedOnlyWhenNewlyBanned(t *testing.T) {
 // 所以這裡確認 DELETE 的 Allow 不廣播
 func TestDeleteRoleDoesNotPublish(t *testing.T) {
 	redis := &fakeRedis{}
-	h := NewRoleHandler(&fakeRoleStore{changeResult: model.RoleChangeResult{Decision: model.RoleChangeAllow}}, redis)
+	h := newTestRoleHandler(&fakeRoleStore{changeResult: model.RoleChangeResult{Decision: model.RoleChangeAllow}}, redis)
 	serveRole(t, h.HandleDeleteRole, http.MethodDelete, 7, "/rooms/x/roles/123", "")
 	if len(redis.published) != 0 {
 		t.Errorf("published %q on unban", redis.published)
@@ -380,7 +386,7 @@ func TestDeleteRoleDoesNotPublish(t *testing.T) {
 
 func TestUserHiddenPublishFailureStill204(t *testing.T) {
 	redis := &fakeRedis{publishErr: context.DeadlineExceeded}
-	h := NewRoleHandler(&fakeRoleStore{changeResult: model.RoleChangeResult{Decision: model.RoleChangeAllow, NewlyBanned: true}}, redis)
+	h := newTestRoleHandler(&fakeRoleStore{changeResult: model.RoleChangeResult{Decision: model.RoleChangeAllow, NewlyBanned: true}}, redis)
 	before := counterValue(t, prom.PublishFailedTotal)
 
 	rec := serveRole(t, h.HandleSetRole, http.MethodPut, 7, "/rooms/x/roles/123", `{"role":"banned"}`)

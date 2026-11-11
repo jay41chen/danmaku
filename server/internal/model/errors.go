@@ -1,6 +1,6 @@
 package model
 
-// 這裡是 store 實作回傳、handler 用 errors.Is / errors.As 判斷的 domain 結果
+// 這裡是 store / use case 回傳、handler 用 errors.Is / errors.As 判斷的 domain 結果
 // store 負責把 DB 專屬的錯誤（pgx.ErrNoRows、SQLSTATE）翻成這些，caller 不需要知道底層用哪種 DB
 
 import (
@@ -30,6 +30,14 @@ var (
 	ErrRoomOwnerNotFound = errors.New("room owner not found")
 	// 房間列表的 limit 不在 1..MaxRoomListLimit：handler 應該先擋掉，走到這裡代表 caller 有 bug
 	ErrInvalidLimit = errors.New("invalid limit")
+	// 操作者不是房主或房管
+	ErrRoomForbidden = errors.New("room forbidden")
+	// 操作者有權限，但不能動這個對象
+	ErrRoomTargetForbidden = errors.New("room target forbidden")
+	// 要先解除 ban 才能指派
+	ErrRoomRoleConflict = errors.New("room role conflict")
+	// desired 不是可指派的角色（見 RoomRole.Assignable）；PUT 只收哪些值是 handler 的 API 合約
+	ErrInvalidRole = errors.New("invalid role")
 )
 
 // --- refresh token ---

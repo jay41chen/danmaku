@@ -41,7 +41,7 @@ func readRoleRow(t *testing.T, s *DBStore, roomID, userID int64) (role string, a
 // 預期 actor 把 target 改成 desired 的結果；store 回 error 就直接失敗
 func mustChange(t *testing.T, s *DBStore, room string, actor, target int64, desired model.RoomRole) model.RoleChangeResult {
 	t.Helper()
-	res, err := s.ChangeRoomRole(t.Context(), room, actor, target, desired)
+	res, err := s.ChangeRoomRole(t.Context(), room, actor, target, desired, model.DecideRoleChange)
 	if err != nil {
 		t.Fatalf("ChangeRoomRole(actor %d, target %d, %s) error = %v, want nil", actor, target, desired, err)
 	}
@@ -199,7 +199,7 @@ func TestRoleOperationsOnSoftDeletedRoom(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.ChangeRoomRole(t.Context(), room, owner, troll, model.RoomRoleBanned); !errors.Is(err, model.ErrRoomNotFound) {
+	if _, err := s.ChangeRoomRole(t.Context(), room, owner, troll, model.RoomRoleBanned, model.DecideRoleChange); !errors.Is(err, model.ErrRoomNotFound) {
 		t.Errorf("ChangeRoomRole error = %v, want ErrRoomNotFound", err)
 	}
 	if _, err := s.GetUserRoomRole(t.Context(), room, owner); !errors.Is(err, model.ErrRoomNotFound) {
@@ -208,7 +208,7 @@ func TestRoleOperationsOnSoftDeletedRoom(t *testing.T) {
 	if _, _, err := s.CreateMessage(t.Context(), room, troll, "x"); !errors.Is(err, model.ErrRoomNotFound) {
 		t.Errorf("CreateMessage error = %v, want ErrRoomNotFound", err)
 	}
-	if _, err := s.ChangeRoomRole(t.Context(), "nope0000000", owner, troll, model.RoomRoleBanned); !errors.Is(err, model.ErrRoomNotFound) {
+	if _, err := s.ChangeRoomRole(t.Context(), "nope0000000", owner, troll, model.RoomRoleBanned, model.DecideRoleChange); !errors.Is(err, model.ErrRoomNotFound) {
 		t.Errorf("missing room error = %v, want ErrRoomNotFound", err)
 	}
 }
@@ -224,13 +224,13 @@ func TestChangeRoomRoleChecksActorBeforeTarget(t *testing.T) {
 	const ghost = int64(987654321)
 
 	for name, actor := range map[string]int64{"viewer": viewer, "banned": banned} {
-		res, err := s.ChangeRoomRole(t.Context(), room, actor, ghost, model.RoomRoleBanned)
+		res, err := s.ChangeRoomRole(t.Context(), room, actor, ghost, model.RoomRoleBanned, model.DecideRoleChange)
 		if err != nil || res.Decision != model.RoleChangeForbidden {
 			t.Errorf("%s with nonexistent target = (%v, %v), want Forbidden and nil error", name, res.Decision, err)
 		}
 	}
 	// 有權限的人指定不存在的 user 才是 ErrUserNotFound
-	if _, err := s.ChangeRoomRole(t.Context(), room, owner, ghost, model.RoomRoleBanned); !errors.Is(err, model.ErrUserNotFound) {
+	if _, err := s.ChangeRoomRole(t.Context(), room, owner, ghost, model.RoomRoleBanned, model.DecideRoleChange); !errors.Is(err, model.ErrUserNotFound) {
 		t.Errorf("owner with nonexistent target error = %v, want ErrUserNotFound", err)
 	}
 }
@@ -441,7 +441,7 @@ func TestChangeRoomRoleModBanRacingOwnerBan(t *testing.T) {
 		for _, actor := range []int64{mod, owner} {
 			wg.Go(func() {
 				<-start
-				_, err := s.ChangeRoomRole(t.Context(), room, actor, target, model.RoomRoleBanned)
+				_, err := s.ChangeRoomRole(t.Context(), room, actor, target, model.RoomRoleBanned, model.DecideRoleChange)
 				errs <- err
 			})
 		}
@@ -478,7 +478,7 @@ func TestChangeRoomRoleConcurrentMixedChanges(t *testing.T) {
 			for j := range 25 {
 				actor := []int64{owner, mod}[(g+j)%2]
 				target := targets[(g+j/2)%2]
-				if _, err := s.ChangeRoomRole(t.Context(), room, actor, target, desiredList[(g*7+j)%3]); err != nil {
+				if _, err := s.ChangeRoomRole(t.Context(), room, actor, target, desiredList[(g*7+j)%3], model.DecideRoleChange); err != nil {
 					errs <- err
 				}
 				// 同時有訊息在寫入同一個房間：鎖不能擋 messages 的 FK 檢查

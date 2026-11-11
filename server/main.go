@@ -20,6 +20,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/pgstore"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/redisstore"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -49,7 +50,7 @@ func main() {
 	registerRoutes(mux, tokens, appHandlers{
 		messages: messageHandler,
 		rooms:    handler.NewRoomHandler(db),
-		roles:    handler.NewRoleHandler(db, redis),
+		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(redis))),
 		health:   handler.NewHealthHandler(db, redis),
 		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),
 		ws:       wsHandler,
@@ -280,7 +281,7 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 	// 公開：列出所有人的房間（分頁）
 	r.publicGet("/rooms", http.HandlerFunc(h.rooms.HandleListRooms))
 
-	// 房間角色（房管 / 房間級 shadow ban）：都要登入，權限由 store 的 transaction 判斷
+	// 房間角色（房管 / 房間級 shadow ban）：都要登入，權限由 use case 判斷
 	r.put("/rooms/{public_id}/roles/{user_id}", http.HandlerFunc(h.roles.HandleSetRole))
 	r.delete("/rooms/{public_id}/roles/{user_id}", http.HandlerFunc(h.roles.HandleDeleteRole))
 	r.get("/rooms/{public_id}/roles", http.HandlerFunc(h.roles.HandleListRoles))

@@ -46,7 +46,7 @@ func newTestMux() *http.ServeMux {
 	registerRoutes(mux, rejectAllParser{}, appHandlers{
 		messages: handler.NewMessageHandler(nil, nil, nil),
 		rooms:    handler.NewRoomHandler(nil),
-		roles:    handler.NewRoleHandler(nil, nil),
+		roles:    handler.NewRoleHandler(nil),
 		health:   handler.NewHealthHandler(healthyDB{}, healthyRedis{}),
 		auth:     handler.NewAuthHandler(nil, nil, "", nil),
 		ws:       handler.NewWebsocketHandler(nil, nil, nil),

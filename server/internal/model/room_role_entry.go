@@ -20,7 +20,7 @@ type RoleCursor struct {
 }
 
 // ChangeRoomRole 的結果：Decision 是 DecideRoleChange 的判斷；
-// NewlyBanned = 這次讓對象「新」變成被 ban（原本不是 banned、現在是），handler 依此廣播 user_hidden
+// NewlyBanned = 這次讓對象「新」變成被 ban（原本不是 banned、現在是），use case 依此廣播 user_hidden
 // 房主對已被 ban 的人再 ban 一次（接手 assigned_by）不算 NewlyBanned
 type RoleChangeResult struct {
 	Decision    RoleDecision
