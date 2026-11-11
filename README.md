@@ -132,8 +132,8 @@ VITE_WS_URL=ws://localhost:5390/ws VITE_API_URL=http://localhost:5390 npm run de
 ### Single server
 
 ```bash
-docker run -d --name danmaku-db -p 3192:5432 -e POSTGRES_USER=danmaku -e POSTGRES_PASSWORD=danmaku -e POSTGRES_DB=danmaku postgres:17
-docker run -d --name danmaku-redis -p 2907:6379 redis:7
+docker run -d --name danmaku-db -p 3192:5432 -e POSTGRES_USER=danmaku -e POSTGRES_PASSWORD=danmaku -e POSTGRES_DB=danmaku -v danmaku_pgdata:/var/lib/postgresql/data postgres:17
+docker run -d --name danmaku-redis -p 2907:6379 --tmpfs /data redis:7 --save ""
 
 cd server && JWT_SECRET="$(openssl rand -base64 48)" go run .   # migrations run on startup
 cd client && npm install && npm run dev                          # http://localhost:5173/danmaku/

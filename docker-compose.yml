@@ -19,9 +19,16 @@ services:
         volumes:
             - pgdata:/var/lib/postgresql/data
     
-    redis: # 刻意不掛 volume：Pub/Sub 和限流計數都不需要保存，重啟後清空沒關係
+    redis: # 刻意不保存：Pub/Sub 和限流計數重啟後清空沒關係
         image: redis:7
         container_name: danmaku-redis
+        # image 宣告了 VOLUME /data，不掛東西的話每次重建 container 都會留下一個匿名 volume
+        # 改掛 tmpfs（記憶體）：container 停掉就清空，也不會產生 volume
+        tmpfs:
+            - /data
+        # 關掉 RDB 快照，/data 永遠是空的，tmpfs 不佔記憶體
+        # 不幫 tmpfs 設 size：寫不下會讓快照失敗，Redis 預設就拒絕所有寫入
+        command: ["redis-server", "--save", ""]
         ports:
             - 2907:6379 # 6379為image default port，不能改
     server-1: #  key name, 其他 container 用 "server-1" 就能找到它
