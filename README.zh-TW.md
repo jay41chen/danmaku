@@ -61,12 +61,12 @@
 ### server 內部
 
 ```
-main.go ──→ pgstore ─────→ model
-  │         redisstore
-  └───────→ handler ─────→ model
+cmd/server ──→ pgstore ─────→ model
+  │            redisstore
+  └──────────→ handler ─────→ model
 ```
 
-- `main.go` 是 composition root：只有它知道後端是 Postgres 和 Redis
+- `cmd/server`（`main.go`）是 composition root：只有它知道後端是 Postgres 和 Redis
 - `handler`（HTTP + WebSocket）自己定義需要的小 interface（`roomStore`、`wsPubSub`、`rateLimiter`…），`*pgstore.DBStore`、`*redisstore.RedisStore` 不用宣告就自動符合
 - `model` 放資料型別、domain error（`ErrRoomNotFound`…）和規則（`ValidPublicID`），只依賴標準函式庫。見 [ADR 0009](docs/design/0009-consumer-side-interfaces.md)
 - 其他 package：`ws`（連線 + hub，不含業務邏輯）、`auth`（密碼、JWT、refresh token）、`middleware`、`config`、`httpx`、`logging`、`prometheus`、`randx`
@@ -139,7 +139,7 @@ docker run -d --name danmaku-redis -p 2907:6379 --tmpfs /data redis:7 --save ""
 
 ```bash
 cd server
-go run .
+go run ./cmd/server
 ```
 
 3. 啟動前端：

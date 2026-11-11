@@ -68,12 +68,12 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 ### Inside the server
 
 ```
-main.go ──→ pgstore ─────→ model
-  │         redisstore
-  └───────→ handler ─────→ model
+cmd/server ──→ pgstore ─────→ model
+  │            redisstore
+  └──────────→ handler ─────→ model
 ```
 
-- `main.go` is the composition root: it is the only place that knows the backends are Postgres and Redis.
+- `cmd/server` (`main.go`) is the composition root: it is the only place that knows the backends are Postgres and Redis.
 - `handler` (HTTP + WebSocket) defines the small interfaces it needs (`roomStore`, `wsPubSub`,
   `rateLimiter`, …); `*pgstore.DBStore` and `*redisstore.RedisStore` satisfy them implicitly.
 - `model` holds data types, domain errors (`ErrRoomNotFound`, …) and rules (`ValidPublicID`), and imports
@@ -135,8 +135,8 @@ VITE_WS_URL=ws://localhost:5390/ws VITE_API_URL=http://localhost:5390 npm run de
 docker run -d --name danmaku-db -p 3192:5432 -e POSTGRES_USER=danmaku -e POSTGRES_PASSWORD=danmaku -e POSTGRES_DB=danmaku -v danmaku_pgdata:/var/lib/postgresql/data postgres:17
 docker run -d --name danmaku-redis -p 2907:6379 --tmpfs /data redis:7 --save ""
 
-cd server && JWT_SECRET="$(openssl rand -base64 48)" go run .   # migrations run on startup
-cd client && npm install && npm run dev                          # http://localhost:5173/danmaku/
+cd server && JWT_SECRET="$(openssl rand -base64 48)" go run ./cmd/server   # migrations run on startup
+cd client && npm install && npm run dev                                    # http://localhost:5173/danmaku/
 ```
 
 `JWT_SECRET` is required (at least 32 bytes). See [Environment Variables](README.zh-TW.md#environment-variables).

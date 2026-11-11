@@ -24,3 +24,6 @@ loadtest-*.json.tmp
 # Load test tool build artifact (go build ./cmd/loadtest, from server/ or from the package dir)
 server/loadtest
 server/cmd/loadtest/loadtest
+
+# Server binary when built from its package dir (go build in server/cmd/server)
+server/cmd/server/server

@@ -8,7 +8,7 @@ RUN go mod download
 # 但因為這包同時包含code changes，所以很難cache
 COPY . . 
 # 編譯產生執行檔
-RUN go build -o main .
+RUN go build -o main ./cmd/server
 # 執行server application
 EXPOSE 8080
 CMD ["./main"]
