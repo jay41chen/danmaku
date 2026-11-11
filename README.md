@@ -5,7 +5,7 @@ English · [繁體中文](README.zh-TW.md)
 Real-time *danmaku* (bullet comments) for live rooms: messages typed by viewers fly across everyone's
 screen in real time. A Go backend built to scale horizontally, plus a React client.
 
-**Live demo**: https://jay41chen.github.io/danmaku/
+**Live demo**: paused, since the backend host's free trial has ended. To try it, run it locally ([Getting started](#getting-started)).
 
 I built this to learn backend engineering after years of mobile development (Kotlin / Flutter). The focus
 is on the parts tutorials skip: what breaks when there is more than one server, when Redis stalls, when a

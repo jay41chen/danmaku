@@ -4,7 +4,7 @@
 
 直播房間的即時彈幕系統：觀眾送出的訊息會即時飛過所有人的畫面。後端用 Go 寫，設計成可以水平擴充（多台 server）；前端是 React。
 
-**線上 Demo**：https://jay41chen.github.io/danmaku/
+**線上 Demo**：暫停中，後端主機的試用期已結束。想試用請在本機啟動（見 [Getting Started](#getting-started)）。
 
 我原本做 mobile（Kotlin / Flutter），這個專案是用來學後端的。重點放在教學文章通常不會講的部分：server 不只一台時、Redis 卡住時、client 很慢時、新舊版本同時在線時，會壞在哪裡、要怎麼設計。比較重要的設計決策都寫在 [`docs/design/`](docs/design/README.md)（目前只有英文）。
 
