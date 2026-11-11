@@ -49,7 +49,7 @@ func main() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
 		messages: messageHandler,
-		rooms:    handler.NewRoomHandler(db),
+		rooms:    handler.NewRoomHandler(usecase.NewRoomUseCase(db)),
 		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(redis))),
 		health:   handler.NewHealthHandler(db, redis),
 		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),

@@ -118,7 +118,7 @@ func TestUnauthorizedResponsesAreIdentical(t *testing.T) {
 			return authed(http.HandlerFunc(h.HandleMe), httptest.NewRequest(http.MethodGet, "/me", nil))
 		}},
 		{"valid token, user deleted: POST /rooms", func() *httptest.ResponseRecorder {
-			h := NewRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomOwnerNotFound})
+			h := newTestRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomOwnerNotFound})
 			return authed(http.HandlerFunc(h.HandleCreateRoom), httptest.NewRequest(http.MethodPost, "/rooms", strings.NewReader(roomNameBody("room"))))
 		}},
 		{"valid token, user deleted: POST message", func() *httptest.ResponseRecorder {
@@ -153,7 +153,7 @@ func TestRoomNotFoundResponsesAreIdentical(t *testing.T) {
 		do   func() *httptest.ResponseRecorder
 	}{
 		{"GET room", func() *httptest.ResponseRecorder {
-			return serveGetRoom(NewRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound}), "missing")
+			return serveGetRoom(newTestRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound}), "missing")
 		}},
 		{"GET messages", func() *httptest.ResponseRecorder {
 			h := NewMessageHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound}, &fakeRedis{}, &fakeRateLimiter{})
@@ -261,7 +261,7 @@ func TestInternalErrorDoesNotLeak(t *testing.T) {
 			return serveCreateRoomMessage(t, h, 7, "abcDEF12345", contentBody("hi"))
 		}},
 		{"createRoom", func() *httptest.ResponseRecorder {
-			h := NewRoomHandler(&fakeDBStore{createRoomErr: leak})
+			h := newTestRoomHandler(&fakeDBStore{createRoomErr: leak})
 			return serveCreateRoom(t, h, 7, roomNameBody("room"))
 		}},
 	}
@@ -293,7 +293,7 @@ func TestInvalidJSONCode(t *testing.T) {
 		do   func() *httptest.ResponseRecorder
 	}{
 		{"createRoom", func() *httptest.ResponseRecorder {
-			return serveCreateRoom(t, NewRoomHandler(&fakeDBStore{}), 7, broken)
+			return serveCreateRoom(t, newTestRoomHandler(&fakeDBStore{}), 7, broken)
 		}},
 		{"createMessage", func() *httptest.ResponseRecorder {
 			h := NewMessageHandler(&fakeDBStore{}, &fakeRedis{}, &fakeRateLimiter{})
@@ -320,20 +320,13 @@ func TestInvalidJSONCode(t *testing.T) {
 	}
 }
 
-// 每個驗證 sentinel 都要帶預期的 code：code 是 API 合約，改名會被這裡抓到
+// 每個 handler 層的 sentinel 都要帶預期的 code：code 是 API 合約，改名會被這裡抓到
+// 文字驗證的 sentinel 搬到 textrule 了，見那邊的 TestValidationSentinelCodes
 func TestValidationSentinelCodes(t *testing.T) {
 	cases := []struct {
 		err  *model.CodedError
 		want string
 	}{
-		{errContentEmpty, "content_empty"},
-		{errContentTooLong, "content_too_long"},
-		{errContentInvalid, "content_invalid"},
-		{errRoomNameInvalid, "room_name_invalid"},
-		{errRoomNameLength, "room_name_length"},
-		{errRoomNameSurroundingSpace, "room_name_surrounding_space"},
-		{errRoomNameConsecutiveSpaces, "room_name_consecutive_spaces"},
-		{errRoomNameTooManyMarks, "room_name_too_many_marks"},
 		{errInvalidPageToken, "invalid_cursor"},
 	}
 	for _, tc := range cases {
@@ -347,29 +340,6 @@ func TestValidationSentinelCodes(t *testing.T) {
 		})
 	}
 
-	// 從 validator 實際回傳的值驗：確認 validate 函式回的是這些 sentinel，不是別的
-	validators := []struct {
-		name string
-		got  error
-		want string
-	}{
-		{"empty content", validateMessageContent("   "), "content_empty"},
-		{"long content", validateMessageContent(strings.Repeat("a", maxMessageRunes+1)), "content_too_long"},
-		{"invalid content", validateMessageContent("a\x00b"), "content_invalid"},
-		{"invalid room name", validateRoomName("a\x00b"), "room_name_invalid"},
-		{"room name length", validateRoomName(""), "room_name_length"},
-		{"surrounding space", validateRoomName(" a"), "room_name_surrounding_space"},
-		{"consecutive spaces", validateRoomName("a  b"), "room_name_consecutive_spaces"},
-		{"too many marks", validateRoomName("á́́"), "room_name_too_many_marks"},
-	}
-	for _, tc := range validators {
-		t.Run("validator "+tc.name, func(t *testing.T) {
-			var coded *model.CodedError
-			if !errors.As(tc.got, &coded) || coded.Code != tc.want {
-				t.Errorf("err = %v, want CodedError with code %q", tc.got, tc.want)
-			}
-		})
-	}
 	if _, err := decodePageToken("!!!"); !errors.Is(err, errInvalidPageToken) {
 		t.Errorf("decodePageToken err = %v, want errInvalidPageToken", err)
 	}

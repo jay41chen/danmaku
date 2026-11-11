@@ -12,8 +12,6 @@ import (
 )
 
 const (
-	// 每個 user 最多同時擁有的（未刪除）房間數
-	maxRoomsPerUser = 3
 	// public_id 撞號時最多試幾次：64 bits 下撞一次已經極罕見，連撞 3 次幾乎不可能，真的發生就當成錯誤
 	maxPublicIDAttempts = 3
 )
@@ -93,7 +91,9 @@ func insertRoom(ctx context.Context, tx pgx.Tx, ownerID int64, name string) (mod
 	return model.Room{}, fmt.Errorf("public_id collided %d times", maxPublicIDAttempts)
 }
 
-func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error) {
+// 建房間：lock user → 數未刪除的房間 → insert，全在同一個 transaction 裡
+// maxRooms 是這個 user 最多同時擁有的（未刪除）房間數，由呼叫端（use case）決定；已經 >= maxRooms 回 ErrRoomLimitReached
+func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
 	tx, err := this.dbPool.Begin(ctx)
 	if err != nil {
 		return model.Room{}, err
@@ -113,7 +113,7 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string)
 	if err != nil {
 		return model.Room{}, err
 	}
-	if count >= maxRoomsPerUser {
+	if count >= maxRooms {
 		return model.Room{}, model.ErrRoomLimitReached
 	}
 	room, err := insertRoom(ctx, tx, ownerID, name)

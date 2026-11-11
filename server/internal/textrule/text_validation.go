@@ -1,4 +1,4 @@
-package handler
+package textrule
 
 import (
 	"fmt"
@@ -12,9 +12,10 @@ import (
 	"golang.org/x/text/transform"
 )
 
-// 使用者輸入的文字驗證：彈幕內容（validateMessageContent）、房名（validateRoomName）
+// 使用者輸入的文字驗證：彈幕內容（MessageContent）、房名（RoomName）
+// 呼叫端：房間 use case（RoomName）；MessageContent 暫時由 messages handler 呼叫（之後 messages 有自己的 use case 再搬）
 //
-// 原則：只檢查、不改寫。不合規範就回 400，合規範就原樣存（不 trim、不正規化）
+// 原則：只檢查、不改寫。不合規範就回 CodedError（HTTP status 由 handler 決定），合規範就原樣存（不 trim、不正規化）
 // 偷偷幫使用者修，存進去的會跟他送的不一樣，而且「修」這個動作本身可能被拿來繞過檢查
 // 版面問題（Zalgo 撐高、RLO 反轉顯示）由前端輸出層處理，這裡只擋「不是合法文字」的輸入
 
@@ -46,8 +47,8 @@ var freeform = precis.NewFreeform(
 	precis.DisallowEmpty,
 )
 
-// validateMessageContent / validateRoomName 回傳的錯誤，code 和 message 會直接回給 client（handler 用 httpx.WriteCodedError）
-// 所以兩個 validate 只能回傳這裡的 sentinel（都是 *model.CodedError），不能把 precis 等內部 error 往外丟
+// MessageContent / RoomName 回傳的錯誤，code 和 message 會直接回給 client（handler 用 httpx.WriteCodedError）
+// 所以 MessageContent / RoomName 只能回傳這裡的 sentinel（都是 *model.CodedError），不能把 precis 等內部 error 往外丟
 var (
 	errContentEmpty   = &model.CodedError{Code: "content_empty", Message: "content must not be empty"}
 	errContentTooLong = &model.CodedError{Code: "content_too_long", Message: "content too long"}
@@ -62,7 +63,7 @@ var (
 
 // 彈幕內容。頭尾空白、連續空白、Zalgo 都允許（彈幕文化常用；版面交給前端）
 // 檢查順序：全空白 → 長度 → Freeform（便宜的先做：body 上限 1MB，超長的不用跑完 precis）
-func validateMessageContent(s string) error {
+func MessageContent(s string) error {
 	// 只用 trim 判斷「是不是整串空白」，不改 s
 	if strings.TrimSpace(s) == "" {
 		return errContentEmpty
@@ -79,7 +80,7 @@ func validateMessageContent(s string) error {
 // 房名。比彈幕嚴：多擋頭尾空白、連續空白、過多 combining mark（房名會出現在房間列表，給所有人看）
 // 檢查順序：長度 → Freeform → 頭尾空白 → 連續空白 → combining mark（便宜的先做）
 // 空字串被長度擋；全空白被頭尾空白擋，所以不用另外檢查
-func validateRoomName(s string) error {
+func RoomName(s string) error {
 	if n := utf8.RuneCountInString(s); n < 1 || n > maxRoomNameRunes {
 		return errRoomNameLength
 	}

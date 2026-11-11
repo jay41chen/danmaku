@@ -1,4 +1,4 @@
-package handler
+package textrule
 
 import (
 	"errors"
@@ -34,7 +34,7 @@ func assertSentinel(t *testing.T, got, want error, sentinels []error) {
 	}
 }
 
-// 直接呼叫 validateMessageContent（不經 HTTP），確認回的是正確的 sentinel，不只是「有錯」
+// 直接呼叫 MessageContent（不經 HTTP），確認回的是正確的 sentinel，不只是「有錯」
 func TestValidateMessageContent(t *testing.T) {
 	sentinels := []error{errContentEmpty, errContentTooLong, errContentInvalid}
 
@@ -79,12 +79,12 @@ func TestValidateMessageContent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assertSentinel(t, validateMessageContent(tt.input), tt.want, sentinels)
+			assertSentinel(t, MessageContent(tt.input), tt.want, sentinels)
 		})
 	}
 }
 
-// 直接呼叫 validateRoomName（不經 HTTP），確認回的是正確的 sentinel
+// 直接呼叫 RoomName（不經 HTTP），確認回的是正確的 sentinel
 func TestValidateRoomName(t *testing.T) {
 	sentinels := []error{
 		errRoomNameLength, errRoomNameInvalid, errRoomNameSurroundingSpace,
@@ -136,7 +136,7 @@ func TestValidateRoomName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assertSentinel(t, validateRoomName(tt.input), tt.want, sentinels)
+			assertSentinel(t, RoomName(tt.input), tt.want, sentinels)
 		})
 	}
 }

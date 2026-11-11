@@ -130,7 +130,7 @@ func (f *fakeDBStore) RevokeRefreshToken(ctx context.Context, tokenHash string) 
 	return f.revokeErr
 }
 
-func (f *fakeDBStore) CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error) {
+func (f *fakeDBStore) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
 	f.createRoomCalls++
 	f.gotRoomOwnerID, f.gotRoomName = ownerID, name
 	return f.createdRoom, f.createRoomErr

@@ -23,6 +23,8 @@ const (
 	PublicIDBytes = 8
 	// 房間列表一頁最多幾筆；handler 解析 query 的 limit 時也用這個，上限只定義在這裡
 	MaxRoomListLimit = 50
+	// 每個 user 未刪除的房間上限；store 在 transaction 裡檢查
+	MaxRoomsPerUser = 3
 )
 
 // 房間列表的翻頁位置：上一頁「最後一筆回傳的房間」的排序鍵

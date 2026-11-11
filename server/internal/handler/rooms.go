@@ -14,23 +14,22 @@ import (
 // limit 沒帶時的預設值；上限是 model.MaxRoomListLimit
 const defaultRoomListLimit = 20
 
-// 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
-type roomStore interface {
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+type roomUseCase interface {
 	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
-	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
-
-	GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error)
+	GetRoom(ctx context.Context, publicID string) (model.Room, error)
+	ListRooms(ctx context.Context, ownerID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error)
 }
 
 type RoomHandler struct {
-	db     roomStore
+	rooms  roomUseCase
 	logger *slog.Logger
 }
 
 // constructor
-func NewRoomHandler(db roomStore) *RoomHandler {
+func NewRoomHandler(rooms roomUseCase) *RoomHandler {
 	return &RoomHandler{
-		db:     db,
+		rooms:  rooms,
 		logger: slog.Default().With("component", "rooms"),
 	}
 }
@@ -56,8 +55,8 @@ type roomListResponse struct {
 
 // flow:
 // 取 user id（RequireAuth 放的）
-// 檢查 body（validateRoomName：1..30 字元、字元規則、頭尾空白直接拒絕，不 trim）
-// 存 DB（額度檢查在 store 的 transaction 裡）
+// 解析 body
+// 交給 use case（房名驗證 + 額度檢查都在裡面；房名不合規範 → 400 + 該 error 的 code）
 // 回 201
 func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r, this.logger)
@@ -71,14 +70,13 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 只檢查、不改寫：存的是原樣（頭尾有空白直接拒絕，不幫忙 trim）
-	name := req.RoomName
-	if err := validateRoomName(name); err != nil {
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
+	room, err := this.rooms.CreateRoom(r.Context(), userID, req.RoomName)
+	var coded *model.CodedError
+	if errors.As(err, &coded) {
+		// 房名驗證沒過：code 和 message 直接回給 client
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, coded)
 		return
 	}
-
-	room, err := this.db.CreateRoom(r.Context(), userID, name)
 	if errors.Is(err, model.ErrRoomLimitReached) {
 		// 額度是「權限」問題，所以回 403：
 		//   409 是「跟現有資料衝突」（例如帳號重複）；422 是「請求內容本身有問題」，這裡請求內容沒錯
@@ -102,7 +100,7 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 
 // 公開：知道 public_id 的人都能查
 func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
-	room, err := this.db.GetRoomByPublicID(r.Context(), r.PathValue("public_id"))
+	room, err := this.rooms.GetRoom(r.Context(), r.PathValue("public_id"))
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404、不是 410：不讓外人知道「這個房間曾經存在過」
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
@@ -157,7 +155,7 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 		after = &cursor
 	}
 
-	rooms, next, err := this.db.GetRoomLists(r.Context(), userID, after, limit)
+	rooms, next, err := this.rooms.ListRooms(r.Context(), userID, after, limit)
 	if err != nil {
 		this.logger.ErrorContext(r.Context(), "list rooms failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")

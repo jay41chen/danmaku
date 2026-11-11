@@ -14,7 +14,7 @@ import (
 // 建一個房間，回傳 public_id 和內部 id
 func createRoleTestRoom(t *testing.T, s *DBStore, ownerID int64, name string) (string, int64) {
 	t.Helper()
-	room, err := s.CreateRoom(t.Context(), ownerID, name)
+	room, err := s.CreateRoom(t.Context(), ownerID, name, model.MaxRoomsPerUser)
 	if err != nil {
 		t.Fatalf("setup CreateRoom: %v", err)
 	}

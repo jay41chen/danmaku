@@ -78,7 +78,7 @@ func TestCreateRoom(t *testing.T) {
 			t.Fatalf("setup CreateUser error = %v", err)
 		}
 
-		room, err := s.CreateRoom(t.Context(), ownerID, "房間")
+		room, err := s.CreateRoom(t.Context(), ownerID, "房間", model.MaxRoomsPerUser)
 
 		if err != nil {
 			t.Fatalf("CreateRoom error = %v, want nil", err)
@@ -100,7 +100,7 @@ func TestCreateRoom(t *testing.T) {
 			t.Fatalf("setup CreateUser error = %v", err)
 		}
 
-		room, err := s.CreateRoom(t.Context(), ownerID, "x")
+		room, err := s.CreateRoom(t.Context(), ownerID, "x", model.MaxRoomsPerUser)
 
 		if err != nil {
 			t.Fatalf("CreateRoom error = %v, want nil", err)
@@ -120,13 +120,13 @@ func TestCreateRoom(t *testing.T) {
 		if err != nil {
 			t.Fatalf("setup CreateUser error = %v", err)
 		}
-		for i := 0; i < maxRoomsPerUser; i++ {
-			if _, err := s.CreateRoom(t.Context(), ownerID, "x"); err != nil {
+		for i := 0; i < model.MaxRoomsPerUser; i++ {
+			if _, err := s.CreateRoom(t.Context(), ownerID, "x", model.MaxRoomsPerUser); err != nil {
 				t.Fatalf("setup CreateRoom #%d error = %v", i+1, err)
 			}
 		}
 
-		_, err = s.CreateRoom(t.Context(), ownerID, "x")
+		_, err = s.CreateRoom(t.Context(), ownerID, "x", model.MaxRoomsPerUser)
 
 		if !errors.Is(err, model.ErrRoomLimitReached) {
 			t.Errorf("error = %v, want model.ErrRoomLimitReached", err)
@@ -139,8 +139,8 @@ func TestCreateRoom(t *testing.T) {
 		if err != nil {
 			t.Fatalf("setup CreateUser error = %v", err)
 		}
-		for i := 0; i < maxRoomsPerUser; i++ {
-			if _, err := s.CreateRoom(t.Context(), ownerID, "x"); err != nil {
+		for i := 0; i < model.MaxRoomsPerUser; i++ {
+			if _, err := s.CreateRoom(t.Context(), ownerID, "x", model.MaxRoomsPerUser); err != nil {
 				t.Fatalf("setup CreateRoom #%d error = %v", i+1, err)
 			}
 		}
@@ -149,7 +149,7 @@ func TestCreateRoom(t *testing.T) {
 			t.Fatalf("setup soft delete: %v", err)
 		}
 
-		_, err = s.CreateRoom(t.Context(), ownerID, "x")
+		_, err = s.CreateRoom(t.Context(), ownerID, "x", model.MaxRoomsPerUser)
 
 		if err != nil {
 			t.Errorf("CreateRoom after soft delete error = %v, want nil", err)
@@ -159,7 +159,7 @@ func TestCreateRoom(t *testing.T) {
 	t.Run("nonexistent owner returns model.ErrRoomOwnerNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 
-		_, err := s.CreateRoom(t.Context(), 999999999, "x")
+		_, err := s.CreateRoom(t.Context(), 999999999, "x", model.MaxRoomsPerUser)
 
 		if !errors.Is(err, model.ErrRoomOwnerNotFound) {
 			t.Errorf("error = %v, want model.ErrRoomOwnerNotFound", err)
@@ -180,7 +180,7 @@ func TestCreateRoom(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, errs[i] = s.CreateRoom(t.Context(), ownerID, "x")
+				_, errs[i] = s.CreateRoom(t.Context(), ownerID, "x", model.MaxRoomsPerUser)
 			}()
 		}
 		wg.Wait()
@@ -196,8 +196,8 @@ func TestCreateRoom(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 			}
 		}
-		if ok != maxRoomsPerUser || limited != n-maxRoomsPerUser {
-			t.Errorf("succeeded = %d, limited = %d, want %d / %d", ok, limited, maxRoomsPerUser, n-maxRoomsPerUser)
+		if ok != model.MaxRoomsPerUser || limited != n-model.MaxRoomsPerUser {
+			t.Errorf("succeeded = %d, limited = %d, want %d / %d", ok, limited, model.MaxRoomsPerUser, n-model.MaxRoomsPerUser)
 		}
 	})
 }

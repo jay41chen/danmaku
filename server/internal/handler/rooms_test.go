@@ -13,7 +13,13 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
+
+// 用真的 use case 接 fake store：handler test 照樣能驗名稱規則、額度等端到端行為
+func newTestRoomHandler(db *fakeDBStore) *RoomHandler {
+	return NewRoomHandler(usecase.NewRoomUseCase(db))
+}
 
 // 同 serveCreateRoomMessage：用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx
 func serveCreateRoom(t *testing.T, h *RoomHandler, userID int64, body string) *httptest.ResponseRecorder {
@@ -44,7 +50,7 @@ func TestHandleCreateRoom(t *testing.T) {
 
 	t.Run("success returns 201 with public fields only", func(t *testing.T) {
 		db := &fakeDBStore{createdRoom: created()}
-		h := NewRoomHandler(db)
+		h := newTestRoomHandler(db)
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody("我的房間"))
 
@@ -99,7 +105,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	for _, tc := range invalid {
 		t.Run(tc.name+" returns 400", func(t *testing.T) {
 			db := &fakeDBStore{createdRoom: created()}
-			h := NewRoomHandler(db)
+			h := newTestRoomHandler(db)
 
 			rec := serveCreateRoom(t, h, userID, tc.body)
 
@@ -116,7 +122,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	t.Run("exactly 30 runes is ok", func(t *testing.T) {
 		name := strings.Repeat("哈", 30)
 		db := &fakeDBStore{createdRoom: created()}
-		h := NewRoomHandler(db)
+		h := newTestRoomHandler(db)
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody(name))
 
@@ -145,7 +151,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	for _, tc := range valid {
 		t.Run(tc.name+" is stored as-is", func(t *testing.T) {
 			db := &fakeDBStore{createdRoom: created()}
-			h := NewRoomHandler(db)
+			h := newTestRoomHandler(db)
 
 			rec := serveCreateRoom(t, h, userID, roomNameBody(tc.room))
 
@@ -159,7 +165,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	}
 
 	t.Run("room limit returns 403", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomLimitReached})
+		h := newTestRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomLimitReached})
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody("房間"))
 
@@ -172,7 +178,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	})
 
 	t.Run("deleted owner returns same 401 as RequireAuth", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomOwnerNotFound})
+		h := newTestRoomHandler(&fakeDBStore{createRoomErr: model.ErrRoomOwnerNotFound})
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody("房間"))
 
@@ -190,7 +196,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	})
 
 	t.Run("db error returns 500", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{createRoomErr: errors.New("db down")})
+		h := newTestRoomHandler(&fakeDBStore{createRoomErr: errors.New("db down")})
 
 		rec := serveCreateRoom(t, h, userID, roomNameBody("房間"))
 
@@ -202,7 +208,7 @@ func TestHandleCreateRoom(t *testing.T) {
 	// handler 沒經過 RequireAuth（route 註冊錯）：fail closed 回 500，不存任何東西
 	t.Run("missing user id in context returns 500", func(t *testing.T) {
 		db := &fakeDBStore{}
-		h := NewRoomHandler(db)
+		h := newTestRoomHandler(db)
 		req := httptest.NewRequest(http.MethodPost, "/rooms", strings.NewReader(roomNameBody("房間")))
 		rec := httptest.NewRecorder()
 
@@ -230,7 +236,7 @@ func serveGetRoom(h *RoomHandler, publicID string) *httptest.ResponseRecorder {
 func TestHandleGetRoom(t *testing.T) {
 	t.Run("found returns 200 with room", func(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 5, OwnerID: 7, PublicID: "abcDEF12345", OwnerUsername: "Jay", Name: "房間"}}
-		h := NewRoomHandler(db)
+		h := newTestRoomHandler(db)
 
 		rec := serveGetRoom(h, "abcDEF12345")
 
@@ -253,7 +259,7 @@ func TestHandleGetRoom(t *testing.T) {
 	})
 
 	t.Run("not found returns 404", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound})
+		h := newTestRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound})
 
 		rec := serveGetRoom(h, "zzzZZZ99999")
 
@@ -263,7 +269,7 @@ func TestHandleGetRoom(t *testing.T) {
 	})
 
 	t.Run("db error returns 500", func(t *testing.T) {
-		h := NewRoomHandler(&fakeDBStore{getRoomErr: errors.New("db down")})
+		h := newTestRoomHandler(&fakeDBStore{getRoomErr: errors.New("db down")})
 
 		rec := serveGetRoom(h, "abcDEF12345")
 
@@ -324,7 +330,7 @@ func TestHandleListRooms(t *testing.T) {
 				}
 				for _, tc := range cases {
 					db := &fakeDBStore{}
-					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, tc.query)
+					rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, tc.query)
 					if rec.Code != http.StatusOK {
 						t.Fatalf("%q: status = %d, want 200 (body: %q)", tc.query, rec.Code, rec.Body.String())
 					}
@@ -337,7 +343,7 @@ func TestHandleListRooms(t *testing.T) {
 			t.Run("invalid limit returns 400 without hitting store", func(t *testing.T) {
 				for _, v := range []string{"", "abc", "1.5", "0", "-1", strconv.Itoa(model.MaxRoomListLimit + 1)} {
 					db := &fakeDBStore{}
-					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "limit="+v)
+					rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "limit="+v)
 					if rec.Code != http.StatusBadRequest {
 						t.Errorf("limit=%q: status = %d, want 400", v, rec.Code)
 					}
@@ -354,7 +360,7 @@ func TestHandleListRooms(t *testing.T) {
 				// base64url of `{}`
 				for _, v := range []string{"!!!", "e30"} {
 					db := &fakeDBStore{}
-					rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "page_token="+v)
+					rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "page_token="+v)
 					if rec.Code != http.StatusBadRequest {
 						t.Errorf("page_token=%q: status = %d, want 400", v, rec.Code)
 					}
@@ -373,7 +379,7 @@ func TestHandleListRooms(t *testing.T) {
 					t.Fatalf("encode token: %v", err)
 				}
 				db := &fakeDBStore{}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "page_token="+token)
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "page_token="+token)
 				if rec.Code != http.StatusOK {
 					t.Fatalf("status = %d, want 200 (body: %q)", rec.Code, rec.Body.String())
 				}
@@ -384,7 +390,7 @@ func TestHandleListRooms(t *testing.T) {
 
 			t.Run("empty page_token is first page", func(t *testing.T) {
 				db := &fakeDBStore{}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "page_token=")
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "page_token=")
 				if rec.Code != http.StatusOK {
 					t.Fatalf("status = %d, want 200", rec.Code)
 				}
@@ -398,7 +404,7 @@ func TestHandleListRooms(t *testing.T) {
 					listRooms:      []model.Room{{ID: 1, OwnerID: 3, PublicID: "abcDEF12345", Name: "房間", CreatedAt: cursorTime}},
 					listNextCursor: &cursor,
 				}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "")
 				var body struct {
 					NextPageToken string `json:"next_page_token"`
 				}
@@ -416,7 +422,7 @@ func TestHandleListRooms(t *testing.T) {
 
 			t.Run("nil cursor omits next_page_token", func(t *testing.T) {
 				db := &fakeDBStore{listRooms: []model.Room{{PublicID: "abcDEF12345", Name: "房間"}}}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "")
 				var body map[string]json.RawMessage
 				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 					t.Fatalf("decode body: %v", err)
@@ -428,7 +434,7 @@ func TestHandleListRooms(t *testing.T) {
 
 			t.Run("empty result is [] not null", func(t *testing.T) {
 				db := &fakeDBStore{}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "")
 				if rec.Code != http.StatusOK {
 					t.Fatalf("status = %d, want 200", rec.Code)
 				}
@@ -446,7 +452,7 @@ func TestHandleListRooms(t *testing.T) {
 					{ID: 1, OwnerID: 3, PublicID: "abcDEF12345", Name: "房間一", CreatedAt: cursorTime},
 					{ID: 2, OwnerID: 4, PublicID: "ghiJKL56789", Name: "房間二", CreatedAt: cursorTime},
 				}}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "")
 				var body struct {
 					Rooms []map[string]any `json:"rooms"`
 				}
@@ -468,7 +474,7 @@ func TestHandleListRooms(t *testing.T) {
 
 			t.Run("store error returns 500", func(t *testing.T) {
 				db := &fakeDBStore{listRoomsErr: errors.New("boom")}
-				rec := serveListRooms(t, NewRoomHandler(db), mine, userID, "")
+				rec := serveListRooms(t, newTestRoomHandler(db), mine, userID, "")
 				if rec.Code != http.StatusInternalServerError {
 					t.Errorf("status = %d, want 500", rec.Code)
 				}
@@ -481,7 +487,7 @@ func TestHandleListRooms(t *testing.T) {
 
 	t.Run("GET /rooms passes nil userID", func(t *testing.T) {
 		db := &fakeDBStore{}
-		serveListRooms(t, NewRoomHandler(db), false, 0, "")
+		serveListRooms(t, newTestRoomHandler(db), false, 0, "")
 		if db.listRoomsCalls != 1 || db.gotListUserID != nil {
 			t.Errorf("calls=%d userID=%v, want 1 call with nil userID", db.listRoomsCalls, db.gotListUserID)
 		}
@@ -489,7 +495,7 @@ func TestHandleListRooms(t *testing.T) {
 
 	t.Run("GET /me/rooms passes caller's userID", func(t *testing.T) {
 		db := &fakeDBStore{}
-		serveListRooms(t, NewRoomHandler(db), true, userID, "")
+		serveListRooms(t, newTestRoomHandler(db), true, userID, "")
 		if db.listRoomsCalls != 1 || db.gotListUserID == nil || *db.gotListUserID != userID {
 			t.Errorf("calls=%d userID=%v, want 1 call with userID %d", db.listRoomsCalls, db.gotListUserID, userID)
 		}
@@ -497,12 +503,12 @@ func TestHandleListRooms(t *testing.T) {
 
 	t.Run("GET /me/rooms sets Cache-Control no-store", func(t *testing.T) {
 		db := &fakeDBStore{}
-		rec := serveListRooms(t, NewRoomHandler(db), true, userID, "")
+		rec := serveListRooms(t, newTestRoomHandler(db), true, userID, "")
 		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("Cache-Control = %q, want no-store", got)
 		}
 		// 錯誤回應也要有
-		rec = serveListRooms(t, NewRoomHandler(db), true, userID, "limit=abc")
+		rec = serveListRooms(t, newTestRoomHandler(db), true, userID, "limit=abc")
 		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("on 400, Cache-Control = %q, want no-store", got)
 		}

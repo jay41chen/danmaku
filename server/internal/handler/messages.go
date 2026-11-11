@@ -13,6 +13,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/textrule"
 )
 
 // 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
@@ -130,7 +131,7 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 
 	// client 也會檢查，但那只是 UX；server 才是防線（curl 可以繞過 client）
 	// 只檢查、不改寫：存的是原始 content（不 trim、不正規化）
-	if err := validateMessageContent(req.Content); err != nil {
+	if err := textrule.MessageContent(req.Content); err != nil {
 		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
 		return
 	}

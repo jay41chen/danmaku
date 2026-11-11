@@ -109,7 +109,7 @@ func TestCreateMessageRooms(t *testing.T) {
 	t.Run("message lands in the given room", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
-		room, err := s.CreateRoom(t.Context(), userID, "r")
+		room, err := s.CreateRoom(t.Context(), userID, "r", model.MaxRoomsPerUser)
 		if err != nil {
 			t.Fatalf("setup CreateRoom: %v", err)
 		}
@@ -156,7 +156,7 @@ func TestCreateMessageRooms(t *testing.T) {
 	t.Run("soft-deleted room returns model.ErrRoomNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
-		room, err := s.CreateRoom(t.Context(), userID, "r")
+		room, err := s.CreateRoom(t.Context(), userID, "r", model.MaxRoomsPerUser)
 		if err != nil {
 			t.Fatalf("setup CreateRoom: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestCreateMessageRooms(t *testing.T) {
 	t.Run("nonexistent user in existing room still returns model.ErrMessageUserNotFound", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
-		room, err := s.CreateRoom(t.Context(), userID, "r")
+		room, err := s.CreateRoom(t.Context(), userID, "r", model.MaxRoomsPerUser)
 		if err != nil {
 			t.Fatalf("setup CreateRoom: %v", err)
 		}
@@ -194,11 +194,11 @@ func TestQueryMessageRooms(t *testing.T) {
 	t.Run("only returns messages of the given room", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
-		roomA, err := s.CreateRoom(t.Context(), userID, "a")
+		roomA, err := s.CreateRoom(t.Context(), userID, "a", model.MaxRoomsPerUser)
 		if err != nil {
 			t.Fatalf("setup CreateRoom a: %v", err)
 		}
-		roomB, err := s.CreateRoom(t.Context(), userID, "b")
+		roomB, err := s.CreateRoom(t.Context(), userID, "b", model.MaxRoomsPerUser)
 		if err != nil {
 			t.Fatalf("setup CreateRoom b: %v", err)
 		}
@@ -228,7 +228,7 @@ func TestQueryMessageRooms(t *testing.T) {
 	t.Run("room without messages returns empty non-nil slice", func(t *testing.T) {
 		s := newTestDBStore(t)
 		userID := createTestUser(t, s, "jay")
-		room, err := s.CreateRoom(t.Context(), userID, "empty")
+		room, err := s.CreateRoom(t.Context(), userID, "empty", model.MaxRoomsPerUser)
 		if err != nil {
 			t.Fatalf("setup CreateRoom: %v", err)
 		}
