@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
 
@@ -387,7 +387,7 @@ func TestDeleteRoleDoesNotPublish(t *testing.T) {
 func TestUserHiddenPublishFailureStill204(t *testing.T) {
 	redis := &fakeRedis{publishErr: context.DeadlineExceeded}
 	h := newTestRoleHandler(&fakeRoleStore{changeResult: model.RoleChangeResult{Decision: model.RoleChangeAllow, NewlyBanned: true}}, redis)
-	before := counterValue(t, prom.PublishFailedTotal)
+	before := promtest.PublishFailedCount()
 
 	rec := serveRole(t, h.HandleSetRole, http.MethodPut, 7, "/rooms/x/roles/123", `{"role":"banned"}`)
 
@@ -397,7 +397,7 @@ func TestUserHiddenPublishFailureStill204(t *testing.T) {
 	if len(redis.published) != 1 {
 		t.Errorf("publish attempts = %d, want exactly 1 (never retried)", len(redis.published))
 	}
-	if got := counterValue(t, prom.PublishFailedTotal); got != before+1 {
-		t.Errorf("PublishFailedTotal = %v, want %v", got, before+1)
+	if got := promtest.PublishFailedCount(); got != before+1 {
+		t.Errorf("publish failed counter = %v, want %v", got, before+1)
 	}
 }

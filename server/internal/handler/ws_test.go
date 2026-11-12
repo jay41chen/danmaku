@@ -16,32 +16,11 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 	"github.com/jay41chen/danmaku/server/internal/ws"
 )
-
-// 讀出 gauge 目前的值（/metrics 輸出背後就是這個 dto.Metric 結構）
-func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
-	t.Helper() // 失敗時錯誤訊息指向呼叫的那一行，而不是這個 helper 裡面
-	m := &dto.Metric{}
-	if err := g.Write(m); err != nil {
-		t.Fatalf("read gauge: %v", err)
-	}
-	return m.GetGauge().GetValue()
-}
-
-func counterValue(t *testing.T, c prometheus.Counter) float64 {
-	t.Helper()
-	m := &dto.Metric{}
-	if err := c.Write(m); err != nil {
-		t.Fatalf("read counter: %v", err)
-	}
-	return m.GetCounter().GetValue()
-}
 
 // WS 寫入一律被拒絕：回 error envelope 給這條連線，連線保持開著，不 Publish
 func TestWebsocketWriteRejected(t *testing.T) {
@@ -207,11 +186,11 @@ func expectErrorCode(t *testing.T, conn *websocket.Conn, wait time.Duration, wan
 }
 
 // 等 gauge 變成預期值：連線的建立 / 移除在 server 端的 goroutine 做，test 這邊要輪詢
-func waitGauge(t *testing.T, g prometheus.Gauge, want float64) {
+func waitGauge(t *testing.T, read func() float64, want float64) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		got := gaugeValue(t, g)
+		got := read()
 		if got == want {
 			return
 		}
@@ -220,10 +199,6 @@ func waitGauge(t *testing.T, g prometheus.Gauge, want float64) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-func memberGauge() prometheus.Gauge {
-	return prom.WebsocketViewers.WithLabelValues("member")
 }
 
 // 需要 TODO(user) 完成才會過（refcount：member gauge）
@@ -237,7 +212,7 @@ func TestWebsocketAuthSuccess(t *testing.T) {
 	if p.ExpiresIn <= 0 {
 		t.Errorf("expires_in = %d, want > 0", p.ExpiresIn)
 	}
-	waitGauge(t, memberGauge(), 1)
+	waitGauge(t, promtest.MemberViewers, 1)
 }
 
 func TestWebsocketAuthBadToken(t *testing.T) {
@@ -272,13 +247,13 @@ func TestWebsocketAuthMemberThenBadTokenBecomesAnonymous(t *testing.T) {
 	conn := dialWS(t, url)
 	sendAuth(t, conn, "user7")
 	expectAuthOK(t, conn, 7, "jay")
-	waitGauge(t, memberGauge(), 1)
+	waitGauge(t, promtest.MemberViewers, 1)
 
 	sendAuth(t, conn, "bad")
 
 	expectErrorCode(t, conn, 2*time.Second, wsCodeAuthFailed)
 	// 變回匿名 = 不再算 member（改用 gauge 觀察，不看 Hub 內部狀態）
-	waitGauge(t, memberGauge(), 0)
+	waitGauge(t, promtest.MemberViewers, 0)
 }
 
 func TestWebsocketAuthSwitchUser(t *testing.T) {
@@ -385,14 +360,14 @@ func TestWebsocketMemberRefcount(t *testing.T) {
 	expectAuthOK(t, conn1, 7, "jay")
 	sendAuth(t, conn2, "user7")
 	expectAuthOK(t, conn2, 7, "jay")
-	waitGauge(t, memberGauge(), 1) // 同一個 user 兩條連線只算 1 個 member
+	waitGauge(t, promtest.MemberViewers, 1) // 同一個 user 兩條連線只算 1 個 member
 
 	conn1.Close()
 	time.Sleep(100 * time.Millisecond)
-	waitGauge(t, memberGauge(), 1) // 還有一條連線
+	waitGauge(t, promtest.MemberViewers, 1) // 還有一條連線
 
 	conn2.Close()
-	waitGauge(t, memberGauge(), 0)
+	waitGauge(t, promtest.MemberViewers, 0)
 }
 
 // ---- keepalive（ping / pong / read deadline）----
@@ -414,10 +389,10 @@ func newKeepaliveTestServer(t *testing.T, pingPeriod, pongWait time.Duration) (*
 // gauge 是全域的，前一個 test 的連線可能還在 server 端 goroutine 清理中，所以要等連續兩次讀到一樣的值
 func baselineConnections(t *testing.T) float64 {
 	t.Helper()
-	prev := gaugeValue(t, prom.WebsocketConnections)
+	prev := promtest.WSConnectionsActive()
 	for range 100 {
 		time.Sleep(30 * time.Millisecond)
-		cur := gaugeValue(t, prom.WebsocketConnections)
+		cur := promtest.WSConnectionsActive()
 		if cur == prev {
 			return cur
 		}
@@ -466,8 +441,8 @@ func TestWebsocketDeadClientRemoved(t *testing.T) {
 	base := baselineConnections(t)
 	dialWS(t, url) // 連上之後什麼都不做（不讀、不寫）
 
-	waitGauge(t, prom.WebsocketConnections, base+1)
-	waitGauge(t, prom.WebsocketConnections, base)
+	waitGauge(t, promtest.WSConnectionsActive, base+1)
+	waitGauge(t, promtest.WSConnectionsActive, base)
 }
 
 func TestWebsocketPongExtendsDeadline(t *testing.T) {
@@ -476,9 +451,9 @@ func TestWebsocketPongExtendsDeadline(t *testing.T) {
 	conn := dialWS(t, url)
 	drainInBackground(conn) // 預設 ping handler 會自動回 pong
 
-	waitGauge(t, prom.WebsocketConnections, base+1)
+	waitGauge(t, promtest.WSConnectionsActive, base+1)
 	time.Sleep(500 * time.Millisecond) // > 3 倍 pongWait：沒有 pong 延長 deadline 早就被踢了
-	if got := gaugeValue(t, prom.WebsocketConnections); got != base+1 {
+	if got := promtest.WSConnectionsActive(); got != base+1 {
 		t.Fatalf("connections = %v, want %v (pong should extend the read deadline)", got, base+1)
 	}
 }
@@ -490,7 +465,7 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 	conn := dialWS(t, url)
 	drainInBackground(conn) // 讀掉 server 回的 pong envelope
 
-	waitGauge(t, prom.WebsocketConnections, base+1)
+	waitGauge(t, promtest.WSConnectionsActive, base+1)
 	// 50ms 一則 = 20 則/秒，超過每條連線 5 則/秒的限流；
 	// 但 ReadLoop 是在限流判斷之前就延長 deadline，被丟掉的 frame 一樣算「活著」
 	for range 10 {
@@ -499,7 +474,7 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if got := gaugeValue(t, prom.WebsocketConnections); got != base+1 {
+	if got := promtest.WSConnectionsActive(); got != base+1 {
 		t.Fatalf("connections = %v, want %v (incoming messages should extend the read deadline)", got, base+1)
 	}
 }
@@ -736,7 +711,7 @@ func TestWebsocketResyncBroadcastToRoom(t *testing.T) {
 	conn2 := dialWS(t, url)
 	joinRoom(t, conn1, "aaaAAA11111")
 	joinRoom(t, conn2, "bbbBBB22222")
-	before := counterValue(t, prom.WebsocketResyncTotal)
+	before := promtest.WSResyncCount()
 
 	redis.deliverResync("aaaAAA11111")
 
@@ -745,7 +720,7 @@ func TestWebsocketResyncBroadcastToRoom(t *testing.T) {
 	if _, data, err := conn2.ReadMessage(); err == nil {
 		t.Fatalf("conn2 received %q, want nothing", data)
 	}
-	if got := counterValue(t, prom.WebsocketResyncTotal); got != before+1 {
+	if got := promtest.WSResyncCount(); got != before+1 {
 		t.Errorf("resync counter = %v, want %v", got, before+1)
 	}
 }

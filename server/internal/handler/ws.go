@@ -301,7 +301,7 @@ func (this *WebsocketHandler) StartBroadcast() {
 			// 沒送出就不計數：這個 metric 數的是「送出的 resync frame」
 			return
 		}
-		prom.WebsocketResyncTotal.Inc()
+		prom.WSResync()
 		this.hub.Broadcast(context.Background(), roomID, frame)
 	})
 }

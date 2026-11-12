@@ -15,7 +15,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
 
@@ -294,11 +294,11 @@ func TestCreateMessage(t *testing.T) {
 	})
 	t.Run("publish error increments failure metric", func(t *testing.T) {
 		h := newTestMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
-		before := counterValue(t, prom.PublishFailedTotal)
+		before := promtest.PublishFailedCount()
 
 		serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
-		if got := counterValue(t, prom.PublishFailedTotal); got != before+1 {
+		if got := promtest.PublishFailedCount(); got != before+1 {
 			t.Errorf("publish failed counter = %v, want %v", got, before+1)
 		}
 	})

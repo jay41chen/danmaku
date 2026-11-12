@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +13,8 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/handler"
 	"github.com/jay41chen/danmaku/server/internal/loadtiming"
 	"github.com/jay41chen/danmaku/server/internal/pgstore"
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 	"github.com/jay41chen/danmaku/server/internal/redisstore"
-
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 )
 
 // 路由表的 test：走真的 registerRoutes，只把 handler 的依賴換成假的
@@ -226,31 +222,6 @@ func TestRoutes(t *testing.T) {
 	})
 }
 
-// 讀出某個 metric 目前的 dto 值（testutil 會多拉依賴，這裡直接 Write）
-func writeMetric(t *testing.T, c any) *dto.Metric {
-	t.Helper()
-	m, ok := c.(prometheus.Metric)
-	if !ok {
-		t.Fatalf("%T is not a prometheus.Metric", c)
-	}
-	var out dto.Metric
-	if err := m.Write(&out); err != nil {
-		t.Fatalf("write metric: %v", err)
-	}
-	return &out
-}
-
-func counterValue(t *testing.T, method, path, status string) float64 {
-	t.Helper()
-	return writeMetric(t, prom.HttpRequestCount.WithLabelValues(method, path, status)).GetCounter().GetValue()
-}
-
-// histogram 的 sample 總數
-func histogramCount(t *testing.T, method, path string) uint64 {
-	t.Helper()
-	return writeMetric(t, prom.HttpRequestDuration.WithLabelValues(method, path)).GetHistogram().GetSampleCount()
-}
-
 // 守「接線」：走 serviceHandler 的真 chain，確認 HttpMetrics 的 path / method label 真的用了轉換後的值
 // internal/middleware 的 table test 只測得到 getRoutePath / getMethod 本身，抓不到
 // 有人在 HttpMetrics 和 mux 之間插了會複製 request 的 middleware（會讓全部變 unmatched）
@@ -269,9 +240,8 @@ func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status := strconv.Itoa(tt.wantStatus)
-			countBefore := counterValue(t, http.MethodGet, tt.wantLabel, status)
-			histBefore := histogramCount(t, http.MethodGet, tt.wantLabel)
+			countBefore := promtest.HTTPRequestCount(http.MethodGet, tt.wantLabel, tt.wantStatus)
+			histBefore := promtest.HTTPRequestDurationCount(http.MethodGet, tt.wantLabel)
 
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			rec := httptest.NewRecorder()
@@ -280,10 +250,10 @@ func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("GET %s status = %d, want %d", tt.path, rec.Code, tt.wantStatus)
 			}
-			if got := counterValue(t, http.MethodGet, tt.wantLabel, status) - countBefore; got != 1 {
-				t.Errorf("request count delta for {GET, %s, %s} = %v, want 1", tt.wantLabel, status, got)
+			if got := promtest.HTTPRequestCount(http.MethodGet, tt.wantLabel, tt.wantStatus) - countBefore; got != 1 {
+				t.Errorf("request count delta for {GET, %s, %d} = %v, want 1", tt.wantLabel, tt.wantStatus, got)
 			}
-			if got := histogramCount(t, http.MethodGet, tt.wantLabel) - histBefore; got != 1 {
+			if got := promtest.HTTPRequestDurationCount(http.MethodGet, tt.wantLabel) - histBefore; got != 1 {
 				t.Errorf("duration sample count delta for {GET, %s} = %d, want 1", tt.wantLabel, got)
 			}
 		})
@@ -294,8 +264,8 @@ func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {
 	// 沒帶 Authorization，RequireAuth 在進 handler 前就擋掉，不會碰到 nil 的依賴
 	t.Run("URL path differs from pattern uses pattern", func(t *testing.T) {
 		const label = "/rooms/{public_id}/messages"
-		countBefore := counterValue(t, http.MethodPost, label, "401")
-		histBefore := histogramCount(t, http.MethodPost, label)
+		countBefore := promtest.HTTPRequestCount(http.MethodPost, label, http.StatusUnauthorized)
+		histBefore := promtest.HTTPRequestDurationCount(http.MethodPost, label)
 
 		req := httptest.NewRequest(http.MethodPost, "/rooms/abc/messages", nil)
 		rec := httptest.NewRecorder()
@@ -304,18 +274,18 @@ func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("POST /rooms/abc/messages status = %d, want %d", rec.Code, http.StatusUnauthorized)
 		}
-		if got := counterValue(t, http.MethodPost, label, "401") - countBefore; got != 1 {
+		if got := promtest.HTTPRequestCount(http.MethodPost, label, http.StatusUnauthorized) - countBefore; got != 1 {
 			t.Errorf("request count delta for {POST, %s, 401} = %v, want 1", label, got)
 		}
-		if got := histogramCount(t, http.MethodPost, label) - histBefore; got != 1 {
+		if got := promtest.HTTPRequestDurationCount(http.MethodPost, label) - histBefore; got != 1 {
 			t.Errorf("duration sample count delta for {POST, %s} = %d, want 1", label, got)
 		}
 	})
 
 	// 非標準 method 歸成 "other"，不能讓 client 決定 label 的值；mux 對 /healthcheck 回 405，所以 path 是 unmatched
 	t.Run("non-standard method is labeled other", func(t *testing.T) {
-		countBefore := counterValue(t, "other", "unmatched", "405")
-		histBefore := histogramCount(t, "other", "unmatched")
+		countBefore := promtest.HTTPRequestCount("other", "unmatched", http.StatusMethodNotAllowed)
+		histBefore := promtest.HTTPRequestDurationCount("other", "unmatched")
 
 		req := httptest.NewRequest("FOOBAR123", "/healthcheck", nil)
 		rec := httptest.NewRecorder()
@@ -324,10 +294,10 @@ func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("FOOBAR123 /healthcheck status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 		}
-		if got := counterValue(t, "other", "unmatched", "405") - countBefore; got != 1 {
+		if got := promtest.HTTPRequestCount("other", "unmatched", http.StatusMethodNotAllowed) - countBefore; got != 1 {
 			t.Errorf("request count delta for {other, unmatched, 405} = %v, want 1", got)
 		}
-		if got := histogramCount(t, "other", "unmatched") - histBefore; got != 1 {
+		if got := promtest.HTTPRequestDurationCount("other", "unmatched") - histBefore; got != 1 {
 			t.Errorf("duration sample count delta for {other, unmatched} = %d, want 1", got)
 		}
 	})

@@ -5,31 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
-
 	"github.com/jay41chen/danmaku/server/internal/model"
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 	"github.com/jay41chen/danmaku/server/internal/randx"
 )
-
-func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
-	t.Helper()
-	m := &dto.Metric{}
-	if err := g.Write(m); err != nil {
-		t.Fatalf("read gauge: %v", err)
-	}
-	return m.GetGauge().GetValue()
-}
-
-func counterValue(t *testing.T, c prometheus.Counter) float64 {
-	t.Helper()
-	m := &dto.Metric{}
-	if err := c.Write(m); err != nil {
-		t.Fatalf("read counter: %v", err)
-	}
-	return m.GetCounter().GetValue()
-}
 
 // 不需要網路的 Client：Hub 只會對它 Enqueue（讀 send）；這些 test 的路徑不會踢人，所以不會呼叫 Close（conn 是 nil）
 func newTestClient() *Client {
@@ -41,14 +20,14 @@ func TestUnregisterTwice(t *testing.T) {
 	h := NewHub(10)
 	c := newTestClient()
 	ctx := context.Background()
-	before := gaugeValue(t, prom.WebsocketConnections)
-	totalBefore := counterValue(t, prom.WebsocketConnectionsTotal)
+	before := promtest.WSConnectionsActive()
+	totalBefore := promtest.WSConnectionsTotal()
 
 	if !h.Register(ctx, c) {
 		t.Fatal("Register = false, want true")
 	}
 	// 累計連線數：Register 成功就 +1，Unregister 不扣（counter 只增不減）
-	if got := counterValue(t, prom.WebsocketConnectionsTotal); got != totalBefore+1 {
+	if got := promtest.WSConnectionsTotal(); got != totalBefore+1 {
 		t.Errorf("websocket_connections_total after Register = %v, want %v", got, totalBefore+1)
 	}
 	if room := h.Unregister(ctx, c); room != "" {
@@ -58,7 +37,7 @@ func TestUnregisterTwice(t *testing.T) {
 		t.Errorf("second Unregister room = %q, want empty", room)
 	}
 
-	after := gaugeValue(t, prom.WebsocketConnections)
+	after := promtest.WSConnectionsActive()
 	if before != after {
 		t.Errorf("before gauge %v, after gauge %v", before, after)
 	}
@@ -125,7 +104,7 @@ func TestExpiryTimerAfterDowngradeToAnonymous(t *testing.T) {
 	if st.userID != 0 {
 		t.Errorf("userID = %d, want 0 (anonymous)", st.userID)
 	}
-	if got := gaugeValue(t, memberGaugeForTest()); got != 0 {
+	if got := promtest.MemberViewers(); got != 0 {
 		t.Errorf("member gauge = %v, want 0", got)
 	}
 }
@@ -155,10 +134,6 @@ func TestExpiryTimerAfterRenewal(t *testing.T) {
 	if h.members[7] != 1 || st.userID != 7 {
 		t.Errorf("members = %v, userID = %d, want member 7 kept", h.members, st.userID)
 	}
-}
-
-func memberGaugeForTest() prometheus.Gauge {
-	return prom.WebsocketViewers.WithLabelValues("member")
 }
 
 // 正常到期：timer 觸發 → 降回匿名並送 expired

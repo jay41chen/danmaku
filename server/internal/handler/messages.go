@@ -137,7 +137,7 @@ func publishEnvelope(ctx context.Context, logger *slog.Logger, pub messagePublis
 		return
 	}
 	if err := pub.Publish(ctx, roomPublicID, string(data)); err != nil {
-		prom.PublishFailedTotal.Inc()
+		prom.PublishFailed()
 		logger.ErrorContext(ctx, "publish to redis failed", "error", err)
 	}
 }

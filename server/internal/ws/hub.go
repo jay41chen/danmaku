@@ -90,8 +90,7 @@ func (h *Hub) Register(ctx context.Context, c *Client) bool {
 		return false
 	}
 	h.clients[c] = &clientState{}
-	prom.WebsocketConnections.Inc()
-	prom.WebsocketConnectionsTotal.Inc()
+	prom.WSConnected()
 	h.updateViewersGaugeLocked()
 	// request_id 在 upgrade 時產生，同一條連線的所有 log 共用，等同 connection ID
 	h.logger.InfoContext(ctx, "new client connected", "total", len(h.clients))
@@ -131,7 +130,7 @@ func (h *Hub) removeClientLocked(c *Client) string {
 	h.removeFromRoomLocked(c, room)
 	st.room = ""
 	h.notifyPresenceLocked()
-	prom.WebsocketConnections.Dec()
+	prom.WSDisconnected()
 	delete(h.clients, c)
 	h.updateViewersGaugeLocked()
 	return room
@@ -404,8 +403,7 @@ func (h *Hub) updateViewersGaugeLocked() {
 			anon++
 		}
 	}
-	prom.WebsocketViewers.WithLabelValues("member").Set(float64(len(h.members)))
-	prom.WebsocketViewers.WithLabelValues("anonymous").Set(float64(anon))
+	prom.SetViewers(len(h.members), anon)
 }
 
 func identityLabel(userID int64) string {

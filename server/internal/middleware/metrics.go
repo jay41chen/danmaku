@@ -2,12 +2,10 @@ package middleware
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
-	promlib "github.com/prometheus/client_golang/prometheus"
 )
 
 func HttpMetrics(next http.Handler) http.Handler {
@@ -21,15 +19,7 @@ func HttpMetrics(next http.Handler) http.Handler {
 		// r.Pattern 是 mux 在 next.ServeHTTP 裡填的，所以要在這之後才讀（前提見 main.go serviceHandler）
 		method, path := requestLabels(r)
 
-		prom.HttpRequestCount.With(promlib.Labels{
-			"method":      method,
-			"path":        path,
-			"status_code": strconv.Itoa(recorder.StatusCode()),
-		}).Inc()
-		prom.HttpRequestDuration.With(promlib.Labels{
-			"method": method,
-			"path":   path,
-		}).Observe(duration.Seconds())
+		prom.HTTPRequest(method, path, recorder.StatusCode(), duration)
 	})
 }
 

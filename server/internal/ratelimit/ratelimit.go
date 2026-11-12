@@ -48,7 +48,7 @@ func Check(ctx context.Context, limiter Limiter, logger *slog.Logger, rule Rule,
 	}
 	if !allowed {
 		// 撞到rate limit
-		prom.RateLimitedTotal.WithLabelValues(rule.Name).Inc()
+		prom.RateLimited(rule.Name)
 		attrs := append([]any{"rule", rule.Name, "key", key}, logAttrs...)
 		logger.WarnContext(ctx, "rate limited", attrs...)
 	}

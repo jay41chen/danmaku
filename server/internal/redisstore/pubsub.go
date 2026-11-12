@@ -114,7 +114,7 @@ func (this *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subsc
 		return
 	}
 	if resync, since := this.rooms.confirmSubscribed(roomID); resync {
-		prom.PubSubResubscribeDuration.Observe(time.Since(since).Seconds())
+		prom.PubSubResubscribed(time.Since(since))
 		onResync(roomID)
 	}
 }

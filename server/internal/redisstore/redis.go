@@ -99,7 +99,7 @@ func (this *RedisStore) publishHeartbeat(ctx context.Context) error {
 //
 // 不在這裡重設房間（resetAfterRebuild）：一定要等 consumer 把舊 channel 收完才重設，理由見 Subscribe
 func (this *RedisStore) rebuildPubSub(ctx context.Context) {
-	prom.PubSubDeafTotal.Inc()
+	prom.PubSubDeaf()
 	this.logger.WarnContext(ctx, "pubsub judged deaf, rebuilding")
 	fresh := this.client.Subscribe(ctx, this.heartbeat)
 	old := this.pubsub.Swap(fresh)

@@ -59,7 +59,7 @@ func newHubServer(t *testing.T, room string) *hubServer {
 	}))
 	t.Cleanup(srv.Close)
 	// 等所有 server 端 handler 清理完（Unregister 跑完）才結束測試：
-	// prom.WebsocketConnections 是全域 gauge，handler 晚一步 Dec 會落進下一個測試
+	// websocket_connections_active 是全域 gauge，handler 晚一步 Dec 會落進下一個測試
 	// （例如 TestUnregisterTwice）的 before/after 區間造成偶發失敗。
 	// t.Cleanup 是 LIFO：dial 之後註冊的「關 client conn」會先跑，handler 的 ReadLoop 才會醒來結束
 	t.Cleanup(func() {

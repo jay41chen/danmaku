@@ -9,9 +9,7 @@ import (
 	"testing"
 	"time"
 
-	dto "github.com/prometheus/client_model/go"
-
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 )
 
 type fakeLimiter struct {
@@ -79,14 +77,14 @@ func TestCheckBlockedCountsMetricAndLogsAttrs(t *testing.T) {
 	rule := Rule{Name: "test:blocked", Limit: 1, Window: time.Second}
 	l := &fakeLimiter{allowed: false, retryAfter: 3 * time.Second}
 	logger, buf := newBufLogger()
-	before := counterValue(t, rule.Name)
+	before := promtest.RateLimitedCount(rule.Name)
 
 	ok, retry := Check(context.Background(), l, logger, rule, "v", "remote_addr", "1.2.3.4")
 
 	if ok || retry != 3*time.Second {
 		t.Errorf("got %v / %v, want false / 3s", ok, retry)
 	}
-	if got := counterValue(t, rule.Name); got != before+1 {
+	if got := promtest.RateLimitedCount(rule.Name); got != before+1 {
 		t.Errorf("metric = %v, want %v", got, before+1)
 	}
 	out := buf.String()
@@ -95,13 +93,4 @@ func TestCheckBlockedCountsMetricAndLogsAttrs(t *testing.T) {
 			t.Errorf("log %q missing %q", out, want)
 		}
 	}
-}
-
-func counterValue(t *testing.T, rule string) float64 {
-	t.Helper()
-	var m dto.Metric
-	if err := prom.RateLimitedTotal.WithLabelValues(rule).Write(&m); err != nil {
-		t.Fatal(err)
-	}
-	return m.GetCounter().GetValue()
 }
