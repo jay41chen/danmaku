@@ -252,7 +252,7 @@ func histogramCount(t *testing.T, method, path string) uint64 {
 }
 
 // 守「接線」：走 serviceHandler 的真 chain，確認 HttpMetrics 的 path / method label 真的用了轉換後的值
-// internal/prometheus 的 table test 只測得到 getRoutePath / getMethod 本身，抓不到
+// internal/middleware 的 table test 只測得到 getRoutePath / getMethod 本身，抓不到
 // 有人在 HttpMetrics 和 mux 之間插了會複製 request 的 middleware（會讓全部變 unmatched）
 // metric 是全域的、跨 test 累加，所以只比 before/after 的差值
 func TestServiceHandlerMetricsUseRoutePattern(t *testing.T) {

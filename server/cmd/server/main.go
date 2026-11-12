@@ -18,7 +18,6 @@ import (
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/pgstore"
-	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/redisstore"
 	"github.com/jay41chen/danmaku/server/internal/usecase"
 
@@ -312,7 +311,7 @@ func serviceHandler(mux *http.ServeMux, origins []string) http.Handler {
 		mux,
 		middleware.RequestID,
 		middleware.Logging(slog.Default()),
-		prom.HttpMetrics,
+		middleware.HttpMetrics,
 		middleware.RecoverPanic,
 		middleware.CORS(origins...),
 	)
