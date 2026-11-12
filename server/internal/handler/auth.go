@@ -11,6 +11,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/ratelimit"
 )
 
 const (
@@ -23,12 +24,12 @@ var (
 	dummyHash, _ = auth.HashPassword("timing-equalizer")
 )
 
-// 限流規則（機制在 ratelimit.go）
+// 限流規則（機制在 internal/ratelimit）
 var (
-	loginIPRule       = rateRule{"login:ip", 20, time.Minute}            // 一台機器狂試很多帳號
-	loginUsernameRule = rateRule{"login:username", 10, 15 * time.Minute} // 很多 IP 一起猜同一個帳號
-	registerIPRule    = rateRule{"register:ip", 5, time.Hour}            // 一台機器狂註冊垃圾帳號
-	refreshIPRule     = rateRule{"refresh:ip", 10, time.Minute}          // 一台機器狂猜 refresh token
+	loginIPRule       = ratelimit.Rule{Name: "login:ip", Limit: 20, Window: time.Minute}            // 一台機器狂試很多帳號
+	loginUsernameRule = ratelimit.Rule{Name: "login:username", Limit: 10, Window: 15 * time.Minute} // 很多 IP 一起猜同一個帳號
+	registerIPRule    = ratelimit.Rule{Name: "register:ip", Limit: 5, Window: time.Hour}            // 一台機器狂註冊垃圾帳號
+	refreshIPRule     = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute}          // 一台機器狂猜 refresh token
 )
 
 const (
@@ -245,15 +246,15 @@ func (this *AuthHandler) completeLogin(r *http.Request, userID int64, username, 
 
 	// 成功登入，reset 這個帳號的計數（使用者自己打錯幾次不該被鎖）
 	// 失敗只記 log：限流的附屬功能壞掉，不該讓登入失敗
-	if err := this.limiter.Reset(r.Context(), loginUsernameRule.key(username)); err != nil {
+	if err := this.limiter.Reset(r.Context(), loginUsernameRule.Key(username)); err != nil {
 		this.logger.WarnContext(r.Context(), "rate limit reset failed",
-			"rule", loginUsernameRule.name, "error", err)
+			"rule", loginUsernameRule.Name, "error", err)
 	}
 	// IP 只退還這一次（-1），等於只數失敗：共用出口 IP 的人（公司 NAT）正常登入不會互相擋到
 	// 不 reset IP：否則攻擊者用自己的帳號登入一次，就能把 IP 計數歸零
-	if err := this.limiter.Refund(r.Context(), loginIPRule.key(ip)); err != nil {
+	if err := this.limiter.Refund(r.Context(), loginIPRule.Key(ip)); err != nil {
 		this.logger.WarnContext(r.Context(), "rate limit refund failed",
-			"rule", loginIPRule.name, "error", err)
+			"rule", loginIPRule.Name, "error", err)
 	}
 	return tokens, nil
 }

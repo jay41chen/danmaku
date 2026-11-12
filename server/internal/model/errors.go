@@ -6,6 +6,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // --- user ---
@@ -95,4 +96,14 @@ type CodedError struct {
 // 實作 error 介面（Go 只比對 method 名稱和簽名），讓它可以當一般 error 回傳，也能被 errors.Is / errors.As 比對
 func (this *CodedError) Error() string {
 	return this.Message
+}
+
+// 限流規則擋住時，use case 回傳這個；handler 翻成 429 + Retry-After
+// RetryAfter 是「所有被擋的規則裡最長的等待時間」，只回短的 client 馬上重試又會被另一條擋
+type RateLimitedError struct {
+	RetryAfter time.Duration
+}
+
+func (this *RateLimitedError) Error() string {
+	return fmt.Sprintf("rate limited, retry after %v", this.RetryAfter)
 }

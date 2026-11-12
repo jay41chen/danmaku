@@ -6,58 +6,38 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"slices"
-	"strconv"
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
-	"github.com/jay41chen/danmaku/server/internal/textrule"
 )
 
 // 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
 const publishTimeout = 500 * time.Millisecond
-
-// GET 歷史訊息回幾則（最新的幾則，新到舊查出來再反轉成舊到新）
-// 重連後 client 靠這支補撈斷線期間的洞：100 則在熱門房間（約 50 則/秒）約涵蓋 2 秒
-// 不用 200：回應會到約 23 KB，本機實測 2,000 GET/s 時 p99 從 5ms 變 227ms
-const historyLimit = 100
-
-// 限流規則（機制在 ratelimit.go），key 是 user id
-// 兩條一起用：burst 擋瞬間洗版，sustain 擋持續慢慢刷（每秒 3 則剛好卡在 burst 下面也會被 sustain 擋）
-// 只能擋「單一帳號」：多開帳號的總量擋不住，要靠 W5 的全域限流
-var (
-	messageBurstRule   = rateRule{"message:burst", 3, time.Second}
-	messageSustainRule = rateRule{"message:sustain", 20, 10 * time.Second}
-)
 
 // 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
 type messagePublisher interface {
 	Publish(ctx context.Context, roomID, msg string) error // 發到 roomChannel(roomID)
 }
 
-// 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
-type messageStore interface {
-	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (msg model.Message, banned bool, err error)
-	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)
-	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+type messageUseCase interface {
+	Post(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error)
+	History(ctx context.Context, roomPublicID string) ([]model.Message, error)
 }
 
+// 訊息 handler：只處理 HTTP，業務規則在 use case
 type MessageHandler struct {
-	db      messageStore
-	redis   messagePublisher
-	limiter rateLimiter
-	logger  *slog.Logger
+	messages messageUseCase
+	logger   *slog.Logger
 }
 
 // constructor
-func NewMessageHandler(db messageStore, redis messagePublisher, limiter rateLimiter) *MessageHandler {
+func NewMessageHandler(messages messageUseCase) *MessageHandler {
 	return &MessageHandler{
-		db:      db,
-		redis:   redis,
-		limiter: limiter,
-		logger:  slog.Default().With("component", "messages"),
+		messages: messages,
+		logger:   slog.Default().With("component", "messages"),
 	}
 }
 
@@ -71,30 +51,20 @@ func (this *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http
 	this.getMessages(w, r, r.PathValue("public_id"))
 }
 
-// GET 分兩步：先用 public id 查房間拿內部 id，再查訊息（POST 則是 CreateMessage 內一次做完）
-// 因為這個 API 每次進房才打一次；兩步之間房間剛好被刪的 race，
-// 只會多回一次剛刪房間的歷史訊息，無害
+// 讀歷史訊息；use case 回的 error 翻成 404 / 500
 func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, roomPublicID string) {
-	room, err := this.db.GetRoomByPublicID(r.Context(), roomPublicID)
+	msgs, err := this.messages.History(r.Context(), roomPublicID)
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404（跟 HandleGetRoom 一樣）
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
 	}
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "get room failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	msgs, err := this.db.QueryMessage(r.Context(), room.ID, historyLimit)
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "query messages failed", "error", err)
+		this.logger.ErrorContext(r.Context(), "get messages failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
-	// DB query出來的是新到舊
-	slices.Reverse(msgs)
 	// 只有 200 才加（404 / 500 不加，不然錯誤回應會被 CDN 快取）
 	// s-maxage 只對 CDN / 共用快取有作用，對瀏覽器沒有作用；TTL 1 秒是為了讓重連補撈拿得到剛發生的洞（同一秒內大量重連的人共用一份回應，不會一起打到 DB）
 	// 上限：快照最多舊 1 秒，所以接上 CDN 後，每次補撈最多可能漏最後約 1 秒；到時再決定補撈要不要繞過快取
@@ -112,10 +82,8 @@ func (this *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *ht
 
 // flow:
 // 取 user id（RequireAuth 放的）
-// 檢查 body
-// 限流
-// 存 DB（房間不存在 → 404、user 不存在 → 401）
-// 發到 Redis 廣播
+// 解析 body
+// 交給 use case（檢查內容、限流、存 DB、廣播）
 // 回 201
 func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request, roomPublicID string) {
 	userID, ok := requireUserID(w, r, this.logger)
@@ -129,54 +97,33 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// client 也會檢查，但那只是 UX；server 才是防線（curl 可以繞過 client）
-	// 只檢查、不改寫：存的是原始 content（不 trim、不正規化）
-	if err := textrule.MessageContent(req.Content); err != nil {
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
+	msg, err := this.messages.Post(r.Context(), roomPublicID, userID, req.Content)
+	var coded *model.CodedError
+	var limited *model.RateLimitedError
+	switch {
+	case errors.As(err, &coded):
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, coded)
 		return
-	}
-
-	// 在 DB 之前擋，不讓洗版的人讓 server 做白工
-	if !this.allow(w, r, userID) {
+	case errors.As(err, &limited):
+		writeTooManyRequests(w, limited.RetryAfter)
 		return
-	}
-
-	msg, banned, err := this.db.CreateMessage(r.Context(), roomPublicID, userID, req.Content)
-	if errors.Is(err, model.ErrRoomNotFound) {
+	case errors.Is(err, model.ErrRoomNotFound):
 		// 房間不存在或已刪除（兩者都不讓外人分辨）
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
-	}
-	if errors.Is(err, model.ErrMessageUserNotFound) {
+	case errors.Is(err, model.ErrMessageUserNotFound):
 		// user 已刪除但 access token 還沒過期：回跟 RequireAuth 一模一樣的 401
 		// client 會去 /refresh → refresh token 已經被 CASCADE 刪掉 → 401 → 跳登入
 		httpx.WriteUnauthorized(w)
 		return
-	}
-	if err != nil {
+	case err != nil:
 		this.logger.ErrorContext(r.Context(), "create message failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
-	// DB 已經存好了：廣播失敗只記 log、仍回 201（回 5xx 的話 client 重送會變成重複的訊息）
-	// 沒收到即時廣播的人下次載入歷史訊息時還是看得到
-	// 被 ban（shadow ban）的作者：訊息已存，照常回 201，但不廣播，別人看不到；對他自己看不出任何差別
-	if !banned {
-		this.broadcast(r.Context(), roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
-	}
-
 	// body 是 msg 本身，不是 envelope：envelope 是 WS 的格式
 	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, msg)
-}
-
-// CreateMessage 維持 request ctx：INSERT 之前 / 之中被取消 → 沒存也沒廣播，結果一致
-// broadcast 不跟著 request 取消：DB 已經 commit（副作用已發生），廣播是在完成這件事，
-// 不該因為發起的人走了就停，否則房間內的觀眾要到重連才看得到這則
-// WithoutCancel 會連 deadline 一起拿掉 → 自己加 publishTimeout，Redis 卡住時不會無限等
-// （client 在等 201，最多多等 500ms）；WithoutCancel 保留 ctx 的 value（request_id 等），log 仍串得起來
-func (this *MessageHandler) broadcast(ctx context.Context, roomPublicID string, env wsEnvelope) {
-	publishEnvelope(ctx, this.logger, this.redis, roomPublicID, env)
 }
 
 // 把 envelope 編碼後發到房間的 Redis channel；失敗只記 log 並計數、不回傳 error（呼叫端的 DB 已經 commit，沒有補救的辦法）
@@ -193,18 +140,4 @@ func publishEnvelope(ctx context.Context, logger *slog.Logger, pub messagePublis
 		prom.PublishFailedTotal.Inc()
 		logger.ErrorContext(ctx, "publish to redis failed", "error", err)
 	}
-}
-
-// 兩條規則都要問（不是第一條擋住就停）：被擋時 Retry-After 要給比較長的那個，
-// 只回短的 client 馬上重試又會被另一條擋
-// 回傳 true = 可以繼續；false = 已經回了 429，handler 要直接 return
-func (this *MessageHandler) allow(w http.ResponseWriter, r *http.Request, userID int64) bool {
-	value := strconv.FormatInt(userID, 10)
-	burstOK, burstRetry := checkRate(r, this.limiter, this.logger, messageBurstRule, value)
-	sustainOK, sustainRetry := checkRate(r, this.limiter, this.logger, messageSustainRule, value)
-	if burstOK && sustainOK {
-		return true
-	}
-	writeTooManyRequests(w, max(burstRetry, sustainRetry))
-	return false
 }

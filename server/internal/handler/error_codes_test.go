@@ -122,7 +122,7 @@ func TestUnauthorizedResponsesAreIdentical(t *testing.T) {
 			return authed(http.HandlerFunc(h.HandleCreateRoom), httptest.NewRequest(http.MethodPost, "/rooms", strings.NewReader(roomNameBody("room"))))
 		}},
 		{"valid token, user deleted: POST message", func() *httptest.ResponseRecorder {
-			h := NewMessageHandler(&fakeDBStore{createMsgErr: model.ErrMessageUserNotFound}, &fakeRedis{}, &fakeRateLimiter{})
+			h := newTestMessageHandler(&fakeDBStore{createMsgErr: model.ErrMessageUserNotFound}, &fakeRedis{}, &fakeRateLimiter{})
 			req := httptest.NewRequest(http.MethodPost, "/rooms/x/messages", strings.NewReader(contentBody("hi")))
 			req.SetPathValue("public_id", model.LegacyRoomPublicID)
 			return authed(http.HandlerFunc(h.HandleCreateRoomMessage), req)
@@ -156,7 +156,7 @@ func TestRoomNotFoundResponsesAreIdentical(t *testing.T) {
 			return serveGetRoom(newTestRoomHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound}), "missing")
 		}},
 		{"GET messages", func() *httptest.ResponseRecorder {
-			h := NewMessageHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound}, &fakeRedis{}, &fakeRateLimiter{})
+			h := newTestMessageHandler(&fakeDBStore{getRoomErr: model.ErrRoomNotFound}, &fakeRedis{}, &fakeRateLimiter{})
 			req := httptest.NewRequest(http.MethodGet, "/rooms/missing/messages", nil)
 			req.SetPathValue("public_id", "missing")
 			rec := httptest.NewRecorder()
@@ -164,7 +164,7 @@ func TestRoomNotFoundResponsesAreIdentical(t *testing.T) {
 			return rec
 		}},
 		{"POST message", func() *httptest.ResponseRecorder {
-			h := NewMessageHandler(&fakeDBStore{createMsgErr: model.ErrRoomNotFound}, &fakeRedis{}, &fakeRateLimiter{})
+			h := newTestMessageHandler(&fakeDBStore{createMsgErr: model.ErrRoomNotFound}, &fakeRedis{}, &fakeRateLimiter{})
 			return serveCreateRoomMessage(t, h, 7, "missing", contentBody("hi"))
 		}},
 	}
@@ -257,7 +257,7 @@ func TestInternalErrorDoesNotLeak(t *testing.T) {
 			return rec
 		}},
 		{"createMessage", func() *httptest.ResponseRecorder {
-			h := NewMessageHandler(&fakeDBStore{createMsgErr: leak}, &fakeRedis{}, &fakeRateLimiter{})
+			h := newTestMessageHandler(&fakeDBStore{createMsgErr: leak}, &fakeRedis{}, &fakeRateLimiter{})
 			return serveCreateRoomMessage(t, h, 7, "abcDEF12345", contentBody("hi"))
 		}},
 		{"createRoom", func() *httptest.ResponseRecorder {
@@ -296,7 +296,7 @@ func TestInvalidJSONCode(t *testing.T) {
 			return serveCreateRoom(t, newTestRoomHandler(&fakeDBStore{}), 7, broken)
 		}},
 		{"createMessage", func() *httptest.ResponseRecorder {
-			h := NewMessageHandler(&fakeDBStore{}, &fakeRedis{}, &fakeRateLimiter{})
+			h := newTestMessageHandler(&fakeDBStore{}, &fakeRedis{}, &fakeRateLimiter{})
 			return serveCreateRoomMessage(t, h, 7, "abcDEF12345", broken)
 		}},
 		{"logout", func() *httptest.ResponseRecorder {

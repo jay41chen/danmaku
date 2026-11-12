@@ -45,7 +45,7 @@ func main() {
 	// RedisStore 同時實作 Pub/Sub 和 rateLimiter，同一條連線共用
 	wsHandler := handler.NewWebsocketHandler(redis, db, tokens, handler.WithMaxClients(cfg.WSMaxClients))
 	msgDeps := messageDepsFor(db, redis, cfg.LoadtestTimingLog)
-	messageHandler := handler.NewMessageHandler(msgDeps.store, msgDeps.publisher, msgDeps.limiter)
+	messageHandler := handler.NewMessageHandler(usecase.NewMessageUseCase(msgDeps.store, handler.NewMessageNotifier(msgDeps.publisher), msgDeps.limiter))
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
 		messages: messageHandler,
@@ -61,8 +61,8 @@ func main() {
 	startServer(mux, cfg.Port, cfg.CORSOrigins)
 }
 
-// 訊息 handler 需要的三個依賴；型別是 handler 那邊 messageStore / messagePublisher / rateLimiter 的超集合，
-// 所以可以直接傳給 NewMessageHandler
+// 訊息 use case / notifier 需要的三個依賴；型別是 usecase 的 messageStore、handler 的 messagePublisher、ratelimit.Limiter 的超集合，
+// 所以可以直接傳給 NewMessageUseCase / NewMessageNotifier
 type messageStoreAPI interface {
 	CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, bool, error)
 	QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error)

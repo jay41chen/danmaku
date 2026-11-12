@@ -16,7 +16,13 @@ import (
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
+
+// 組真的 use case + 真的 notifier，只有 DB / Redis / limiter 是 fake：handler 測試測的是 HTTP 行為加上整條流程
+func newTestMessageHandler(db *fakeDBStore, redis *fakeRedis, limiter *fakeRateLimiter) *MessageHandler {
+	return NewMessageHandler(usecase.NewMessageUseCase(db, NewMessageNotifier(redis), limiter))
+}
 
 // 用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx（context key 沒有也不該 export setter）
 // RequireAuth 還是 stub 時會 panic：recover 成 test 失敗，不然整個 package 的 test 都會被中斷
@@ -63,7 +69,7 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("success returns 201 with message and publishes envelope", func(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created()}
 		redis := &fakeRedis{}
-		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, redis, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("哈哈"))
 
@@ -111,7 +117,7 @@ func TestCreateMessage(t *testing.T) {
 		defer cancel()
 		db := &fakeDBStore{createdMsg: created(), onCreateMessage: cancel}
 		redis := &fakeRedis{}
-		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, redis, &fakeRateLimiter{})
 		publicID := model.LegacyRoomPublicID
 		req := httptest.NewRequest(http.MethodPost, "/rooms/"+publicID+"/messages", strings.NewReader(contentBody("哈哈"))).WithContext(base)
 		req.SetPathValue("public_id", publicID)
@@ -164,7 +170,7 @@ func TestCreateMessage(t *testing.T) {
 		t.Run(tc.name+" returns 400", func(t *testing.T) {
 			db := &fakeDBStore{createdMsg: created()}
 			redis := &fakeRedis{}
-			h := NewMessageHandler(db, redis, &fakeRateLimiter{})
+			h := newTestMessageHandler(db, redis, &fakeRateLimiter{})
 
 			rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, tc.body)
 
@@ -194,7 +200,7 @@ func TestCreateMessage(t *testing.T) {
 	for _, tc := range valid {
 		t.Run(tc.name+" is stored as-is", func(t *testing.T) {
 			db := &fakeDBStore{createdMsg: created()}
-			h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+			h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 			rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody(tc.content))
 
@@ -211,7 +217,7 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("exactly 100 runes is ok", func(t *testing.T) {
 		content := strings.Repeat("哈", 100)
 		db := &fakeDBStore{createdMsg: created()}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody(content))
 
@@ -226,7 +232,7 @@ func TestCreateMessage(t *testing.T) {
 	// 判斷空白用 trim，但存進去的是原樣
 	t.Run("stores content untrimmed", func(t *testing.T) {
 		db := &fakeDBStore{createdMsg: created()}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("哈 "))
 
@@ -241,7 +247,7 @@ func TestCreateMessage(t *testing.T) {
 	t.Run("deleted user returns same 401 as RequireAuth", func(t *testing.T) {
 		db := &fakeDBStore{createMsgErr: model.ErrMessageUserNotFound}
 		redis := &fakeRedis{}
-		h := NewMessageHandler(db, redis, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, redis, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
@@ -264,7 +270,7 @@ func TestCreateMessage(t *testing.T) {
 
 	t.Run("db error returns 500", func(t *testing.T) {
 		redis := &fakeRedis{}
-		h := NewMessageHandler(&fakeDBStore{createMsgErr: errors.New("db down")}, redis, &fakeRateLimiter{})
+		h := newTestMessageHandler(&fakeDBStore{createMsgErr: errors.New("db down")}, redis, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
@@ -278,7 +284,7 @@ func TestCreateMessage(t *testing.T) {
 
 	// 已經存進 DB 了，廣播失敗不能讓 client 以為沒送出去（重送會變重複訊息）
 	t.Run("publish error still returns 201", func(t *testing.T) {
-		h := NewMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
+		h := newTestMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
@@ -287,7 +293,7 @@ func TestCreateMessage(t *testing.T) {
 		}
 	})
 	t.Run("publish error increments failure metric", func(t *testing.T) {
-		h := NewMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
+		h := newTestMessageHandler(&fakeDBStore{createdMsg: created()}, &fakeRedis{publishErr: errors.New("redis down")}, &fakeRateLimiter{})
 		before := counterValue(t, prom.PublishFailedTotal)
 
 		serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
@@ -300,7 +306,7 @@ func TestCreateMessage(t *testing.T) {
 	// handler 沒經過 RequireAuth（route 註冊錯）：fail closed 回 500，不存任何東西
 	t.Run("missing user id in context returns 500", func(t *testing.T) {
 		db := &fakeDBStore{}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 		req := httptest.NewRequest(http.MethodPost, "/rooms/abcDEF12345/messages", strings.NewReader(contentBody("hi")))
 		req.SetPathValue("public_id", "abcDEF12345")
 		rec := httptest.NewRecorder()
@@ -330,7 +336,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 			room: model.Room{ID: 9, PublicID: "abcDEF12345"},
 			msgs: []model.Message{{ID: 2, Content: "b"}, {ID: 1, Content: "a"}},
 		}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serve(h, "abcDEF12345")
 
@@ -354,18 +360,18 @@ func TestHandleGetRoomMessages(t *testing.T) {
 	})
 	t.Run("queries historyLimit messages", func(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 9}, msgs: []model.Message{}}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		serve(h, "abcDEF12345")
 
-		if db.gotQueryLimit != 100 || historyLimit != 100 {
-			t.Errorf("QueryMessage limit = %d (historyLimit = %d), want 100", db.gotQueryLimit, historyLimit)
+		if db.gotQueryLimit != 100 || usecase.HistoryLimit != 100 {
+			t.Errorf("QueryMessage limit = %d (historyLimit = %d), want 100", db.gotQueryLimit, usecase.HistoryLimit)
 		}
 	})
 	// 沒有發送者的訊息：user_id / username 要序列化成 null，不是省略也不是空字串
 	t.Run("user fields serialize as id/username or null", func(t *testing.T) {
 		uid, name := int64(7), "Jay"
-		h := NewMessageHandler(&fakeDBStore{msgs: []model.Message{
+		h := newTestMessageHandler(&fakeDBStore{msgs: []model.Message{
 			{ID: 2, UserID: &uid, Username: &name, Content: "hi"},
 			{ID: 1, Content: "old"},
 		}}, &fakeRedis{}, &fakeRateLimiter{})
@@ -389,7 +395,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 	})
 	t.Run("room not found returns 404", func(t *testing.T) {
 		db := &fakeDBStore{getRoomErr: model.ErrRoomNotFound}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serve(h, "zzzZZZ99999")
 
@@ -407,7 +413,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 	})
 	t.Run("other room lookup error returns 500", func(t *testing.T) {
 		db := &fakeDBStore{getRoomErr: errors.New("db down")}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serve(h, "abcDEF12345")
 
@@ -424,7 +430,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 	})
 	t.Run("query messages error returns 500", func(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 9}, err: errors.New("db down")}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serve(h, "abcDEF12345")
 
@@ -438,7 +444,7 @@ func TestHandleGetRoomMessages(t *testing.T) {
 	// 空房間：非 nil 的空 slice 會編成 []；不是 null（client 不用特別處理）
 	t.Run("empty room returns empty array", func(t *testing.T) {
 		db := &fakeDBStore{room: model.Room{ID: 9}, msgs: []model.Message{}}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serve(h, "abcDEF12345")
 
@@ -456,7 +462,7 @@ func TestHandleCreateRoomMessage(t *testing.T) {
 
 	t.Run("success passes path public id and returns 201", func(t *testing.T) {
 		db := &fakeDBStore{createdMsg: model.Message{ID: 42, Content: "hi"}}
-		h := NewMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
+		h := newTestMessageHandler(db, &fakeRedis{}, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, "abcDEF12345", contentBody("hi"))
 
@@ -469,7 +475,7 @@ func TestHandleCreateRoomMessage(t *testing.T) {
 	})
 	t.Run("room not found returns 404 and does not publish", func(t *testing.T) {
 		redis := &fakeRedis{}
-		h := NewMessageHandler(&fakeDBStore{createMsgErr: model.ErrRoomNotFound}, redis, &fakeRateLimiter{})
+		h := newTestMessageHandler(&fakeDBStore{createMsgErr: model.ErrRoomNotFound}, redis, &fakeRateLimiter{})
 
 		rec := serveCreateRoomMessage(t, h, userID, "zzzZZZ99999", contentBody("hi"))
 
@@ -484,8 +490,8 @@ func TestHandleCreateRoomMessage(t *testing.T) {
 
 func TestCreateMessageRateLimit(t *testing.T) {
 	const userID = int64(7)
-	burstKey := messageBurstRule.key(strconv.FormatInt(userID, 10))
-	sustainKey := messageSustainRule.key(strconv.FormatInt(userID, 10))
+	burstKey := usecase.MessageBurstRule.Key(strconv.FormatInt(userID, 10))
+	sustainKey := usecase.MessageSustainRule.Key(strconv.FormatInt(userID, 10))
 
 	cases := []struct {
 		name           string
@@ -504,7 +510,7 @@ func TestCreateMessageRateLimit(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &fakeDBStore{}
-			h := NewMessageHandler(db, &fakeRedis{}, tc.limiter)
+			h := newTestMessageHandler(db, &fakeRedis{}, tc.limiter)
 
 			rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
@@ -534,7 +540,7 @@ func TestCreateMessageBannedAuthorGets201WithoutPublish(t *testing.T) {
 	run := func(banned bool, limiter *fakeRateLimiter) (*httptest.ResponseRecorder, *fakeRedis, *fakeDBStore) {
 		db := &fakeDBStore{createdMsg: msg, createBanned: banned}
 		redis := &fakeRedis{}
-		h := NewMessageHandler(db, redis, limiter)
+		h := newTestMessageHandler(db, redis, limiter)
 		return serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("哈哈")), redis, db
 	}
 
@@ -558,7 +564,7 @@ func TestCreateMessageBannedAuthorGets201WithoutPublish(t *testing.T) {
 	}
 
 	// 限流對被 ban 的人一樣有效
-	limiter := &fakeRateLimiter{blockKey: messageBurstRule.key(strconv.FormatInt(userID, 10)), retryAfter: time.Second}
+	limiter := &fakeRateLimiter{blockKey: usecase.MessageBurstRule.Key(strconv.FormatInt(userID, 10)), retryAfter: time.Second}
 	rec, _, _ := run(true, limiter)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Errorf("rate-limited banned author status = %d, want 429", rec.Code)
@@ -568,15 +574,15 @@ func TestCreateMessageBannedAuthorGets201WithoutPublish(t *testing.T) {
 // 發彈幕的限流規則鎖住：burst 3 次 / 1 秒、sustain 20 次 / 10 秒；兩條都問 limiter，key 是 user id
 func TestCreateMessageRateLimitRules(t *testing.T) {
 	const userID = int64(7)
-	if messageBurstRule.limit != 3 || messageBurstRule.window != time.Second {
-		t.Errorf("burst rule = %d / %v, want 3 / 1s", messageBurstRule.limit, messageBurstRule.window)
+	if usecase.MessageBurstRule.Limit != 3 || usecase.MessageBurstRule.Window != time.Second {
+		t.Errorf("burst rule = %d / %v, want 3 / 1s", usecase.MessageBurstRule.Limit, usecase.MessageBurstRule.Window)
 	}
-	if messageSustainRule.limit != 20 || messageSustainRule.window != 10*time.Second {
-		t.Errorf("sustain rule = %d / %v, want 20 / 10s", messageSustainRule.limit, messageSustainRule.window)
+	if usecase.MessageSustainRule.Limit != 20 || usecase.MessageSustainRule.Window != 10*time.Second {
+		t.Errorf("sustain rule = %d / %v, want 20 / 10s", usecase.MessageSustainRule.Limit, usecase.MessageSustainRule.Window)
 	}
 
 	limiter := &fakeRateLimiter{}
-	h := NewMessageHandler(&fakeDBStore{}, &fakeRedis{}, limiter)
+	h := newTestMessageHandler(&fakeDBStore{}, &fakeRedis{}, limiter)
 
 	rec := serveCreateRoomMessage(t, h, userID, model.LegacyRoomPublicID, contentBody("hi"))
 
@@ -584,7 +590,7 @@ func TestCreateMessageRateLimitRules(t *testing.T) {
 		t.Fatalf("status = %d, want 201", rec.Code)
 	}
 	id := strconv.FormatInt(userID, 10)
-	if want := []string{messageBurstRule.key(id), messageSustainRule.key(id)}; !slices.Equal(limiter.allowKeys, want) {
+	if want := []string{usecase.MessageBurstRule.Key(id), usecase.MessageSustainRule.Key(id)}; !slices.Equal(limiter.allowKeys, want) {
 		t.Errorf("allow keys = %v, want %v", limiter.allowKeys, want)
 	}
 	if want := []int{3, 20}; !slices.Equal(limiter.allowLimits, want) {

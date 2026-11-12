@@ -44,7 +44,7 @@ func (rejectAllParser) ParseAccessToken(token string) (int64, error) {
 func newTestMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	registerRoutes(mux, rejectAllParser{}, appHandlers{
-		messages: handler.NewMessageHandler(nil, nil, nil),
+		messages: handler.NewMessageHandler(nil),
 		rooms:    handler.NewRoomHandler(nil),
 		roles:    handler.NewRoleHandler(nil),
 		health:   handler.NewHealthHandler(healthyDB{}, healthyRedis{}),

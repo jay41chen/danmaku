@@ -47,6 +47,24 @@ func NewRoomNotifier(pub messagePublisher) *RoomNotifier {
 	}
 }
 
+// 同 NewRoomNotifier，但 log 的 component 是 messages：訊息廣播失敗的 log 維持原本 messages handler 的 component
+func NewMessageNotifier(pub messagePublisher) *RoomNotifier {
+	return &RoomNotifier{
+		pub:    pub,
+		logger: slog.Default().With("component", "messages"),
+	}
+}
+
+// 廣播新訊息（WS 的 message envelope）
+// CreateMessage 維持 request ctx：INSERT 之前 / 之中被取消 → 沒存也沒廣播，結果一致
+// 廣播不跟著 request 取消：DB 已經 commit（副作用已發生），廣播是在完成這件事，
+// 不該因為發起的人走了就停，否則房間內的觀眾要到重連才看得到這則
+// WithoutCancel 會連 deadline 一起拿掉 → publishEnvelope 自己加 publishTimeout，Redis 卡住時不會無限等
+// （client 在等 201，最多多等 500ms）；WithoutCancel 保留 ctx 的 value（request_id 等），log 仍串得起來
+func (this *RoomNotifier) NotifyMessage(ctx context.Context, roomPublicID string, msg model.Message) {
+	publishEnvelope(ctx, this.logger, this.pub, roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
+}
+
 // 廣播 user_hidden；失敗只記 log（publishEnvelope），不重試，也不影響已 commit 的角色變更
 func (this *RoomNotifier) NotifyUserHidden(ctx context.Context, roomPublicID string, userID int64) {
 	publishEnvelope(ctx, this.logger, this.pub, roomPublicID, userHiddenEnvelope(userID))
