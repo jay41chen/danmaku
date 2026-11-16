@@ -14,7 +14,7 @@
 | M6 壓測基準 ✅ | 本機 Mac 跑 `server/cmd/loadtest`（`e3a7b53`）：純寫入 100 則／秒 `POST` p99 5.7～6.6 ms（3 次），遠低於 200 ms → **不做 M7**；混合情境到 2,500 人 × 100 則都有效，寫入都在 3 ms 以下、不隨負載變慢，沒等過連線，CPU 花在發送（人數 × 則數）；5,000 人 × 100 則（50 萬 frame／秒）兩次都垮：同一台 Mac 先卡住（證據指向核心網路記憶體耗盡），第二次一台 server 因為卡在 kernel 的寫入用光 thread 而 crash（5,000 人 × 10 則有效）（2026-11-16 完成，[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)） | 0.5 ～ 0.75 | 11/16 |
 | M6.5 結構整理 ✅ | `main.go` 移到 `cmd/server/`；所有業務操作進 use case 層（一個領域一個 struct，不碰 HTTP；`/healthcheck`、`/metrics`、middleware 不用進），handler 測試的斷言不改（只換建構方式）、當作行為沒變的證據；順序：角色 → 房間 → 彈幕 → WS `join` → auth（有 timing 防護，最後做），一個領域一個 commit；角色那條由自己寫當範本，其他照範本做。進度：角色 ✅、`cmd/server` ✅、房間 ✅（2026-11-11；房名規則搬到 `internal/textrule`，額度 `model.MaxRoomsPerUser`）、彈幕 ✅（限流機制抽成 `internal/ratelimit`，規則和歷史則數由 use case 擁有）、metric facade ✅（2026-11-12）、WS `join` ✅（2026-11-13；沿用 `RoomUseCase.GetRoom`，Redis 訂閱 / Hub 留在 handler）、auth ✅（2026-11-16；register / login，IP 限流拆成 `CheckLoginIP` → decode → `Login`；refresh / logout 同樣拆法，`/me` 和 WS auth 共用 `CurrentUser`；2026-11-16 完成，[ADR 0013](docs/design/0013-use-case-layer.md)） | 0.5 ～ 1 | 11/16 |
 | ~~M7 寫入路徑~~ 不做 | 彈幕非同步保存：M6 量出寫入不是瓶頸（[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)），不做；真實流量顯示要優化時，先看發送（fan-out），不是寫入 | — | — |
-| M8 依人數排序 | 房間列表依人數排序（從 M2 移出，見下方 W4b） | 0.5 ～ 0.75 | 11/20 ～ 11/22 |
+| M8 依人數排序 ✅ | `GET /rooms?sort=viewers` 前 N 名（不分頁）+ 首頁「熱門」區塊（每 30 秒刷新）。排行是 Redis Sorted Set `room:viewer_ranking`，presence worker 每次算完人數就寫；房間還在不在榜上看 `room:<id>:members` 存不存在，讀的人順手 `ZREM`。實測（本機、單次）：觀眾離開後下一次讀取就消失（約 10 ms）；持有唯一觀眾的 server 被 `kill -9` 後，另一台 28.6 秒後不再列出（理論 20～30 秒）（2026-11-16 完成，[ADR 0015](docs/design/0015-popular-rooms-ranking.md)） | 0.5 ～ 0.75 | 11/16 |
 | M9 最小 CI | 精簡 GitHub Actions（只跑測試，不擋部署、不走 PR）+ multi-stage Dockerfile | 0.1 ～ 0.25 | 11/21 ～ 11/24 |
 | M10 驗收 | 本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞）+ 重跑 M6 的壓測，檢查不漏訊息、人數恢復、重連成功。先修壓測工具（M6 留下的）：校準「其他程式」CPU 門檻（疑似算到 Docker Desktop VM）後重跑 `fanout` / `rooms`；清理要等進行中的 `POST` 結束；server 中途死掉時工具算出負的 CPU。本機 25 萬 frame／秒正常、50 萬會垮（上限在中間某處），更高的級別要用多房間或低速率。加一項（Q415）：Linux 容器裡的 server 遇到不讀資料的 client，`writeWait` / outbox 踢人有沒有生效、thread 數會不會暴增（驗 W6 的 crash known issue） | 0.75 ～ 1 | 11/26 ～ 12/1 |
 
@@ -154,7 +154,7 @@
     - Cursor pagination（keyset）：`ORDER BY created_at DESC, public_id DESC`，`public_id` 當 tiebreaker；撈 `limit+1` 判斷有沒有下一頁，cursor = 最後一筆回傳的；migration 000013 partial index `rooms(created_at, public_id) WHERE deleted_at IS NULL`（見 go-notes 3.37）
     - Page token：base64url 的 JSON `{v, created_at, public_id}`，對 client opaque；decode 嚴格（不認識的欄位、後面多接資料、版本、零值時間、public_id 格式 → `400 invalid cursor`）。`limit` 預設 20、最多 50（`model.MaxRoomListLimit`）
     - `GET /me/rooms` 也走同一套分頁（雖然未刪除的最多 3 筆）：之後列出已刪除房間（恢復功能）時不用改格式
-    - [ ] Viewer 數排序 → M8（2026-11-04 從 M2 移過來）。要先解決：目前人數只推給房內觀眾，`GET /rooms` 拿不到；沒有觀眾的 server 不會算那間房，要有人清掉過期的數字；人數一直變，現在的 `(created_at, public_id)` cursor 不能直接沿用
+    - [x] Viewer 數排序 → M8（2026-11-04 從 M2 移過來；2026-11-16 完成，只排前 N 名，見 [ADR 0015](docs/design/0015-popular-rooms-ranking.md)）。當初要先解決的：目前人數只推給房內觀眾，`GET /rooms` 拿不到；沒有觀眾的 server 不會算那間房，要有人清掉過期的數字；人數一直變，現在的 `(created_at, public_id)` cursor 不能直接沿用
     - Known issue（先不處理，2026-11-04）：`/me/rooms` 沒有 `(owner_id, created_at, public_id)` index。`danmaku_test` 強制關掉 seq scan 跑 `EXPLAIN`：planner 沿著 `rooms_created_at_public_id_idx` 倒著走、逐筆 `Filter: owner_id`，資料多、自己的房間又很舊時要掃過大部分的表；另一條路 `rooms_owner_id_idx` 只照 owner_id 排，還要 Sort。未刪除的最多 3 間，但被刪除的會一直累積（見下方 soft delete 的 known issue）。等有資料量能用 `EXPLAIN ANALYZE` 量出差別再加；加的時候要考慮：partial `WHERE deleted_at IS NULL` 與否、`rooms_owner_id_idx` 能不能 drop（`ON DELETE RESTRICT` 的 FK 檢查也會用到它，而且包含已刪除的房間）
   - [x] 選房間的 UI（M1 前端，2026-11-04）：「所有房間」+ 登入後的「我的房間」，每個房間是 `?room=<public_id>` 連結（整頁重載，沿用原本換房方式）；「載入更多」用 `next_page_token`；房名用 `<bdi>` + overflow 隔離
     - 建立房間的 UI 還沒有（只能打 `POST /rooms`）→ 之後需要時再做
@@ -265,6 +265,8 @@
 ## Backlog
 
 > 知道、刻意先不做（2026-11-03 從 W5 移入）
+
+- [ ] 熱門排行分頁（2026-11-16，M8 只做前 N 名）：每分鐘一份排行快照，cursor = 快照版本 + 名次。要處理：快照放 Redis 讓所有 server 看得到（翻頁可能換台）；翻到一半快照換新（舊快照多留一陣子，或回錯誤從頭翻）；誰產生快照（`SET NX` 搶，或結果跟誰做無關）；0 人的房間接在後面照建立時間排，cursor 要分兩段；列表人數最舊 1 分鐘、房內 5 秒，會對不上。等第 50 名之後真的有人在翻再做
 
 - [ ] 用 k6 寫壓測情境（2026-11-06，M6 決定先用 Go 自己寫）：業界常見，之後想學工具或壓 HTTP API 時再試
 

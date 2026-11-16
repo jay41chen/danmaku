@@ -15,7 +15,7 @@
 - **帳號**：註冊 / 登入、JWT access token、會 rotate 的 refresh token（偵測 token 被偷）
 - 不登入也能看；在已經連上的 WebSocket 裡登入就會升級身分
 - **自動恢復**：client 重連後補上最新訊息；server 收不到 Redis 訊息時會自己發現並恢復
-- **房間人數**：跨 server 計算，多個分頁算一人；掛掉的 server 上的觀眾會自己過期
+- **房間人數**：跨 server 計算，多個分頁算一人；掛掉的 server 上的觀眾會自己過期。首頁把人最多的房間排在前面
 - **防濫用**：按 user、IP、username（登入）限流；登入防帳號列舉（timing）；認得 Unicode 的輸入驗證
 - **可維運**：JSON 結構化 log + request ID（WebSocket 也串得起來）、Prometheus metrics、panic recovery、graceful shutdown、啟動時自動跑 migration
 
@@ -37,6 +37,7 @@
 | 房主擋不了搗亂的人，而舊計畫的全站記憶體封鎖又和每間房各自的角色對不上 | 房間級 shadow ban，讀取時才過濾，誤 ban 可以完全復原；`room_roles` 一人一列；階級規則集中在一個預設拒絕的純函式；檢查順序讓一般觀眾無法探測 user；所有 API 都不會告訴他被 ban。用兩台 server + 真 Redis 和瀏覽器實測 | [0012](docs/design/0012-room-moderation.md) |
 | 業務規則散在 handler 和 store；HTTP 和 WebSocket 各自直接呼叫 store 查「房間存在」「這個 user 是誰」，timing 防護的測試還得透過 HTTP 才測得到 | 每個領域一個 use case，不碰 HTTP、SQL、WebSocket 格式；handler 只留傳輸層的事（client IP、連線狀態、保護讀取迴圈的 timeout）。行為不變靠三件事：handler 斷言不改、先在舊 code 上跑過的 characterization test、mutation testing | [0013](docs/design/0013-use-case-layer.md) |
 | 聊天類系統常把寫入改成非同步，代價是可能「已廣播但沒存到」 | 先量再決定：100 則／秒時 `POST` p99 約 6 ms，到 2,500 人 × 100 則／秒寫入都在 3 ms 以下、不隨負載變慢，CPU 花在發送給每個觀眾。維持同步寫入。5,000 人 × 100 則時測試用的 Mac 先卡住（證據指向核心網路記憶體耗盡），其中一台 server 因為卡住的寫入用光 thread 而 crash | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
+| 依人數排序要把人數存起來，而且沒人看的房間要能自己從榜上消失，不需要有人發現「它沒人了」 | 一個 Redis Sorted Set 存人數，每次算完就寫；房間只要 presence key 還在就留在榜上，最後一個人離開，或持有最後觀眾的 server 掛掉時，這個 key 都會自己消失，所以由讀的人順手清。只排前 N 名：人數一直在變，用它當 cursor 會漏或重複 | [0015](docs/design/0015-popular-rooms-ranking.md) |
 
 ## 架構
 
@@ -111,7 +112,7 @@ flowchart LR
 
 ## 進度
 
-2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性，以及上面那些強化。接下來：壓測基準，然後依數字決定要不要做非同步保存。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
+2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數和熱門排行、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性、壓測基準（寫入維持同步），以及上面那些強化。接下來：最小 CI，然後是腳本化的故障情境。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
 
 ## Tech Stack
 
@@ -220,7 +221,7 @@ cd server && go build -o /tmp/loadtest ./cmd/loadtest
 | 任何 method | `/messages` | | **已移除**：回 `410 Gone`，請改用 `/rooms/{public_id}/messages` |
 | `POST` | `/rooms` | ✓ | 建立房間 `{"room_name": "..."}`：1～30 字（彈幕的 100 字也一樣：以 Unicode code point 計，❤️ = U+2764 + U+FE0F 算 2 個），字元規則同彈幕，另外**頭尾不可有空白**（不幫忙 trim，直接回 `400`）、不可有連續空白、不可有超過 2 個連續的 combining mark；每個 user 最多 3 個未刪除的房間，超過回 `403`。成功回 `201` + 房間 `{"public_id", "room_name", "owner_username", "created_at"}` |
 | `GET` | `/rooms/{public_id}` | | 查房間；不存在或已刪除一律回 `404` |
-| `GET` | `/rooms` | | 房間列表（未刪除，新的在前），cursor 分頁：`?limit=`（預設 20、最多 50）、`?page_token=`（上一頁回的 `next_page_token`，原樣帶回）。回 `{"rooms": [{"room_name", "public_id"}], "next_page_token"}`，沒有下一頁時不帶 `next_page_token`；`limit` 不合法回 `400`（`invalid_limit`），token 不合法回 `400`（`invalid_cursor`） |
+| `GET` | `/rooms` | | 房間列表（未刪除，新的在前），cursor 分頁：`?limit=`（預設 20、最多 50）、`?page_token=`（上一頁回的 `next_page_token`，原樣帶回）。回 `{"rooms": [{"room_name", "public_id"}], "next_page_token"}`，沒有下一頁時不帶 `next_page_token`；`limit` 不合法回 `400`（`invalid_limit`），token 不合法回 `400`（`invalid_cursor`）。`?sort=viewers`：人最多的房間在前，每筆多 `viewer_count`，`limit` 規則同上，不分頁（帶 `page_token` 回 `400 page_token_not_supported`），`sort` 其他值回 `400 invalid_sort`，讀不到排行回 `503 viewer_ranking_unavailable` |
 | `GET` | `/me/rooms` | ✓ | 自己的房間列表，參數和回應同 `GET /rooms`。`Cache-Control: no-store` |
 | `GET` | `/rooms/{public_id}/me` | ✓ | 自己在這間房的角色 `{"role": "owner" \| "moderator" \| "viewer"}`；被 ban 的人也回 `viewer`。`Cache-Control: no-store` |
 | `GET` | `/rooms/{public_id}/roles` | ✓ | 房管和被 ban 的人（只有房主和房管能看，否則 `403 room_forbidden`），分頁參數同 `GET /rooms`。回 `{"roles": [{"user_id", "username", "role", "assigned_by", "assigned_by_username", "created_at"}], "next_page_token"}`。`Cache-Control: no-store` |

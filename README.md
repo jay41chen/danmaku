@@ -20,7 +20,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 - Anonymous viewers can watch; logging in over the open WebSocket upgrades the connection
 - **Recovery**: clients catch up on the latest messages after reconnecting; a server that stops receiving from Redis detects it and recovers by itself
 - **Viewer count** per room across servers: several tabs count as one person; viewers on a dead server
-  expire on their own
+  expire on their own. The home page lists the most-watched rooms first
 - **Abuse protection**: rate limits per user, per IP and per username (login); timing-safe login against
   account enumeration; Unicode-aware input validation
 - **Operability**: structured JSON logs with request IDs (also across WebSocket), Prometheus metrics,
@@ -44,6 +44,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | Room owners couldn't stop a troll, and the old plan's site-wide, in-memory ban didn't fit per-room roles | Room-level shadow bans filtered at read time, so a mistaken ban is fully reversible; one `room_roles` row per person; hierarchy rules in one fail-closed pure function; checks ordered so a viewer can't probe users; no API response tells a banned user. Verified across two servers with real Redis and in a browser | [0012](docs/design/0012-room-moderation.md) |
 | Business rules were spread across handlers and the store; the HTTP and WebSocket paths each called the store directly for "room exists" / "who is this user", and a timing-protection test had to go through HTTP | One use case per domain with no HTTP, SQL or WebSocket format; handlers keep transport work (client IP, connection state, read-loop timeouts). Behavior preserved by unchanged handler assertions, characterization tests run on the old code first, and mutation testing | [0013](docs/design/0013-use-case-layer.md) |
 | Chat systems often make writes asynchronous, at the cost of messages that are broadcast but never stored | Measured first: at 100 msg/s `POST` p99 was about 6 ms, writes stayed under 3 ms and did not slow down up to 2,500 viewers × 100 msg/s, and the CPU went to fan-out. Kept synchronous writes. At 5,000 × 100 the test Mac stalled first (the evidence points to kernel network memory running out), and one server crashed from stuck writes using up its threads | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
+| Sorting rooms by viewers needs the counts stored somewhere, and a room nobody watches any more must drop off without anyone noticing it went quiet | One Redis sorted set of counts, written after each count; a room stays on it only while its presence key exists, which disappears on its own both when the last viewer leaves and when the server holding the last viewers dies, so readers clean up lazily. Top N only: a cursor over numbers that keep changing would skip or repeat rooms | [0015](docs/design/0015-popular-rooms-ranking.md) |
 
 ## Architecture
 
@@ -152,9 +153,9 @@ flowchart LR
 ## Status
 
 Started 2026-10-08. Done so far: real-time messaging across multiple servers, auth with refresh-token
-rotation, rooms with a paginated room list, cross-server viewer counts, recovery from missed messages, room
-roles and shadow bans, rate limiting, observability, and the hardening described above. Next: a load-test
-baseline, then async persistence if the numbers call for it. See the
+rotation, rooms with a paginated room list, cross-server viewer counts with a popular-rooms ranking, recovery from missed messages, room
+roles and shadow bans, rate limiting, observability, a load-test baseline (writes stay synchronous), and the
+hardening described above. Next: a minimal CI, then scripted fault scenarios. See the
 [milestones in ROADMAP.md](ROADMAP.md#milestones2026-11-03-訂暫定) (in Chinese).
 
 ## Getting started
@@ -220,7 +221,7 @@ Usage is in the [Chinese README](README.zh-TW.md).
 | `GET` | `/me` | ✓ | current user |
 | `POST` | `/rooms` | ✓ | create a room |
 | `GET` | `/rooms/{public_id}` | | room info |
-| `GET` | `/rooms` | | list rooms, newest first (cursor pagination: `limit`, `page_token`) |
+| `GET` | `/rooms` | | list rooms, newest first (cursor pagination: `limit`, `page_token`); `?sort=viewers` returns the most-watched rooms with `viewer_count`, no pagination (`page_token` → `400`), `503` if the ranking can't be read |
 | `GET` | `/me/rooms` | ✓ | list my rooms (same pagination) |
 | `GET` | `/rooms/{public_id}/me` | ✓ | my role in this room |
 | `GET` | `/rooms/{public_id}/roles` | ✓ | moderators and bans, for the owner and moderators (same pagination) |
