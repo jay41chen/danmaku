@@ -21,5 +21,6 @@ fault-injection experiment.
 | [0013](0013-use-case-layer.md) | A use case layer between handlers and stores | clean architecture, what stays in the transport layer, ordering vs pairing rules, characterization tests, when to extract |
 | [0014](0014-load-baseline-keep-sync-writes.md) | Load baseline: keep synchronous writes, the cost is fan-out | measure before building, coordinated omission, fan-out cost, shared kernel buffers, test-rig limits |
 | [0015](0015-popular-rooms-ranking.md) | Popular rooms: a ranking that borrows presence as its heartbeat | derived data, one source of truth for liveness, lazy cleanup, consistency without atomicity, why not paginate a moving ranking |
+| [0016](0016-minimal-ci.md) | Minimal CI that can't pass by testing nothing, and a runtime image with only the binary | skip vs fail, test-order dependencies, fresh environments, multi-stage builds, distroless, static linking, build context |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.

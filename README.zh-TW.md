@@ -38,6 +38,7 @@
 | 業務規則散在 handler 和 store；HTTP 和 WebSocket 各自直接呼叫 store 查「房間存在」「這個 user 是誰」，timing 防護的測試還得透過 HTTP 才測得到 | 每個領域一個 use case，不碰 HTTP、SQL、WebSocket 格式；handler 只留傳輸層的事（client IP、連線狀態、保護讀取迴圈的 timeout）。行為不變靠三件事：handler 斷言不改、先在舊 code 上跑過的 characterization test、mutation testing | [0013](docs/design/0013-use-case-layer.md) |
 | 聊天類系統常把寫入改成非同步，代價是可能「已廣播但沒存到」 | 先量再決定：100 則／秒時 `POST` p99 約 6 ms，到 2,500 人 × 100 則／秒寫入都在 3 ms 以下、不隨負載變慢，CPU 花在發送給每個觀眾。維持同步寫入。5,000 人 × 100 則時測試用的 Mac 先卡住（證據指向核心網路記憶體耗盡），其中一台 server 因為卡住的寫入用光 thread 而 crash | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
 | 依人數排序要把人數存起來，而且沒人看的房間要能自己從榜上消失，不需要有人發現「它沒人了」 | 一個 Redis Sorted Set 存人數，每次算完就寫；房間只要 presence key 還在就留在榜上，最後一個人離開，或持有最後觀眾的 server 掛掉時，這個 key 都會自己消失，所以由讀的人順手清。只排前 N 名：人數一直在變，用它當 cursor 會漏或重複 | [0015](docs/design/0015-popular-rooms-ranking.md) |
+| 測試只在本機 hook 跑；integration test 缺 DB 環境變數時會 skip，CI 設錯也是全綠、但什麼都沒測 | CI 起真的 Postgres 和 Redis；有 `CI` 環境變數時缺測試變數直接 fail，本機照舊 skip。第一次跑就抓到一個測試 package 只是靠別的 package 先 migrate 了本機 DB 才會過。image 從 1.87 GB（整套 toolchain、root）降到 39.8 MB（distroless 上的靜態執行檔、non-root） | [0016](docs/design/0016-minimal-ci.md) |
 
 ## 架構
 
@@ -107,12 +108,12 @@ flowchart LR
 ## 怎麼做的
 
 - 每個改動都走「設計 → 實作 → 獨立審查」；修正用 **mutation testing** 驗證：故意把 code 改壞，確認有 test 會 fail
-- Integration test 打真的 PostgreSQL 和 Redis，並開 `-race`
+- Integration test 打真的 PostgreSQL 和 Redis，並開 `-race`；push 前在本機跑，push 後在 GitHub Actions 用全新的 DB 再跑一次，CI 上缺測試 DB 會 fail 而不是 skip
 - 問題先在本機重現再修：讓 Redis 暫停（`CLIENT PAUSE`）、用 proxy 丟包、砍掉 Pub/Sub 連線、永遠不讀的 client
 
 ## 進度
 
-2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數和熱門排行、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性、壓測基準（寫入維持同步），以及上面那些強化。接下來：最小 CI，然後是腳本化的故障情境。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
+2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數和熱門排行、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性、壓測基準（寫入維持同步）、server CI，以及上面那些強化。接下來：腳本化的故障情境。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
 
 ## Tech Stack
 
@@ -121,7 +122,7 @@ flowchart LR
 - **Database**: PostgreSQL 17
 - **Cache**: Redis 7 (Pub/Sub)
 - **Reverse Proxy**: Nginx 1.27
-- **Infrastructure**: Docker Compose
+- **Infrastructure**: Docker Compose；GitHub Actions（server CI）
 - **Observability (local dev)**: Promtail → Loki → Grafana, Prometheus → Grafana
 - **Middleware**: Request ID → Request logging → Metrics → Panic recovery → CORS（`net/http` + 自製 chain）
 - **Metrics labels**：`http_requests_total` / `http_request_duration_seconds` 的 `path` 是 route pattern（如 `/rooms/{public_id}`，沒比對到 route 記成 `unmatched`），`method` 只收 HTTP 標準的九個（其他記成 `other`）；label 值不由 client 決定，避免被亂打 URL 撐爆 time series
@@ -370,7 +371,8 @@ Observability stack（Loki、Promtail、Grafana、Prometheus）只存在於 loca
 | | 平台 | 觸發方式 |
 |---|---|---|
 | Frontend | GitHub Pages | push 到 `dev` 且有改到 `client/**`（`.github/workflows/deploy-frontend.yml`），也可在 Actions 手動跑 `workflow_dispatch`；`VITE_API_URL` / `VITE_WS_URL` 放在 GitHub Secrets |
-| Backend | Railway（`danmaku` service + PostgreSQL + Redis） | push 到 `dev` 由 Railway 自動 build `server/Dockerfile` 並部署；migration 在 server 啟動時自動套用 |
+| Backend | Railway（`danmaku` service + PostgreSQL + Redis） | push 到 `dev` 由 Railway 自動 build `server/Dockerfile` 並部署；migration 在 server 啟動時自動套用。目前停用（試用期已過）；image 入口是 `/server`，重新啟用時若有自訂 start command 要跟著改 |
+| Server CI | GitHub Actions | push 到 `dev` 且有改到 `server/**`（`.github/workflows/server-ci.yml`）：測試（Postgres、Redis 用 service container）+ `docker build`，不擋部署 |
 
 Railway 上的 env（`DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、`CORS_ORIGINS`、`CLIENT_IP_HEADER=X-Real-IP`）都在 dashboard 設定，**不進 repo**。`JWT_SECRET` 沒設時新版會 fail fast 起不來，部署前先確認。
 

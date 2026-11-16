@@ -45,6 +45,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | Business rules were spread across handlers and the store; the HTTP and WebSocket paths each called the store directly for "room exists" / "who is this user", and a timing-protection test had to go through HTTP | One use case per domain with no HTTP, SQL or WebSocket format; handlers keep transport work (client IP, connection state, read-loop timeouts). Behavior preserved by unchanged handler assertions, characterization tests run on the old code first, and mutation testing | [0013](docs/design/0013-use-case-layer.md) |
 | Chat systems often make writes asynchronous, at the cost of messages that are broadcast but never stored | Measured first: at 100 msg/s `POST` p99 was about 6 ms, writes stayed under 3 ms and did not slow down up to 2,500 viewers × 100 msg/s, and the CPU went to fan-out. Kept synchronous writes. At 5,000 × 100 the test Mac stalled first (the evidence points to kernel network memory running out), and one server crashed from stuck writes using up its threads | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
 | Sorting rooms by viewers needs the counts stored somewhere, and a room nobody watches any more must drop off without anyone noticing it went quiet | One Redis sorted set of counts, written after each count; a room stays on it only while its presence key exists, which disappears on its own both when the last viewer leaves and when the server holding the last viewers dies, so readers clean up lazily. Top N only: a cursor over numbers that keep changing would skip or repeat rooms | [0015](docs/design/0015-popular-rooms-ranking.md) |
+| Tests ran only in a local hook, and integration tests skip when their database variables are missing, so a misconfigured CI would be green while testing nothing | CI with real Postgres and Redis; a missing test variable fails when `CI` is set and skips locally. The first run caught a test package that only passed because another package had migrated the local database first. The image went from 1.87 GB (toolchain, root) to 39.8 MB (static binary on distroless, non-root) | [0016](docs/design/0016-minimal-ci.md) |
 
 ## Architecture
 
@@ -138,7 +139,8 @@ flowchart LR
 
 - Every change goes through design → implementation → independent review. Fixes are checked with
   **mutation testing**: deliberately break the code and confirm some test fails.
-- Integration tests run against real PostgreSQL and Redis, with `-race`.
+- Integration tests run against real PostgreSQL and Redis, with `-race`, locally before each push and in
+  GitHub Actions on a fresh database, where a missing test database fails instead of skipping.
 - Failure modes were reproduced locally before being fixed: pausing Redis (`CLIENT PAUSE`), dropping
   packets through a proxy, killing the Pub/Sub connection, and clients that never read.
 
@@ -147,15 +149,15 @@ flowchart LR
 - **Backend**: Go (`net/http`, gorilla/websocket, pgx, go-redis), golang-migrate, JWT (HS256), bcrypt
 - **Frontend**: React + TypeScript + Vite
 - **Data**: PostgreSQL 17, Redis 7 (Pub/Sub, rate limiting)
-- **Infra**: Docker Compose, Nginx; Railway (backend) + GitHub Pages (frontend)
+- **Infra**: Docker Compose, Nginx; Railway (backend) + GitHub Pages (frontend); GitHub Actions (server CI)
 - **Observability**: slog JSON logs; Prometheus + Grafana, Promtail + Loki (local)
 
 ## Status
 
 Started 2026-10-08. Done so far: real-time messaging across multiple servers, auth with refresh-token
 rotation, rooms with a paginated room list, cross-server viewer counts with a popular-rooms ranking, recovery from missed messages, room
-roles and shadow bans, rate limiting, observability, a load-test baseline (writes stay synchronous), and the
-hardening described above. Next: a minimal CI, then scripted fault scenarios. See the
+roles and shadow bans, rate limiting, observability, a load-test baseline (writes stay synchronous), server
+CI, and the hardening described above. Next: scripted fault scenarios. See the
 [milestones in ROADMAP.md](ROADMAP.md#milestones2026-11-03-訂暫定) (in Chinese).
 
 ## Getting started
