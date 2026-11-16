@@ -2,8 +2,9 @@ package pgstore
 
 import (
 	"context"
-	"os"
 	"testing"
+
+	"github.com/jay41chen/danmaku/server/internal/testenv"
 )
 
 // migration 000010 建的 legacy room（public_id = model.LegacyRoomPublicID）固定是 id 1，newTestDBStore 清資料時也會保留它
@@ -11,10 +12,7 @@ const legacyRoomID int64 = 1
 
 func newTestDBStore(t *testing.T) *DBStore {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping DB integration test")
-	}
+	url := testenv.Require(t, "TEST_DATABASE_URL")
 	if err := RunMigration(url); err != nil {
 		t.Fatalf("RunMigration: %v", err)
 	}

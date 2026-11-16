@@ -2,9 +2,10 @@ package redisstore
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/jay41chen/danmaku/server/internal/testenv"
 )
 
 // 需要真的 Redis：沒設 TEST_REDIS_URL 就 skip（見 newTestRateLimiter）
@@ -111,10 +112,7 @@ func TestReset(t *testing.T) {
 // 每個 test 用自己的 key（rl:test:<test 名稱>），不 FLUSHDB：本機 Redis 可能有其他資料
 func newTestRateLimiter(t *testing.T) (*RedisStore, string) {
 	t.Helper()
-	url := os.Getenv("TEST_REDIS_URL")
-	if url == "" {
-		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
-	}
+	url := testenv.Require(t, "TEST_REDIS_URL")
 
 	s, err := NewRedisStore(t.Context(), url)
 	if err != nil {

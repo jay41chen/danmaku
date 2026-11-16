@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -10,15 +9,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/testenv"
 )
 
 // 需要真的 Postgres：沒設 TEST_DATABASE_URL 就 skip；設了也要先過工具自己的安全檢查（只准 danmaku_test）
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping DB integration test")
-	}
+	url := testenv.Require(t, "TEST_DATABASE_URL")
 	if _, err := checkDatabaseURL(url); err != nil {
 		t.Fatalf("refusing to run against this database: %v", err)
 	}

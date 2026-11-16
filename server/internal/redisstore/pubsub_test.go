@@ -3,20 +3,17 @@ package redisstore
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/testenv"
 	"github.com/redis/go-redis/v9"
 )
 
 // 需要真的 Redis：沒設 TEST_REDIS_URL 就 skip
 // 驗證 per-room channel：JoinRoom 之後收得到該房間的訊息，LeaveRoom 之後收不到
 func TestRoomPubSub(t *testing.T) {
-	url := os.Getenv("TEST_REDIS_URL")
-	if url == "" {
-		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
-	}
+	url := testenv.Require(t, "TEST_REDIS_URL")
 	s, err := NewRedisStore(t.Context(), url)
 	if err != nil {
 		t.Fatalf("NewRedisStore: %v", err)
@@ -122,10 +119,7 @@ func waitNumSub(t *testing.T, s *RedisStore, room string, want int64) {
 // 直接呼叫 rebuildPubSub，不等 15 秒的 ticker。NewRedisStore 自己也會起 watchdog goroutine，
 // 但它只在 ticker 觸發（15 秒後）才讀 received；這個 test 遠短於 15 秒，所以測試讀 received 不會跟它搶
 func TestRebuildPubSubWiring(t *testing.T) {
-	url := os.Getenv("TEST_REDIS_URL")
-	if url == "" {
-		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
-	}
+	url := testenv.Require(t, "TEST_REDIS_URL")
 	s, err := NewRedisStore(t.Context(), url)
 	if err != nil {
 		t.Fatalf("NewRedisStore: %v", err)

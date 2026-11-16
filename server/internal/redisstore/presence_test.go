@@ -2,21 +2,18 @@ package redisstore
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/testenv"
 	"github.com/redis/go-redis/v9"
 )
 
 // 每個 test 用自己的房間名（presence-test-<test 名稱>），結束時清掉 key；不 FLUSHDB
 func newTestPresence(t *testing.T) (*RedisStore, string) {
 	t.Helper()
-	url := os.Getenv("TEST_REDIS_URL")
-	if url == "" {
-		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
-	}
+	url := testenv.Require(t, "TEST_REDIS_URL")
 	s, err := NewRedisStore(t.Context(), url)
 	if err != nil {
 		t.Fatalf("NewRedisStore: %v", err)
