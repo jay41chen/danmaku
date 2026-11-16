@@ -48,12 +48,13 @@ jobs:
           cache-dependency-path: server/go.sum
       # CI=true 由 GitHub 自動設，testenv.Require 因此會讓缺環境變數的 integration test fail 而不是 skip
       # -p 1：store 測試共用同一個 DB，不能多個 package 同時跑
+      # -count=1：不用測試快取（setup-go 會快取 GOCACHE）。CI 的價值是乾淨的外部狀態，code 沒變的 integration test 也要在全新 DB 上重跑
       - name: Test
         working-directory: server
         env:
           TEST_DATABASE_URL: postgres://ci:ci@localhost:5432/danmaku_test?sslmode=disable
           TEST_REDIS_URL: redis://localhost:6379/15
-        run: go test -race -p 1 ./...
+        run: go test -race -p 1 -count=1 ./...
 
   # 只 build 不 push：目的是 Dockerfile 壞掉時能在 push 時就發現
   docker:
