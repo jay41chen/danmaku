@@ -11,7 +11,7 @@ COPY . .
 # migrations 已用 go:embed 包進執行檔，runtime 不用再複製 migrations 目錄
 RUN CGO_ENABLED=0 go build -trimpath -o /out/server ./cmd/server
 
-# runtime stage：只有執行檔 + CA 憑證，沒有 shell，且以 non-root 執行
+# runtime stage：只有執行檔 + CA 憑證、tzdata，沒有 shell，且以 non-root 執行
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/server /server
 EXPOSE 8080
