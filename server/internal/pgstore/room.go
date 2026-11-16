@@ -237,7 +237,7 @@ func (this *DBStore) getUserRoomLists(ctx context.Context, ownerID int64, after 
 	return this.queryRooms(ctx, sql, args...)
 }
 
-// 兩個列表共用：執行查詢，把結果掃成 []model.Room
+// 三個 caller 共用（GET /rooms 與 GET /me/rooms 兩個列表，以及 GetRoomsByPublicIDs）：執行查詢，把結果掃成 []model.Room
 // SELECT 的欄位跟順序要一致：id, public_id, owner_id, room_name, created_at
 func (this *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([]model.Room, error) {
 	// 特別注意這邊要傳入的是`args...`而不是`args`
@@ -259,4 +259,19 @@ func (this *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([
 		return nil, err
 	}
 	return rooms, nil
+}
+
+// 用多個 public_id 撈未刪除的房間（GET /rooms?sort=viewers 用）；回傳順序不保證，由呼叫端自己排
+// 已刪除或不存在的 id 直接不會出現在結果裡；ids 為空不查 DB
+// 回傳的 Room 沒有 OwnerUsername（沒 JOIN users）
+func (this *DBStore) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
+	if len(publicIDs) == 0 {
+		return []model.Room{}, nil
+	}
+	return this.queryRooms(ctx, `
+		SELECT id, public_id, owner_id, room_name, created_at
+		FROM rooms
+		WHERE public_id = ANY($1)
+			AND deleted_at IS NULL
+		`, publicIDs)
 }

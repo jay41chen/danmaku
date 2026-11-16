@@ -18,7 +18,7 @@ import (
 
 // 用真的 use case 接 fake store：handler test 照樣能驗名稱規則、額度等端到端行為
 func newTestRoomHandler(db *fakeDBStore) *RoomHandler {
-	return NewRoomHandler(usecase.NewRoomUseCase(db))
+	return NewRoomHandler(usecase.NewRoomUseCase(db, nil))
 }
 
 // 同 serveCreateRoomMessage：用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx

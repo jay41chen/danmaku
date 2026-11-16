@@ -27,6 +27,12 @@ const (
 	MaxRoomsPerUser = 3
 )
 
+// 熱門房間列表的一筆：房間 + 目前人數（GET /rooms?sort=viewers）
+type PopularRoom struct {
+	Room        Room
+	ViewerCount int
+}
+
 // 房間列表的翻頁位置：上一頁「最後一筆回傳的房間」的排序鍵
 // 只放排序用得到的欄位（created_at, public_id），跟 index 的欄位一一對應
 // （Kotlin 類比：data class RoomCursor(val createdAt: Instant, val publicId: String)）

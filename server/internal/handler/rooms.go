@@ -19,6 +19,28 @@ type roomUseCase interface {
 	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
 	GetRoom(ctx context.Context, publicID string) (model.Room, error)
 	ListRooms(ctx context.Context, ownerID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error)
+	ListPopularRooms(ctx context.Context, limit int) ([]model.PopularRoom, error)
+}
+
+// GET /rooms 的 sort 參數：沒帶或空 = 預設（新到舊、cursor 分頁）；viewers = 依目前人數
+const sortViewers = "viewers"
+
+var (
+	errInvalidSort = &model.CodedError{Code: "invalid_sort", Message: "invalid sort"}
+	// sort=viewers 是前 N 名、沒有分頁
+	errPageTokenNotSupported = &model.CodedError{Code: "page_token_not_supported", Message: "page_token not supported with this sort"}
+)
+
+// sort=viewers 的列表項目；不動 roomListItem，預設列表的 JSON 才不會變
+type popularRoomItem struct {
+	RoomName    string `json:"room_name"`
+	PublicID    string `json:"public_id"`
+	ViewerCount int    `json:"viewer_count"`
+}
+
+// sort=viewers 沒有 next_page_token
+type popularRoomListResponse struct {
+	Rooms []popularRoomItem `json:"rooms"`
 }
 
 type RoomHandler struct {
@@ -116,8 +138,48 @@ func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /rooms：公開，列出所有人的房間
+// ?sort=viewers → 依目前人數的前 N 名（listPopularRooms）；其他值 400；沒帶 = 預設列表
+// 驗證順序：sort → limit → page_token；任何一個不合格都不碰 use case
 func (this *RoomHandler) HandleListRooms(w http.ResponseWriter, r *http.Request) {
-	this.listRooms(w, r, nil)
+	switch r.URL.Query().Get("sort") {
+	case "":
+		this.listRooms(w, r, nil)
+	case sortViewers:
+		this.listPopularRooms(w, r)
+	default:
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errInvalidSort)
+	}
+}
+
+// sort=viewers：limit 規則同預設列表；不支援 page_token（帶了就 400）
+func (this *RoomHandler) listPopularRooms(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseListLimit(w, r)
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("page_token") != "" {
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errPageTokenNotSupported)
+		return
+	}
+
+	rooms, err := this.rooms.ListPopularRooms(r.Context(), limit)
+	if errors.Is(err, model.ErrViewerRankingUnavailable) {
+		this.logger.ErrorContext(r.Context(), "viewer ranking unavailable", "error", err)
+		httpx.WriteError(w, http.StatusServiceUnavailable, "viewer_ranking_unavailable", "viewer ranking unavailable")
+		return
+	}
+	if err != nil {
+		this.logger.ErrorContext(r.Context(), "list popular rooms failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	// make 而不是 var：沒有資料時 JSON 要是 []、不是 null
+	resp := popularRoomListResponse{Rooms: make([]popularRoomItem, 0, len(rooms))}
+	for _, pr := range rooms {
+		resp.Rooms = append(resp.Rooms, popularRoomItem{RoomName: pr.Room.Name, PublicID: pr.Room.PublicID, ViewerCount: pr.ViewerCount})
+	}
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, resp)
 }
 
 // GET /me/rooms：要登入，只列出自己的房間

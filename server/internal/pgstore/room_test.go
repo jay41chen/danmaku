@@ -624,3 +624,45 @@ func TestGetRoomLists(t *testing.T) {
 		}
 	})
 }
+
+func TestGetRoomsByPublicIDs(t *testing.T) {
+	s := newTestDBStore(t)
+	ownerID, err := s.CreateUser(t.Context(), "Jay", "fake-hash")
+	if err != nil {
+		t.Fatalf("setup CreateUser error = %v", err)
+	}
+	for _, id := range []string{"room0000001", "room0000002", "room0000003"} {
+		if _, err := s.dbPool.Exec(t.Context(),
+			`INSERT INTO rooms(public_id, owner_id, room_name) VALUES ($1, $2, $1)`, id, ownerID); err != nil {
+			t.Fatalf("setup insert room: %v", err)
+		}
+	}
+	if _, err := s.dbPool.Exec(t.Context(), `UPDATE rooms SET deleted_at = now() WHERE public_id = 'room0000002'`); err != nil {
+		t.Fatalf("setup soft delete: %v", err)
+	}
+
+	t.Run("returns existing rooms, excludes soft-deleted and unknown", func(t *testing.T) {
+		rooms, err := s.GetRoomsByPublicIDs(t.Context(), []string{"room0000001", "room0000002", "room0000003", "nonexistent1"})
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		var ids []string
+		for _, r := range rooms {
+			ids = append(ids, r.PublicID)
+			if r.Name != r.PublicID || r.ID <= 0 || r.OwnerID != ownerID {
+				t.Errorf("room = %+v, unexpected fields", r)
+			}
+		}
+		slices.Sort(ids)
+		if !slices.Equal(ids, []string{"room0000001", "room0000003"}) {
+			t.Errorf("ids = %v, want [room0000001 room0000003]", ids)
+		}
+	})
+
+	t.Run("empty ids returns empty without error", func(t *testing.T) {
+		rooms, err := s.GetRoomsByPublicIDs(t.Context(), nil)
+		if err != nil || len(rooms) != 0 {
+			t.Errorf("got %v, %v want empty, nil", rooms, err)
+		}
+	})
+}

@@ -41,7 +41,7 @@ func main() {
 	db := initDatabase(cfg.DatabaseURL)
 	redis := initRedis(cfg.RedisURL)
 
-	roomUseCase := usecase.NewRoomUseCase(db)
+	roomUseCase := usecase.NewRoomUseCase(db, redis)
 	authUseCase := usecase.NewAuthUseCase(db, redis, tokens) // WS auth frame 和 auth handler 共用
 
 	// RedisStore 同時實作 Pub/Sub 和限流器（use case 的 limiter），同一條連線共用

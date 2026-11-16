@@ -125,6 +125,10 @@ func (f *wsFakeDB) GetRoomLists(ctx context.Context, userID *int64, after *model
 	return nil, nil, errors.New("not used in ws tests")
 }
 
+func (f *wsFakeDB) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
+	return nil, errors.New("not used in ws tests")
+}
+
 // 以下只是為了滿足 usecase.authStore，ws 測試不會呼叫
 func (f *wsFakeDB) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
 	return 0, errors.New("not used in ws tests")
@@ -161,7 +165,7 @@ func newAuthTestServer(t *testing.T) (*WebsocketHandler, string) {
 func newAuthTestServerWithDB(t *testing.T) (*WebsocketHandler, string, *wsFakeDB) {
 	t.Helper()
 	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
-	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db, nil), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	t.Cleanup(srv.Close)
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http"), db
@@ -416,7 +420,7 @@ func TestWebsocketMemberRefcount(t *testing.T) {
 func newKeepaliveTestServer(t *testing.T, pingPeriod, pongWait time.Duration) (*WebsocketHandler, string) {
 	t.Helper()
 	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
-	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db, nil), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	h.pingPeriod = pingPeriod
 	h.pongWait = pongWait
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
@@ -522,7 +526,7 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 
 func newRoomTestServer(t *testing.T, redis *fakeRedis, db *wsFakeDB) (*WebsocketHandler, string) {
 	t.Helper()
-	h := NewWebsocketHandler(redis, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
+	h := NewWebsocketHandler(redis, usecase.NewRoomUseCase(db, nil), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	t.Cleanup(srv.Close)
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http")

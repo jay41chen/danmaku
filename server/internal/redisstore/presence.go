@@ -3,6 +3,7 @@ package redisstore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,16 @@ const (
 func presenceKey(room string) string {
 	return "room:" + room + ":members"
 }
+
+// 熱門房間排行：Sorted Set，member = 房間 public_id，score = 人數
+// 房間還在不在排行上，以 room:<id>:members 這個 key 是否存在為準，不是看這裡的 score（見 TopRooms）
+const viewerRankingKey = "room:viewer_ranking"
+
+// TopRooms 每批多撈幾筆：stale 的房間會被濾掉，多撈一點可以少跑幾輪
+const topRoomsExtraPerBatch = 10
+
+// TopRooms 最多跑幾輪：防止排行上塞滿 stale 房間時一直迴圈
+const topRoomsMaxRounds = 10
 
 func presenceMember(e model.PresenceEntry) string {
 	return e.ConnID + ":" + strconv.FormatInt(e.UserID, 10)
@@ -134,4 +145,100 @@ func (this *RedisStore) CountPresence(ctx context.Context, rooms []string) (map[
 		counts[room] = len(seen)
 	}
 	return counts, nil
+}
+
+// 把這一輪算出的人數寫進排行：count > 0 → ZADD，count == 0 → ZREM
+// 一個 pipeline（一次 round trip）送出一個 ZADD（多個 member）+ 一個 ZREM；空 map 不呼叫 Redis
+// 用途：presenceWorker 每次 CountPresence 之後
+func (this *RedisStore) UpdateViewerRanking(ctx context.Context, counts map[string]int) error {
+	if len(counts) == 0 {
+		return nil
+	}
+	var (
+		adds []redis.Z
+		rems []any
+	)
+	for room, n := range counts {
+		if n > 0 {
+			adds = append(adds, redis.Z{Score: float64(n), Member: room})
+		} else {
+			rems = append(rems, room)
+		}
+	}
+	_, err := this.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+		if len(adds) > 0 {
+			p.ZAdd(ctx, viewerRankingKey, adds...)
+		}
+		if len(rems) > 0 {
+			p.ZRem(ctx, viewerRankingKey, rems...)
+		}
+		return nil
+	})
+	return err
+}
+
+// 人數前 n 名的房間（由多到少）；n <= 0 回空
+// 排行裡可能有 stale 的房間（最後一個人離開、server 當掉、key 過期），所以每批都用 EXISTS room:<id>:members 過濾，
+// 不存在的順手 ZREM（lazy cleanup）；撈到 n 間活的或排行用完就停
+//
+// 不需要原子性：每個指令都只碰一個 key（Redis Cluster 友善，不用 Lua 跨 key）；
+// EXISTS 和 ZREM 之間房間剛好有人進來的 race 可以接受：最多少列一次，5 秒內 worker 會把它寫回排行
+// 輪數有上限（topRoomsMaxRounds），結果可能少於 n
+//
+// 跨批之間分數可能被更新（其他 server 每 5 秒 ZADD），同一間房可能被撈到兩次，所以要去重；
+// 跳過的房間 5 秒內會自我修正（下次呼叫就會正常出現）。
+// 去重用線性搜尋而不是 map：n 最多 model.MaxRoomListLimit（50），O(n²) 也只有幾千次比較，比 map 好讀；
+// 若放寬上限就改用 map
+func (this *RedisStore) TopRooms(ctx context.Context, n int) ([]model.RoomViewers, error) {
+	result := []model.RoomViewers{}
+	if n <= 0 {
+		return result, nil
+	}
+	batchSize := int64(n + topRoomsExtraPerBatch)
+	// start 只隨「留下來的」前進：被 ZREM 的會讓後面的往前補位，不用跳過
+	var start int64
+	for round := 0; round < topRoomsMaxRounds && len(result) < n; round++ {
+		batch, err := this.client.ZRevRangeWithScores(ctx, viewerRankingKey, start, start+batchSize-1).Result()
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		cmds, err := this.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+			for _, z := range batch {
+				p.Exists(ctx, presenceKey(z.Member.(string)))
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		var stale []any
+		for i, z := range batch {
+			room := z.Member.(string)
+			if cmds[i].(*redis.IntCmd).Val() == 0 {
+				stale = append(stale, room)
+				continue
+			}
+			// 重複的房間仍留在排行上、佔著一個位置，所以 start 照樣前進（否則下一批會從同一個位置重讀）
+			// 只有 len(result) >= n 時不動 start：這時迴圈會直接結束，不會再用到
+			if len(result) < n {
+				start++
+				if slices.ContainsFunc(result, func(r model.RoomViewers) bool { return r.PublicID == room }) {
+					continue
+				}
+				result = append(result, model.RoomViewers{PublicID: room, Count: int(z.Score)})
+			}
+		}
+		if len(stale) > 0 {
+			if err := this.client.ZRem(ctx, viewerRankingKey, stale...).Err(); err != nil {
+				return nil, err
+			}
+		}
+		if int64(len(batch)) < batchSize {
+			break // 排行用完了
+		}
+	}
+	return result, nil
 }

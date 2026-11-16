@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
@@ -25,6 +26,11 @@ type fakeRoomStore struct {
 	gotListOwner *int64
 	gotListAfter *model.RoomCursor
 	gotListLimit int
+
+	byIDRooms []model.Room
+	byIDErr   error
+	byIDCalls int
+	gotIDs    []string
 }
 
 func (f *fakeRoomStore) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
@@ -44,6 +50,12 @@ func (f *fakeRoomStore) GetRoomLists(ctx context.Context, userID *int64, after *
 	return f.rooms, f.next, f.listErr
 }
 
+func (f *fakeRoomStore) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
+	f.gotIDs = publicIDs
+	f.byIDCalls++
+	return f.byIDRooms, f.byIDErr
+}
+
 func TestRoomCreateRoom(t *testing.T) {
 	t.Run("invalid name returns CodedError and does not call store", func(t *testing.T) {
 		cases := []struct {
@@ -56,7 +68,7 @@ func TestRoomCreateRoom(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				store := &fakeRoomStore{}
-				_, err := NewRoomUseCase(store).CreateRoom(t.Context(), 7, tc.input)
+				_, err := NewRoomUseCase(store, nil).CreateRoom(t.Context(), 7, tc.input)
 
 				var coded *model.CodedError
 				if !errors.As(err, &coded) || coded.Code != tc.code {
@@ -73,7 +85,7 @@ func TestRoomCreateRoom(t *testing.T) {
 		want := model.Room{PublicID: "abcDEF12345", Name: "我的房間"}
 		store := &fakeRoomStore{room: want}
 
-		got, err := NewRoomUseCase(store).CreateRoom(t.Context(), 7, "我的房間")
+		got, err := NewRoomUseCase(store, nil).CreateRoom(t.Context(), 7, "我的房間")
 
 		if err != nil {
 			t.Fatalf("err = %v, want nil", err)
@@ -96,7 +108,7 @@ func TestRoomCreateRoom(t *testing.T) {
 		generic := errors.New("db down")
 		for _, want := range []error{model.ErrRoomLimitReached, model.ErrRoomOwnerNotFound, generic} {
 			t.Run(want.Error(), func(t *testing.T) {
-				_, err := NewRoomUseCase(&fakeRoomStore{err: want}).CreateRoom(t.Context(), 7, "房間")
+				_, err := NewRoomUseCase(&fakeRoomStore{err: want}, nil).CreateRoom(t.Context(), 7, "房間")
 				if !errors.Is(err, want) {
 					t.Errorf("err = %v, want %v", err, want)
 				}
@@ -110,7 +122,7 @@ func TestRoomGetRoom(t *testing.T) {
 		want := model.Room{PublicID: "abcDEF12345", Name: "房間"}
 		store := &fakeRoomStore{room: want}
 
-		got, err := NewRoomUseCase(store).GetRoom(t.Context(), "abcDEF12345")
+		got, err := NewRoomUseCase(store, nil).GetRoom(t.Context(), "abcDEF12345")
 
 		if err != nil || got != want {
 			t.Errorf("got (%+v, %v), want (%+v, nil)", got, err, want)
@@ -121,7 +133,7 @@ func TestRoomGetRoom(t *testing.T) {
 	})
 
 	t.Run("passes errors through", func(t *testing.T) {
-		_, err := NewRoomUseCase(&fakeRoomStore{err: model.ErrRoomNotFound}).GetRoom(t.Context(), "x")
+		_, err := NewRoomUseCase(&fakeRoomStore{err: model.ErrRoomNotFound}, nil).GetRoom(t.Context(), "x")
 		if !errors.Is(err, model.ErrRoomNotFound) {
 			t.Errorf("err = %v, want ErrRoomNotFound", err)
 		}
@@ -147,7 +159,7 @@ func TestRoomListRooms(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &fakeRoomStore{rooms: rooms, next: next}
 
-			gotRooms, gotNext, err := NewRoomUseCase(store).ListRooms(t.Context(), tc.owner, tc.after, tc.limit)
+			gotRooms, gotNext, err := NewRoomUseCase(store, nil).ListRooms(t.Context(), tc.owner, tc.after, tc.limit)
 
 			if err != nil {
 				t.Fatalf("err = %v, want nil", err)
@@ -164,9 +176,83 @@ func TestRoomListRooms(t *testing.T) {
 
 	t.Run("passes errors through", func(t *testing.T) {
 		boom := errors.New("db down")
-		_, _, err := NewRoomUseCase(&fakeRoomStore{listErr: boom}).ListRooms(t.Context(), nil, nil, 20)
+		_, _, err := NewRoomUseCase(&fakeRoomStore{listErr: boom}, nil).ListRooms(t.Context(), nil, nil, 20)
 		if !errors.Is(err, boom) {
 			t.Errorf("err = %v, want %v", err, boom)
+		}
+	})
+}
+
+type fakeRanking struct {
+	top   []model.RoomViewers
+	err   error
+	gotN  int
+	calls int
+}
+
+func (f *fakeRanking) TopRooms(ctx context.Context, n int) ([]model.RoomViewers, error) {
+	f.calls++
+	f.gotN = n
+	return f.top, f.err
+}
+
+func TestRoomListPopularRooms(t *testing.T) {
+	t.Run("reorders by ranking, drops deleted rooms, attaches counts, passes limit", func(t *testing.T) {
+		ranking := &fakeRanking{top: []model.RoomViewers{{PublicID: "c", Count: 9}, {PublicID: "gone", Count: 7}, {PublicID: "a", Count: 5}, {PublicID: "b", Count: 1}}}
+		// DB 回傳順序故意跟排行不同
+		store := &fakeRoomStore{byIDRooms: []model.Room{{PublicID: "a", Name: "A"}, {PublicID: "b", Name: "B"}, {PublicID: "c", Name: "C"}}}
+
+		got, err := NewRoomUseCase(store, ranking).ListPopularRooms(t.Context(), 4)
+
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if ranking.gotN != 4 {
+			t.Errorf("TopRooms n = %d, want 4", ranking.gotN)
+		}
+		if !slices.Equal(store.gotIDs, []string{"c", "gone", "a", "b"}) {
+			t.Errorf("ids = %v", store.gotIDs)
+		}
+		var ids []string
+		var counts []int
+		for _, p := range got {
+			ids = append(ids, p.Room.PublicID)
+			counts = append(counts, p.ViewerCount)
+		}
+		if !slices.Equal(ids, []string{"c", "a", "b"}) || !slices.Equal(counts, []int{9, 5, 1}) {
+			t.Errorf("ids = %v counts = %v, want [c a b] [9 5 1]", ids, counts)
+		}
+		if got[0].Room.Name != "C" {
+			t.Errorf("room = %+v", got[0].Room)
+		}
+	})
+
+	t.Run("empty ranking returns empty slice and skips store", func(t *testing.T) {
+		store := &fakeRoomStore{}
+		got, err := NewRoomUseCase(store, &fakeRanking{}).ListPopularRooms(t.Context(), 20)
+		if err != nil || got == nil || len(got) != 0 || store.byIDCalls != 0 {
+			t.Errorf("got %v, %v, store calls %d", got, err, store.byIDCalls)
+		}
+	})
+
+	t.Run("ranking error becomes ErrViewerRankingUnavailable", func(t *testing.T) {
+		boom := errors.New("redis down")
+		store := &fakeRoomStore{}
+		_, err := NewRoomUseCase(store, &fakeRanking{err: boom}).ListPopularRooms(t.Context(), 20)
+		if !errors.Is(err, model.ErrViewerRankingUnavailable) || !errors.Is(err, boom) {
+			t.Errorf("error = %v", err)
+		}
+		if store.byIDCalls != 0 {
+			t.Errorf("store should not be called")
+		}
+	})
+
+	t.Run("store error passes through", func(t *testing.T) {
+		boom := errors.New("db down")
+		ranking := &fakeRanking{top: []model.RoomViewers{{PublicID: "a", Count: 1}}}
+		_, err := NewRoomUseCase(&fakeRoomStore{byIDErr: boom}, ranking).ListPopularRooms(t.Context(), 20)
+		if !errors.Is(err, boom) || errors.Is(err, model.ErrViewerRankingUnavailable) {
+			t.Errorf("error = %v", err)
 		}
 	})
 }

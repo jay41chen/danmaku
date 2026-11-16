@@ -20,6 +20,7 @@ type presenceHub interface {
 type wsPresence interface {
 	SyncPresence(ctx context.Context, add, remove []model.PresenceEntry) error
 	CountPresence(ctx context.Context, rooms []string) (map[string]int, error) // 去重在 redisstore 裡做
+	UpdateViewerRanking(ctx context.Context, counts map[string]int) error      // 熱門房間排行（count == 0 = 移出排行）
 }
 
 var _ presenceHub = (*ws.Hub)(nil)
@@ -125,6 +126,10 @@ func (w *presenceWorker) count(ctx context.Context) {
 		}
 		// 編碼成功才能送出去
 		w.hub.Broadcast(ctx, room, frame)
+	}
+	// 排行寫在推播之後：推播不能依賴排行；寫失敗只記 log，下一輪（5 秒後）會再寫
+	if err := w.store.UpdateViewerRanking(ctx, counts); err != nil {
+		w.logger.ErrorContext(ctx, "viewer ranking update failed", "error", err)
 	}
 }
 

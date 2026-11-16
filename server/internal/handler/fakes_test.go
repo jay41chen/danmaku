@@ -148,6 +148,10 @@ func (f *fakeDBStore) GetRoomLists(ctx context.Context, userID *int64, after *mo
 	return f.listRooms, f.listNextCursor, f.listRoomsErr
 }
 
+func (f *fakeDBStore) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
+	return nil, errors.New("not used in handler tests")
+}
+
 // handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數
 type fakeRateLimiter struct {
 	blockKey   string                   // 收到這個 key 就回 allowed=false

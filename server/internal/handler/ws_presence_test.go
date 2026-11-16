@@ -84,6 +84,8 @@ type fakePresenceStore struct {
 	countRooms [][]string
 	syncC      chan struct{} // 每次 SyncPresence 後送一個訊號
 	countC     chan struct{} // 每次 CountPresence 後送一個訊號
+	rankings   []map[string]int
+	rankingErr error
 }
 
 type fakeSync struct {
@@ -116,6 +118,19 @@ func (f *fakePresenceStore) CountPresence(ctx context.Context, rooms []string) (
 		return nil, err
 	}
 	return out, nil
+}
+
+func (f *fakePresenceStore) UpdateViewerRanking(ctx context.Context, counts map[string]int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rankings = append(f.rankings, maps.Clone(counts))
+	return f.rankingErr
+}
+
+func (f *fakePresenceStore) rankingCalls() []map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.rankings)
 }
 
 func (f *fakePresenceStore) setSyncErr(err error) {
@@ -510,4 +525,51 @@ func TestPresenceWorkerRunDispatches(t *testing.T) {
 	}
 	// run 已 return：count tick 不該順便觸發 SyncPresence（仍是前面 3 次）
 	expectSyncCount(t, store, 3)
+}
+
+// count 成功：把這一輪的人數寫進排行（整份 counts）
+func TestPresenceWorkerCountWritesRanking(t *testing.T) {
+	hub := newFakePresenceHub(eA, eB, eC)
+	store := newFakePresenceStore()
+	store.counts = map[string]int{"R": 3, "S": 1}
+	w := newTestPresenceWorker(hub, store)
+
+	w.count(t.Context())
+
+	calls := store.rankingCalls()
+	if len(calls) != 1 || !maps.Equal(calls[0], map[string]int{"R": 3, "S": 1}) {
+		t.Errorf("ranking calls = %v, want one call with R:3 S:1", calls)
+	}
+}
+
+// 排行寫失敗：推播照常（不能依賴排行）
+func TestPresenceWorkerRankingFailureStillBroadcasts(t *testing.T) {
+	hub := newFakePresenceHub(eA, eB, eC)
+	store := newFakePresenceStore()
+	store.counts = map[string]int{"R": 3, "S": 1}
+	store.rankingErr = errors.New("redis down")
+	w := newTestPresenceWorker(hub, store)
+
+	w.count(t.Context())
+
+	if len(hub.got()) != 2 {
+		t.Errorf("broadcasts = %d, want 2", len(hub.got()))
+	}
+	if len(store.rankingCalls()) != 1 {
+		t.Errorf("ranking should have been attempted")
+	}
+}
+
+// count 失敗：不寫排行
+func TestPresenceWorkerCountErrorWritesNoRanking(t *testing.T) {
+	hub := newFakePresenceHub(eA)
+	store := newFakePresenceStore()
+	store.countErr = errors.New("redis down")
+	w := newTestPresenceWorker(hub, store)
+
+	w.count(t.Context())
+
+	if n := len(store.rankingCalls()); n != 0 {
+		t.Errorf("ranking calls = %d, want 0", n)
+	}
 }

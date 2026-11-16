@@ -33,6 +33,8 @@ var (
 	ErrRoomOwnerNotFound = errors.New("room owner not found")
 	// 房間列表的 limit 不在 1..MaxRoomListLimit：handler 應該先擋掉，走到這裡代表 caller 有 bug
 	ErrInvalidLimit = errors.New("invalid limit")
+	// 熱門房間排行（Redis）讀取失敗：handler 翻成 503；真正的錯誤用 %w 包在裡面，log 看得到
+	ErrViewerRankingUnavailable = errors.New("viewer ranking unavailable")
 	// 操作者不是房主或房管
 	ErrRoomForbidden = errors.New("room forbidden")
 	// 操作者有權限，但不能動這個對象

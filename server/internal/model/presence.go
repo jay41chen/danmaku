@@ -1,5 +1,11 @@
 package model
 
+// 熱門房間排行的一筆：房間 public_id + 目前人數（redisstore.TopRooms 回傳）
+type RoomViewers struct {
+	PublicID string
+	Count    int
+}
+
 // 跨 server 房間在線人數（presence）的一筆資料：某條連線現在在哪個房間、是誰
 // 放在 model 是因為 ws（Hub 產生快照）和 redisstore（寫進 Redis）都要用，兩邊不用互相 import
 type PresenceEntry struct {
