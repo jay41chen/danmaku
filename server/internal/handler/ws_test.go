@@ -19,13 +19,14 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
 // WS 寫入一律被拒絕：回 error envelope 給這條連線，連線保持開著，不 Publish
 func TestWebsocketWriteRejected(t *testing.T) {
 	redis := &fakeRedis{}
-	h := NewWebsocketHandler(redis, nil, nil)
+	h := NewWebsocketHandler(redis, nil, nil, nil)
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	defer srv.Close()
 
@@ -84,7 +85,7 @@ func (fakeClaimsParser) ParseAccessTokenClaims(token string) (int64, time.Time, 
 	return id, time.Now().Add(ttl), nil
 }
 
-// 假 DB：實作 wsStore（GetUserByID / GetRoomByPublicID）；users 裡沒有的 id 回 ErrUserNotFound
+// 假 DB：實作 wsStore（GetUserByID）和 usecase 的 roomStore（GetRoomByPublicID，其餘是 stub）；users 裡沒有的 id 回 ErrUserNotFound
 type wsFakeDB struct {
 	users   map[int64]string
 	err     error
@@ -114,6 +115,15 @@ func (f *wsFakeDB) GetRoomByPublicID(ctx context.Context, publicID string) (mode
 	return model.Room{PublicID: publicID}, nil
 }
 
+// 以下兩個只是為了滿足 usecase.roomStore，ws 測試不會呼叫
+func (f *wsFakeDB) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
+	return model.Room{}, errors.New("not used in ws tests")
+}
+
+func (f *wsFakeDB) GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error) {
+	return nil, nil, errors.New("not used in ws tests")
+}
+
 type wsFrame struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -122,7 +132,7 @@ type wsFrame struct {
 func newAuthTestServer(t *testing.T) (*WebsocketHandler, string) {
 	t.Helper()
 	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
-	h := NewWebsocketHandler(&fakeRedis{}, db, fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	t.Cleanup(srv.Close)
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -377,7 +387,7 @@ func TestWebsocketMemberRefcount(t *testing.T) {
 func newKeepaliveTestServer(t *testing.T, pingPeriod, pongWait time.Duration) (*WebsocketHandler, string) {
 	t.Helper()
 	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
-	h := NewWebsocketHandler(&fakeRedis{}, db, fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
 	h.pingPeriod = pingPeriod
 	h.pongWait = pongWait
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
@@ -483,7 +493,7 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 
 func newRoomTestServer(t *testing.T, redis *fakeRedis, db *wsFakeDB) (*WebsocketHandler, string) {
 	t.Helper()
-	h := NewWebsocketHandler(redis, db, fakeClaimsParser{})
+	h := NewWebsocketHandler(redis, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	t.Cleanup(srv.Close)
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -857,7 +867,7 @@ func TestWebsocketHandlerMaxClients(t *testing.T) {
 	}
 
 	t.Run("default is 100", func(t *testing.T) {
-		h := NewWebsocketHandler(&fakeRedis{}, nil, nil)
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, nil)
 		if !fill(h, 100) {
 			t.Fatal("the 100th Register failed, want default cap 100")
 		}
@@ -867,7 +877,7 @@ func TestWebsocketHandlerMaxClients(t *testing.T) {
 	})
 
 	t.Run("WithMaxClients is honoured", func(t *testing.T) {
-		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, WithMaxClients(3))
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, nil, WithMaxClients(3))
 		if !fill(h, 3) {
 			t.Fatal("the 3rd Register failed, want cap 3")
 		}
@@ -877,7 +887,7 @@ func TestWebsocketHandlerMaxClients(t *testing.T) {
 	})
 
 	t.Run("non-positive value keeps the default", func(t *testing.T) {
-		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, WithMaxClients(0))
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, nil, WithMaxClients(0))
 		if !fill(h, 100) || fill(h, 1) {
 			t.Error("cap is not the default 100")
 		}
@@ -885,7 +895,7 @@ func TestWebsocketHandlerMaxClients(t *testing.T) {
 
 	// 整條路徑：真的 WS 連線，超過上限的那條會被伺服器關掉，沒超過的保持開著
 	t.Run("over the cap is closed over a real connection", func(t *testing.T) {
-		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, WithMaxClients(2))
+		h := NewWebsocketHandler(&fakeRedis{}, nil, nil, nil, WithMaxClients(2))
 		srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 		defer srv.Close()
 		url := "ws" + strings.TrimPrefix(srv.URL, "http")

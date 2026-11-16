@@ -29,7 +29,7 @@ const (
 	// read deadline：連續 3 次 ping 都沒有回應才判定連線死掉
 	wsPongWait = 3 * wsPingPeriod
 
-	// join / leave frame 的 DB 查詢、JoinRoom、LeaveRoom 各自的上限（每個呼叫各包一個 timeout）：
+	// join / leave frame 的房間查詢、JoinRoom、LeaveRoom 各自的上限（每個呼叫各包一個 timeout）：
 	// 卡住時不能一直佔著這條連線的讀取迴圈
 	wsJoinTimeout = 200 * time.Millisecond
 )
@@ -42,8 +42,12 @@ type AccessTokenClaimsParser interface {
 
 // 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
 type wsStore interface {
-	GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error)
 	GetUserByID(ctx context.Context, id int64) (model.User, error)
+}
+
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+type wsRoomUseCase interface {
+	GetRoom(ctx context.Context, publicID string) (model.Room, error)
 }
 
 // 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
@@ -61,7 +65,7 @@ type wsPubSub interface {
 //	  └ listenConnection（ReadLoop）/ hub.Unregister → 沿用上層 ctx
 //	    └ session.onMessage → dispatch → 沿用上層 ctx
 //	      ├ handleAuth → 沿用上層 ctx，但 GetUserByID 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
-//	      ├ handleJoin（enterRoom → lookupRoom / subscribeRoom）→ 沿用上層 ctx，但 GetRoomByPublicID、JoinRoom 各自另外包 wsJoinTimeout
+//	      ├ handleJoin（enterRoom → lookupRoom / subscribeRoom）→ 沿用上層 ctx，但房間查詢（經 room use case 的 GetRoom）、JoinRoom 各自另外包 wsJoinTimeout
 //	      ├ handleLeave → 沿用上層 ctx，但 LeaveRoom 另外包 wsJoinTimeout
 //	      └ 其餘（回 error frame）沒有 DB / Redis 呼叫，不需要 timeout
 //	    └ 斷線清理的 LeaveRoom → 沿用連線 ctx，另外包 wsJoinTimeout
@@ -73,6 +77,7 @@ type wsPubSub interface {
 type WebsocketHandler struct {
 	redis  wsPubSub
 	db     wsStore
+	rooms  wsRoomUseCase
 	tokens AccessTokenClaimsParser
 	hub    *ws.Hub
 	logger *slog.Logger
@@ -102,7 +107,7 @@ func WithMaxClients(n int) WebsocketOption {
 }
 
 // constructor
-func NewWebsocketHandler(redis wsPubSub, db wsStore, tokens AccessTokenClaimsParser, opts ...WebsocketOption) *WebsocketHandler {
+func NewWebsocketHandler(redis wsPubSub, db wsStore, rooms wsRoomUseCase, tokens AccessTokenClaimsParser, opts ...WebsocketOption) *WebsocketHandler {
 	options := websocketOptions{maxClients: defaultMaxClients}
 	for _, opt := range opts {
 		opt(&options)
@@ -110,6 +115,7 @@ func NewWebsocketHandler(redis wsPubSub, db wsStore, tokens AccessTokenClaimsPar
 	return &WebsocketHandler{
 		redis:  redis,
 		db:     db,
+		rooms:  rooms,
 		tokens: tokens,
 		hub:    ws.NewHub(options.maxClients),
 		logger: slog.Default().With("component", "websocket"),
@@ -216,11 +222,11 @@ func (this *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage
 	return p.Room, nil
 }
 
-// 查 DB 確認房間存在，包 wsJoinTimeout。不碰鎖。nil = 房間存在
+// 經 room use case 確認房間存在，包 wsJoinTimeout。不碰鎖。nil = 房間存在
 func (this *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
 	dbCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
-	if _, err := this.db.GetRoomByPublicID(dbCtx, roomID); err != nil {
+	if _, err := this.rooms.GetRoom(dbCtx, roomID); err != nil {
 		if errors.Is(err, model.ErrRoomNotFound) {
 			this.logger.InfoContext(ctx, "ws join rejected", "reason", "room not found", "room", roomID)
 			return &httpx.ErrorDetail{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}

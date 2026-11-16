@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
 
 // WS error frame 的 golden 測試：client/src/realtime/connection.ts 用「字面字串」比對 code，
@@ -42,7 +43,8 @@ func TestWebsocketErrorFrameGolden(t *testing.T) {
 	if len(consts) != len(wsErrorGolden) {
 		t.Fatalf("consts has %d entries, golden has %d", len(consts), len(wsErrorGolden))
 	}
-	h := NewWebsocketHandler(&fakeRedis{}, &wsFakeDB{}, fakeClaimsParser{})
+	db := &wsFakeDB{}
+	h := NewWebsocketHandler(&fakeRedis{}, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
 	for _, tc := range wsErrorGolden {
 		t.Run(tc.name, func(t *testing.T) {
 			c := consts[tc.name]

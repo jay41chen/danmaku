@@ -41,14 +41,16 @@ func main() {
 	db := initDatabase(cfg.DatabaseURL)
 	redis := initRedis(cfg.RedisURL)
 
+	roomUseCase := usecase.NewRoomUseCase(db)
+
 	// RedisStore 同時實作 Pub/Sub 和 rateLimiter，同一條連線共用
-	wsHandler := handler.NewWebsocketHandler(redis, db, tokens, handler.WithMaxClients(cfg.WSMaxClients))
+	wsHandler := handler.NewWebsocketHandler(redis, db, roomUseCase, tokens, handler.WithMaxClients(cfg.WSMaxClients))
 	msgDeps := messageDepsFor(db, redis, cfg.LoadtestTimingLog)
 	messageHandler := handler.NewMessageHandler(usecase.NewMessageUseCase(msgDeps.store, handler.NewMessageNotifier(msgDeps.publisher), msgDeps.limiter))
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
 		messages: messageHandler,
-		rooms:    handler.NewRoomHandler(usecase.NewRoomUseCase(db)),
+		rooms:    handler.NewRoomHandler(roomUseCase),
 		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(redis))),
 		health:   handler.NewHealthHandler(db, redis),
 		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),

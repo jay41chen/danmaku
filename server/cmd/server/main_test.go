@@ -45,7 +45,7 @@ func newTestMux() *http.ServeMux {
 		roles:    handler.NewRoleHandler(nil),
 		health:   handler.NewHealthHandler(healthyDB{}, healthyRedis{}),
 		auth:     handler.NewAuthHandler(nil, nil, "", nil),
-		ws:       handler.NewWebsocketHandler(nil, nil, nil),
+		ws:       handler.NewWebsocketHandler(nil, nil, nil, nil),
 	})
 	return mux
 }
