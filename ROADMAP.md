@@ -2,7 +2,7 @@
 
 ## Milestones（2026-11-03 訂，暫定）
 
-> 主軸：application + architecture。從 2026-11-03 起估 5 ～ 7 週（2026-11-04 重排 M3 之後的順序，日期從當天重算，假設 M7 會做）。估計假設投入時間跟前一個月差不多，沒算做的過程中新長出來的項目 → 實際偏後半段。細項見下方 W4b / W6
+> 主軸：application + architecture。從 2026-11-03 起估 5 ～ 7 週（2026-11-04 重排 M3 之後的順序；2026-11-16 M6 決定不做 M7，M8 之後從 11/17 重算，M6.5 實際比估計慢約一倍 → 看慢的那端）。估計假設投入時間跟前一個月差不多，沒算做的過程中新長出來的項目 → 實際偏後半段。細項見下方 W4b / W6
 
 | Milestone | 內容 | 估計（週） | 預計完成（快 ～ 慢） |
 |---|---|---|---|
@@ -11,12 +11,12 @@
 | M3 Git hook ✅ | pre-commit：`gofmt` / `go vet` / 前端 lint；pre-push：全部測試（只用 `danmaku_test`）+ 前端 build（2026-11-04 完成） | < 0.1 | 11/4 ～ 11/5 |
 | M4 不漏訊息 ✅ | 重連補最新 100 則 + `s-maxage=1` 快取 header + 重連退避修正 + PubSub half-open watchdog + 重建後 `resync` + SLI metrics；不做 `after`、Redis List、client timer（2026-11-05 完成，[ADR 0011](docs/design/0011-message-delivery-recovery.md)） | 1 ～ 1.5 | 11/11 ～ 11/16 |
 | M5 房間有秩序 ✅ | HTTP 錯誤格式統一 → RBAC → 房間級 shadow ban（2026-11-06 完成，[ADR 0012](docs/design/0012-room-moderation.md)） | 1 ～ 1.5 | 11/18 ～ 11/26 |
-| M6 壓測基準 | 自己寫腳本在本機模擬大量流量（不打 prod、只用測試環境），記下同步寫入的基準數字，決定 M7 要不要做；同一台 Mac 的數字只用來比較前後，不當容量上限。工具 `server/cmd/loadtest` 完成（2026-11-06），**基準還沒跑，要在 Mac 閒置時跑**。判斷：純寫入 100 則／秒 `POST` p99 ≤ 200 ms → 不做 M7；否則看混合情境最後一級有效數據的時間拆分，寫入確實先倒才做 | 0.5 ～ 0.75 | 11/22 ～ 12/2 |
-| M6.5 結構整理 ✅ | `main.go` 移到 `cmd/server/`；所有業務操作進 use case 層（一個領域一個 struct，不碰 HTTP；`/healthcheck`、`/metrics`、middleware 不用進），handler 測試的斷言不改（只換建構方式）、當作行為沒變的證據；順序：角色 → 房間 → 彈幕 → WS `join` → auth（有 timing 防護，最後做），一個領域一個 commit；角色那條由自己寫當範本，其他照範本做。進度：角色 ✅、`cmd/server` ✅、房間 ✅（2026-11-11；房名規則搬到 `internal/textrule`，額度 `model.MaxRoomsPerUser`）、彈幕 ✅（限流機制抽成 `internal/ratelimit`，規則和歷史則數由 use case 擁有）、metric facade ✅（2026-11-12）、WS `join` ✅（2026-11-13；沿用 `RoomUseCase.GetRoom`，Redis 訂閱 / Hub 留在 handler）、auth ✅（2026-11-16；register / login，IP 限流拆成 `CheckLoginIP` → decode → `Login`；refresh / logout 同樣拆法，`/me` 和 WS auth 共用 `CurrentUser`；2026-11-16 完成，[ADR 0013](docs/design/0013-use-case-layer.md)） | 0.5 ～ 1 | 日期待重算 |
-| M7 寫入路徑 | 彈幕非同步保存（queue 批次寫入、已廣播沒存到的處理）+ SLI metrics（queue 積壓、寫入延遲 / 失敗）；**看 M6 結果決定要不要做** | 1 ～ 1.25 | 日期待重算 |
-| M8 依人數排序 | 房間列表依人數排序（從 M2 移出，見下方 W4b） | 0.5 ～ 0.75 | 12/2 ～ 12/16 |
-| M9 最小 CI | 精簡 GitHub Actions（只跑測試，不擋部署、不走 PR）+ multi-stage Dockerfile | 0.1 ～ 0.25 | 12/3 ～ 12/17 |
-| M10 驗收 | 本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞）+ 重跑 M6 的壓測，檢查不漏訊息、人數恢復、重連成功 | 0.5 ～ 0.75 | 12/7 ～ 12/23 |
+| M6 壓測基準 ✅ | 本機 Mac 跑 `server/cmd/loadtest`（`e3a7b53`）：純寫入 100 則／秒 `POST` p99 5.7～6.6 ms（3 次），遠低於 200 ms → **不做 M7**；混合情境到 2,500 人 × 100 則都有效，寫入都在 3 ms 以下、不隨負載變慢，沒等過連線，CPU 花在發送（人數 × 則數）；5,000 人 × 100 則（50 萬 frame／秒）兩次都垮：同一台 Mac 先卡住（證據指向核心網路記憶體耗盡），第二次一台 server 因為卡在 kernel 的寫入用光 thread 而 crash（5,000 人 × 10 則有效）（2026-11-16 完成，[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)） | 0.5 ～ 0.75 | 11/16 |
+| M6.5 結構整理 ✅ | `main.go` 移到 `cmd/server/`；所有業務操作進 use case 層（一個領域一個 struct，不碰 HTTP；`/healthcheck`、`/metrics`、middleware 不用進），handler 測試的斷言不改（只換建構方式）、當作行為沒變的證據；順序：角色 → 房間 → 彈幕 → WS `join` → auth（有 timing 防護，最後做），一個領域一個 commit；角色那條由自己寫當範本，其他照範本做。進度：角色 ✅、`cmd/server` ✅、房間 ✅（2026-11-11；房名規則搬到 `internal/textrule`，額度 `model.MaxRoomsPerUser`）、彈幕 ✅（限流機制抽成 `internal/ratelimit`，規則和歷史則數由 use case 擁有）、metric facade ✅（2026-11-12）、WS `join` ✅（2026-11-13；沿用 `RoomUseCase.GetRoom`，Redis 訂閱 / Hub 留在 handler）、auth ✅（2026-11-16；register / login，IP 限流拆成 `CheckLoginIP` → decode → `Login`；refresh / logout 同樣拆法，`/me` 和 WS auth 共用 `CurrentUser`；2026-11-16 完成，[ADR 0013](docs/design/0013-use-case-layer.md)） | 0.5 ～ 1 | 11/16 |
+| ~~M7 寫入路徑~~ 不做 | 彈幕非同步保存：M6 量出寫入不是瓶頸（[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)），不做；真實流量顯示要優化時，先看發送（fan-out），不是寫入 | — | — |
+| M8 依人數排序 | 房間列表依人數排序（從 M2 移出，見下方 W4b） | 0.5 ～ 0.75 | 11/20 ～ 11/22 |
+| M9 最小 CI | 精簡 GitHub Actions（只跑測試，不擋部署、不走 PR）+ multi-stage Dockerfile | 0.1 ～ 0.25 | 11/21 ～ 11/24 |
+| M10 驗收 | 本機 docker-compose 腳本化故障情境（kill Redis、`kill -9` server、網路丟包 / 黑洞）+ 重跑 M6 的壓測，檢查不漏訊息、人數恢復、重連成功。先修壓測工具（M6 留下的）：校準「其他程式」CPU 門檻（疑似算到 Docker Desktop VM）後重跑 `fanout` / `rooms`；清理要等進行中的 `POST` 結束；server 中途死掉時工具算出負的 CPU。本機 25 萬 frame／秒正常、50 萬會垮（上限在中間某處），更高的級別要用多房間或低速率。加一項（Q415）：Linux 容器裡的 server 遇到不讀資料的 client，`writeWait` / outbox 踢人有沒有生效、thread 數會不會暴增（驗 W6 的 crash known issue） | 0.75 ～ 1 | 11/26 ～ 12/1 |
 
 選做（infra 向）：Railway multi-replica metrics / service discovery、alerts、trusted proxy + IPv6 /64、全域限流、測試 DB 隔離、Hub + SSE。其餘見最下方 Backlog
 
@@ -194,7 +194,7 @@
   - Known：滾動部署時，舊版 server 會把 `user_hidden` 原樣發給本人。部署時先上 server、全部換完再上 client，新 client 上線前不會有人按 ban
   - 之後：`PUT` / `DELETE roles` 沒有 rate limit，房管反覆 ban / 解除可以刷 `user_hidden` 廣播，跟 W6 的 Rate limiting 一起處理
   - 小瑕疵（Judge 2026-11-06，低優先）：管理名單 reload 失敗後按「重試」走的是載入更多，已移除的人可能留在名單上，下次異動或重新展開就恢復；`usePagedList` 的 `enabled` 參數目前沒有真實用途；同房新連線 F5 時仍是 join → auth，這段空窗內被 ban 只會讓本人提早看不到自己的彈幕
-  - 不做：記憶體 ban set + Pub/Sub 同步（原本是為全站封鎖、每個 request 都要查設計的，現在只有 `POST` 要查，而它本來就會碰 DB）。**M7 如果改成非同步寫入，`POST` 不再經過 DB，到時要加快取，表和讀取過濾不用改**
+  - 不做：記憶體 ban set + Pub/Sub 同步（原本是為全站封鎖、每個 request 都要查設計的，現在只有 `POST` 要查，而它本來就會碰 DB）。**M7 如果改成非同步寫入，`POST` 不再經過 DB，到時要加快取，表和讀取過濾不用改**（2026-11-16：M7 決定不做，見 ADR 0014）
   - 驗收：重測 `GET` 延遲，尤其是被 ban 的人還在狂發的情況
   - 全站封鎖（site ban）不在 M5：要做時才考慮 `revokeAllCredentials`、`iat <= valid_after` 和記憶體 ban set
 
@@ -210,7 +210,7 @@
 
 ## W6 — CI/CD + 進階穩定性
 
-> 順序（2026-11-04 重排，以上方 Milestones 為準）：跨 server 人數（M2）→ 補撈 + half-open watchdog（M4）→ 壓測基準（M6）→ 非同步保存（M7）→ 最小 CI + multi-stage（M9）→ 故障情境 + 壓測驗收（M10）；其餘 W6 項目為選做（見上方 Milestones）
+> 順序（2026-11-04 重排，以上方 Milestones 為準）：跨 server 人數（M2）→ 補撈 + half-open watchdog（M4）→ 壓測基準（M6）→ ~~非同步保存（M7）~~（M6 決定不做，見 ADR 0014）→ 依人數排序（M8）→ 最小 CI + multi-stage（M9）→ 故障情境 + 壓測驗收（M10）；其餘 W6 項目為選做（見上方 Milestones）
 
 - [ ] CI/CD（GitHub Actions）：範圍見 M9（2026-11-04 定）。自己一個人開發，不走 PR，部署也不等 CI；要改成擋部署時再調整
 - [ ] Dockerfile 改 multi-stage build：目前單一 stage（`FROM golang`），最終 image 帶著整套 Go toolchain，約 400 MB（實際只需要 `main` 執行檔，約 20 MB）。改成 build stage 編譯、runtime stage 用小 base image 只複製執行檔 → push / 啟動更快、攻擊面更小。注意 runtime image 要有 CA 憑證（連外部 TLS）和時區資料（若有用到）
@@ -220,11 +220,12 @@
     - 「選哪 N 則」（store，ORDER BY + LIMIT）跟「回傳順序」（API 契約，handler）是兩件事，不要用一個 order 參數同時控制
   - 「server 自己的 PubSub 重連、WS 沒斷」（本機 kill pubsub 連線實驗每次漏 1–2 則）：M4 決定接受、不解（Q296）。之後要解的話，重用 M4 的 `resync` frame：已 ready 的房間又收到 subscribe 確認 = 剛重連過
 - [x] PubSub 連線 half-open 偵測（M4，2026-11-05）：每 15 秒 PUBLISH 給自己的心跳 channel，連續 2 次沒收到就重建 PubSub，訂閱確認後送 `resync`；用「不斷線但不轉發」的 proxy 實測 35～44 秒恢復，見 [ADR 0011](docs/design/0011-message-delivery-recovery.md)
+- [ ] kernel 擋住 socket 寫入時 server 會 crash（2026-11-16 M6 發現，[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)）：卡在 `write()` 裡的 goroutine 各佔一個 OS thread，唯一的上限 `WS_MAX_CLIENTS`（這次 6,000）高於 thread 上限，macOS 到 2048 條時 `pthread_create` 失敗、SIGABRT；`writeWait` 擋不住（`write()` 本身沒回來）。目前只在壓測機自己塞爆時看到，先記錄不修。正式環境預設 `WS_MAX_CLIENTS=100` 且跑 Linux（non-blocking 寫入塞住時應回 `EAGAIN`、不佔 thread，未驗證）→ M10 在 Linux 容器驗證（Q415 A）
 - [ ] Redis 不回應時 `POST` 可能卡約 5 秒（2026-11-05 M4 驗收時發現，既有行為）：`publishTimeout` 的 500ms 擋不住 socket I/O，因為沒開 go-redis 的 `ContextTimeoutEnabled`；要開的話影響所有 Redis 呼叫，先確認 pool 和 PubSub 的行為再做
 - [ ] 接 CDN（要先有自訂網域；有流量再做）：`GET .../messages` 已帶 `s-maxage=1`，application 不用改。**要另外確認 CDN 有類似 `proxy_cache_use_stale updating` 的設定**，實測只開 `proxy_cache_lock` 時，快取到期的 1,000 個併發全部回源。錯誤回應已是 `no-store`，但也要確認 CDN 對 404 這類錯誤的預設行為
-- [ ] `maxClients` 每台 100、被拒的連線還是會先 upgrade：M6 壓測前要決定上限，以及要不要在 upgrade 前就拒絕（在 upgrade 前拒絕的話，`onopen` 不會觸發，滿房的人就看不到歷史，要一起想）
+- [ ] `maxClients` 每台 100、被拒的連線還是會先 upgrade：M6 用 `WS_MAX_CLIENTS=6000` 跑，上限還沒決定（本機 2 台共 2,500 人，每台約 1,250 人，100 則／秒仍有效）；要決定上限，以及要不要在 upgrade 前就拒絕（在 upgrade 前拒絕的話，`onopen` 不會觸發，滿房的人就看不到歷史，要一起想）
 - [ ] Store integration test 不能同時跑兩份：共用 `danmaku_test` / Redis db 15，3 個 Judge 同時跑時每次 fail 的 test 都不一樣（單獨跑都過）。CI 平行化時要每個 runner 各自的 DB / Redis db
-- [ ] 彈幕非同步保存（量大時）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
+- [ ] ~~彈幕非同步保存（量大時）~~（2026-11-16 M6 量過不做，見 [ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)，以下留作紀錄）：目前 `POST /rooms/{public_id}/messages` 同步 INSERT 成功才廣播，每則彈幕最貴的是寫入（WAL + fsync），不是查 username。改成送達路徑（pub/sub）不等 DB、保存路徑走 queue 批次寫入；要處理 queue 掛掉、已廣播但沒存到的情況
 - [ ] Hub 抽象（分離分發邏輯與 transport），新增 SSE endpoint 與 WS 並存（SSE `Last-Event-ID` 可搭配 replay）
   - 順便拆 `ws.go`（W4b 已先把長函式拆小，檔案沒拆）：照 Hub 之後的邊界拆（例如 `hub.go` 管連線 / 廣播、`client.go` 管單條連線讀寫），不要先照 auth / room 拆一次再重拆；純搬家和改 code 分兩個 commit，diff 才 review 得了
     - 2026-11-03：決定 B3 之後**先做這個拆分**（提前，不等 W6 其他項；SSE 仍留在 W6）。B3 寫完時觀察到的亂：`WebsocketHandler` 一個 struct 裡擠了四層職責 —— 連線傳輸（`conn` / `send` / `writeLoop` / `writeRaw` / `enqueueLocked`）、協定編碼（`writeEnvelopeLocked` / `reply`）、路由與成員（`clients` / `broadcastToRoomLocked`）、身分（`userID` / `exp` / `timer` / `handleAuth`）；而且函式有的吃 `conn`、有的吃 `*wsClient`，中間靠 `this.clients[conn]` 轉換。方向：gorilla chat 的 Hub / Client，函式一律傳 `*Client`

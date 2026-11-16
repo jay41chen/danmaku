@@ -36,6 +36,7 @@
 | PubSub 連線可能 half-open，整台 server 的所有房間靜靜收不到訊息，但 ping 和 HTTP 都正常 | 每台 server 定期發心跳給自己，再從那條連線收回；連續 2 次沒收到就重建連線，並通知 client 重新撈訊息。用「不斷線但不轉發」的 proxy 實測：35～44 秒恢復 | [0011](docs/design/0011-message-delivery-recovery.md) |
 | 房主擋不了搗亂的人，而舊計畫的全站記憶體封鎖又和每間房各自的角色對不上 | 房間級 shadow ban，讀取時才過濾，誤 ban 可以完全復原；`room_roles` 一人一列；階級規則集中在一個預設拒絕的純函式；檢查順序讓一般觀眾無法探測 user；所有 API 都不會告訴他被 ban。用兩台 server + 真 Redis 和瀏覽器實測 | [0012](docs/design/0012-room-moderation.md) |
 | 業務規則散在 handler 和 store；HTTP 和 WebSocket 各自直接呼叫 store 查「房間存在」「這個 user 是誰」，timing 防護的測試還得透過 HTTP 才測得到 | 每個領域一個 use case，不碰 HTTP、SQL、WebSocket 格式；handler 只留傳輸層的事（client IP、連線狀態、保護讀取迴圈的 timeout）。行為不變靠三件事：handler 斷言不改、先在舊 code 上跑過的 characterization test、mutation testing | [0013](docs/design/0013-use-case-layer.md) |
+| 聊天類系統常把寫入改成非同步，代價是可能「已廣播但沒存到」 | 先量再決定：100 則／秒時 `POST` p99 約 6 ms，到 2,500 人 × 100 則／秒寫入都在 3 ms 以下、不隨負載變慢，CPU 花在發送給每個觀眾。維持同步寫入。5,000 人 × 100 則時測試用的 Mac 先卡住（證據指向核心網路記憶體耗盡），其中一台 server 因為卡住的寫入用光 thread 而 crash | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
 
 ## 架構
 
@@ -194,7 +195,7 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 
 ### 壓測工具
 
-`server/cmd/loadtest` 用來在本機判斷「寫入是不是第一個瓶頸」。目前還沒有基準數字。同一台 Mac 的數字只能比較前後，不代表容量上限。
+`server/cmd/loadtest` 用來在本機判斷「寫入是不是第一個瓶頸」。答案是不是，基準數字見 [ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)。同一台 Mac 的數字只能比較前後，不代表容量上限；本機每秒 25 萬個 frame 正常、50 萬個時整台機器的連線一起卡住（證據指向核心網路記憶體耗盡）。
 
 - **只打本機：** 只接受 `localhost` / `127.0.0.1`、`danmaku_test` 和 Redis db 15，其他一律拒絕，結束時只清掉自己這次建立的資料。
 - **情境：** `write`（純寫入）、`mixed`（單間熱門房，流量逐步加大）、`fanout`（大量觀眾、少量彈幕）、`rooms`（500 間小房）。

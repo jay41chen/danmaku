@@ -43,6 +43,7 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | A Pub/Sub connection can go half-open and silently stop delivering to every room on a server, while pings and HTTP keep working | Each server publishes a heartbeat to itself and expects it back on that connection; two misses rebuild the connection and tell clients to fetch again. Measured with a proxy that stops forwarding without closing: recovered in 35–44 s | [0011](docs/design/0011-message-delivery-recovery.md) |
 | Room owners couldn't stop a troll, and the old plan's site-wide, in-memory ban didn't fit per-room roles | Room-level shadow bans filtered at read time, so a mistaken ban is fully reversible; one `room_roles` row per person; hierarchy rules in one fail-closed pure function; checks ordered so a viewer can't probe users; no API response tells a banned user. Verified across two servers with real Redis and in a browser | [0012](docs/design/0012-room-moderation.md) |
 | Business rules were spread across handlers and the store; the HTTP and WebSocket paths each called the store directly for "room exists" / "who is this user", and a timing-protection test had to go through HTTP | One use case per domain with no HTTP, SQL or WebSocket format; handlers keep transport work (client IP, connection state, read-loop timeouts). Behavior preserved by unchanged handler assertions, characterization tests run on the old code first, and mutation testing | [0013](docs/design/0013-use-case-layer.md) |
+| Chat systems often make writes asynchronous, at the cost of messages that are broadcast but never stored | Measured first: at 100 msg/s `POST` p99 was about 6 ms, writes stayed under 3 ms and did not slow down up to 2,500 viewers × 100 msg/s, and the CPU went to fan-out. Kept synchronous writes. At 5,000 × 100 the test Mac stalled first (the evidence points to kernel network memory running out), and one server crashed from stuck writes using up its threads | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
 
 ## Architecture
 
@@ -204,8 +205,9 @@ docker exec danmaku-db createdb -U danmaku danmaku_test
 
 ### Load test tool
 
-`server/cmd/loadtest` checks locally whether writes are the first bottleneck. There's no baseline yet, and numbers
-from one Mac are for comparisons, not capacity. It only accepts localhost, the `danmaku_test` database and Redis db 15,
+`server/cmd/loadtest` checks locally whether writes are the first bottleneck. The baseline (writes are not; see
+[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)) is from one Mac and is for comparisons, not capacity.
+On this Mac 250 k frames/s was fine; at 500 k every connection on the machine stalled. It only accepts localhost, the `danmaku_test` database and Redis db 15,
 sends at a fixed rate with latency timed from the scheduled send, and marks a step invalid when the machine is busy.
 Usage is in the [Chinese README](README.zh-TW.md).
 
