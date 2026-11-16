@@ -1,0 +1,7 @@
+# 白名單：先排除全部，再加回 build 需要的；之後新增的檔案（.env、本機 binary、壓測結果）預設不會進 build context
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+!migrations
