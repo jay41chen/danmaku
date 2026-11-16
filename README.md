@@ -42,21 +42,17 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 | A viewer count across servers has to dedupe people with several tabs and survive a server dying without cleaning up | One Redis sorted set per room with a member per connection; entries expire unless renewed, using Redis time; a single worker per server reconciles the Hub against what it last wrote, so an old snapshot can't overwrite a new one; failed writes favor a brief undercount over a 30 s ghost | [0010](docs/design/0010-room-presence.md) |
 | A Pub/Sub connection can go half-open and silently stop delivering to every room on a server, while pings and HTTP keep working | Each server publishes a heartbeat to itself and expects it back on that connection; two misses rebuild the connection and tell clients to fetch again. Measured with a proxy that stops forwarding without closing: recovered in 35–44 s | [0011](docs/design/0011-message-delivery-recovery.md) |
 | Room owners couldn't stop a troll, and the old plan's site-wide, in-memory ban didn't fit per-room roles | Room-level shadow bans filtered at read time, so a mistaken ban is fully reversible; one `room_roles` row per person; hierarchy rules in one fail-closed pure function; checks ordered so a viewer can't probe users; no API response tells a banned user. Verified across two servers with real Redis and in a browser | [0012](docs/design/0012-room-moderation.md) |
+| Business rules were spread across handlers and the store; the HTTP and WebSocket paths each called the store directly for "room exists" / "who is this user", and a timing-protection test had to go through HTTP | One use case per domain with no HTTP, SQL or WebSocket format; handlers keep transport work (client IP, connection state, read-loop timeouts). Behavior preserved by unchanged handler assertions, characterization tests run on the old code first, and mutation testing | [0013](docs/design/0013-use-case-layer.md) |
 
 ## Architecture
 
-```
-                 POST /rooms/{id}/messages
-  Browser ─────────────────────────────────▶ Server A ──INSERT──▶ PostgreSQL
-                                                │
-                                                │ PUBLISH room:{id}
-                                                ▼
-                                          Redis Pub/Sub   (one channel per room)
-                                                │
-                                                │ only servers with viewers in that room subscribe
-                                                ▼
-  Browser ◀──────── WebSocket ──────────── Server B
-           join room · receive messages
+```mermaid
+flowchart LR
+    sender["Browser"] -- "POST /rooms/{id}/messages" --> A["Server A"]
+    A -- INSERT --> pg[("PostgreSQL")]
+    A -- "PUBLISH room:{id}" --> ps[["Redis Pub/Sub<br/>one channel per room"]]
+    ps -- "only servers with viewers<br/>in that room subscribe" --> B["Server B"]
+    B -- "WebSocket<br/>join room · receive messages" --> viewer["Browser"]
 ```
 
 - A load balancer sits in front: Nginx (`least_conn`) locally, Railway in production. The servers keep no
@@ -65,21 +61,76 @@ client is slow, or when old and new code run at the same time. The non-trivial d
 - Messages are written through HTTP; the WebSocket is used only for receiving, joining rooms and auth.
 - Verified with two local servers behind Nginx and with 2 replicas on Railway.
 
+Each server subscribes only to rooms that have viewers on it: `SUBSCRIBE` when the first viewer joins, and
+`UNSUBSCRIBE` only **30 seconds** after the last one leaves (if someone comes back in that window, no new
+subscribe is needed, so a quiet room flickering between 0 and 1 viewers doesn't keep sending commands). So
+when debugging with `redis-cli PUBSUB CHANNELS 'room:*'`, a channel stays for about 30 seconds after its
+room empties; that is not a subscription leak.
+
 ### Inside the server
 
-```
-cmd/server ──→ pgstore ─────→ model
-  │            redisstore
-  └──────────→ handler ─────→ model
+How a request flows (arrows are **calls**):
+
+```mermaid
+flowchart TD
+    req(["HTTP request / WebSocket frame"]) --> handler
+    handler["<b>handler</b><br/>decode · client IP · status code · WebSocket connections"]
+    handler -- "calls roleUseCase, authUseCase, …<br/><i>interfaces declared in handler</i>" --> usecase
+    usecase["<b>usecase</b><br/>rules: 400 before 429 · rate-limit rules · timing protection"]
+    usecase -- "calls roomStore, authLimiter, …<br/><i>interfaces declared in usecase</i>" --> stores
+    usecase -- "calls roomNotifier, messageNotifier<br/><i>interfaces declared in usecase</i>" --> notifier
+    stores["<b>pgstore / redisstore</b><br/>SQL · Redis"]
+    notifier["<b>handler.RoomNotifier</b><br/>WebSocket message format · PUBLISH"]
 ```
 
-- `cmd/server` (`main.go`) is the composition root: it is the only place that knows the backends are Postgres and Redis.
-- `handler` (HTTP + WebSocket) defines the small interfaces it needs (`roomStore`, `wsPubSub`,
-  `rateLimiter`, …); `*pgstore.DBStore` and `*redisstore.RedisStore` satisfy them implicitly.
-- `model` holds data types, domain errors (`ErrRoomNotFound`, …) and rules (`ValidPublicID`), and imports
-  only the standard library. See [ADR 0009](docs/design/0009-consumer-side-interfaces.md).
-- Supporting packages: `ws` (connection + hub, no business logic), `auth` (passwords, JWT, refresh
-  tokens), `middleware`, `config`, `httpx`, `logging`, `prometheus`, `randx`.
+The same packages mapped onto Clean Architecture's rings. Here arrows mean **"knows about"**: which
+side has to know the other's contract. They all point inward. That is why the storage, below the use
+cases in the first diagram, sits *outside* them here: the use case defines what it needs, and storage
+plugs into it. In Go only `usecase → model` is an actual import; the other arrows are satisfied through
+interfaces (last bullet below).
+
+```mermaid
+flowchart LR
+    subgraph FD["Frameworks & drivers (I/O)"]
+        libs["net/http · gorilla/websocket · pgx · go-redis"]
+        subgraph IA["Interface adapters"]
+            handler["<b>handler + ws</b><br/>HTTP / WebSocket in"]
+            notifier["<b>handler.RoomNotifier</b><br/>broadcast out"]
+            stores["<b>pgstore / redisstore</b><br/>storage out"]
+            subgraph UC["Use cases"]
+                usecase["<b>usecase</b>"]
+                subgraph EN["Entities"]
+                    model["<b>model</b>"]
+                end
+            end
+        end
+    end
+    handler -- calls --> usecase
+    notifier -. "implements a port of" .-> usecase
+    stores -. "implements ports of" .-> usecase
+    usecase -- uses --> model
+```
+
+- **Entities: `model`.** Data types, domain errors (`ErrRoomNotFound`, …) and small rules
+  (`ValidPublicID`). Imports only the standard library.
+- **Use cases: `usecase`.** Business rules, one struct per domain (rooms, roles, messages, auth), with
+  no HTTP, SQL or WebSocket format. Each use case declares its **ports**, the interfaces for what it
+  needs from outside (`roomStore`, `authLimiter`, `roomNotifier`, …). It also uses pure helper packages
+  with no I/O: `auth` (bcrypt, JWT), `textrule`, `ratelimit`. See [ADR 0013](docs/design/0013-use-case-layer.md).
+- **Interface adapters.** *In*: `handler` (with its HTTP helpers `httpx` and `middleware`) turns HTTP / WebSocket into use case calls and results into
+  responses; it also owns WebSocket connection state (the Hub in `ws`, per-room subscriptions), which is
+  transport work, not business rules. *Out*: `pgstore`, `redisstore` and `handler.RoomNotifier` implement
+  the use cases' ports. Transport-side needs of the handler itself (`wsPubSub`, `healthChecker`, …) are
+  small interfaces that the stores satisfy directly.
+- **Frameworks & drivers.** Only the adapters touch the I/O libraries (net/http, gorilla/websocket,
+  pgx, go-redis). Metrics are the exception: `internal/prometheus` is a process-global facade that any
+  layer may call.
+- **`cmd/server`** (`main.go`) sits outside the rings: the composition root, the only code that sees
+  every concrete type and the only place that knows the backends are Postgres and Redis.
+- In most languages an adapter has to import the use case to implement its port. Go interfaces are
+  satisfied implicitly, so neither `handler` nor the stores import `usecase` (outside tests). See
+  [ADR 0009](docs/design/0009-consumer-side-interfaces.md).
+- Other packages: `config`, `logging`, `randx`.
 
 ## How it was built
 

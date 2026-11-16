@@ -35,21 +35,17 @@
 | 跨 server 的人數要把同一個人的多個分頁算成一人，還要撐得過 server 沒清理就掛掉 | 每個房間一個 Redis Sorted Set，每條連線一筆；沒續期就過期，時間一律用 Redis 的；每台 server 只有一個 worker 比對 Hub 和上次寫入的內容，舊快照不會蓋掉新的；寫入失敗時寧可短暫少算，也不要留 30 秒的幽靈 | [0010](docs/design/0010-room-presence.md) |
 | PubSub 連線可能 half-open，整台 server 的所有房間靜靜收不到訊息，但 ping 和 HTTP 都正常 | 每台 server 定期發心跳給自己，再從那條連線收回；連續 2 次沒收到就重建連線，並通知 client 重新撈訊息。用「不斷線但不轉發」的 proxy 實測：35～44 秒恢復 | [0011](docs/design/0011-message-delivery-recovery.md) |
 | 房主擋不了搗亂的人，而舊計畫的全站記憶體封鎖又和每間房各自的角色對不上 | 房間級 shadow ban，讀取時才過濾，誤 ban 可以完全復原；`room_roles` 一人一列；階級規則集中在一個預設拒絕的純函式；檢查順序讓一般觀眾無法探測 user；所有 API 都不會告訴他被 ban。用兩台 server + 真 Redis 和瀏覽器實測 | [0012](docs/design/0012-room-moderation.md) |
+| 業務規則散在 handler 和 store；HTTP 和 WebSocket 各自直接呼叫 store 查「房間存在」「這個 user 是誰」，timing 防護的測試還得透過 HTTP 才測得到 | 每個領域一個 use case，不碰 HTTP、SQL、WebSocket 格式；handler 只留傳輸層的事（client IP、連線狀態、保護讀取迴圈的 timeout）。行為不變靠三件事：handler 斷言不改、先在舊 code 上跑過的 characterization test、mutation testing | [0013](docs/design/0013-use-case-layer.md) |
 
 ## 架構
 
-```
-                 POST /rooms/{id}/messages
-  Browser ─────────────────────────────────▶ Server A ──INSERT──▶ PostgreSQL
-                                                │
-                                                │ PUBLISH room:{id}
-                                                ▼
-                                          Redis Pub/Sub   （每個房間一個 channel）
-                                                │
-                                                │ 只有身上有該房間觀眾的 server 會訂閱
-                                                ▼
-  Browser ◀──────── WebSocket ──────────── Server B
-           進房 · 收彈幕
+```mermaid
+flowchart LR
+    sender["Browser"] -- "POST /rooms/{id}/messages" --> A["Server A"]
+    A -- INSERT --> pg[("PostgreSQL")]
+    A -- "PUBLISH room:{id}" --> ps[["Redis Pub/Sub<br/>每個房間一個 channel"]]
+    ps -- "只有身上有該房間觀眾的<br/>server 會訂閱" --> B["Server B"]
+    B -- "WebSocket<br/>進房 · 收彈幕" --> viewer["Browser"]
 ```
 
 - 前面有 load balancer：本機是 Nginx（`least_conn`），production 是 Railway。server 沒有不能重建的狀態（token 用共用的 secret 驗、refresh token 在 PostgreSQL、限流計數和廣播在 Redis），所以**不需要 sticky session**
@@ -60,16 +56,51 @@
 
 ### server 內部
 
-```
-cmd/server ──→ pgstore ─────→ model
-  │            redisstore
-  └──────────→ handler ─────→ model
+request 怎麼走（箭頭是**呼叫**）：
+
+```mermaid
+flowchart TD
+    req(["HTTP request / WebSocket frame"]) --> handler
+    handler["<b>handler</b><br/>decode · 算 client IP · 決定 status code · 管 WebSocket 連線"]
+    handler -- "呼叫 roleUseCase、authUseCase…<br/><i>interface 寫在 handler 裡</i>" --> usecase
+    usecase["<b>usecase</b><br/>規則：先 400 再 429 · 限流規則 · timing 防護"]
+    usecase -- "呼叫 roomStore、authLimiter…<br/><i>interface 寫在 usecase 裡</i>" --> stores
+    usecase -- "呼叫 roomNotifier、messageNotifier<br/><i>interface 寫在 usecase 裡</i>" --> notifier
+    stores["<b>pgstore / redisstore</b><br/>SQL · Redis"]
+    notifier["<b>handler.RoomNotifier</b><br/>WebSocket 訊息格式 · PUBLISH"]
 ```
 
-- `cmd/server`（`main.go`）是 composition root：只有它知道後端是 Postgres 和 Redis
-- `handler`（HTTP + WebSocket）自己定義需要的小 interface（`roomStore`、`wsPubSub`、`rateLimiter`…），`*pgstore.DBStore`、`*redisstore.RedisStore` 不用宣告就自動符合
-- `model` 放資料型別、domain error（`ErrRoomNotFound`…）和規則（`ValidPublicID`），只依賴標準函式庫。見 [ADR 0009](docs/design/0009-consumer-side-interfaces.md)
-- 其他 package：`ws`（連線 + hub，不含業務邏輯）、`auth`（密碼、JWT、refresh token）、`middleware`、`config`、`httpx`、`logging`、`prometheus`、`randx`
+同一批 package 對照 Clean Architecture 的同心圓。這張圖的箭頭是**「需要知道誰」**：哪一方得認識另一方的合約，全部往內指。所以上一張圖裡在 usecase「下面」的 store，這裡在 usecase「外面」：use case 定義自己需要什麼，store 接上去。在 Go 裡只有 `usecase → model` 是真的 import，其他箭頭都靠 interface 接上（見最後一條）
+
+```mermaid
+flowchart LR
+    subgraph FD["Frameworks & drivers（做 I/O 的框架）"]
+        libs["net/http · gorilla/websocket · pgx · go-redis"]
+        subgraph IA["Interface adapters（轉接層）"]
+            handler["<b>handler + ws</b><br/>HTTP / WebSocket 進來"]
+            notifier["<b>handler.RoomNotifier</b><br/>廣播出去"]
+            stores["<b>pgstore / redisstore</b><br/>存取資料（出去）"]
+            subgraph UC["Use cases（業務規則）"]
+                usecase["<b>usecase</b>"]
+                subgraph EN["Entities（領域型別）"]
+                    model["<b>model</b>"]
+                end
+            end
+        end
+    end
+    handler -- 呼叫 --> usecase
+    notifier -. "實作 usecase 的 port" .-> usecase
+    stores -. "實作 usecase 的 port" .-> usecase
+    usecase -- 使用 --> model
+```
+
+- **Entities：`model`**。資料型別、domain error（`ErrRoomNotFound`…）和小規則（`ValidPublicID`），只依賴標準函式庫
+- **Use cases：`usecase`**。業務規則，一個領域一個 struct（房間、角色、彈幕、auth），不碰 HTTP、SQL、WebSocket 格式。每個 use case 自己宣告 **port**，也就是「需要外面提供什麼」的 interface（`roomStore`、`authLimiter`、`roomNotifier`…）。另外會用到不做 I/O 的純函式工具：`auth`（bcrypt、JWT）、`textrule`、`ratelimit`。見 [ADR 0013](docs/design/0013-use-case-layer.md)
+- **Interface adapters（轉接層）**。進來：`handler`（加上它的 HTTP 工具 `httpx`、`middleware`）把 HTTP / WebSocket 轉成 use case 呼叫、把結果轉成回應；它也管 WebSocket 的連線狀態（`ws` 的 Hub、每間房的訂閱），這是傳輸層的事，不是業務規則。出去：`pgstore`、`redisstore`、`handler.RoomNotifier` 實作 use case 的 port。handler 自己傳輸層的需求（`wsPubSub`、`healthChecker`…）也是小 interface，由 store 直接符合
+- **Frameworks & drivers**。只有轉接層會碰做 I/O 的套件（net/http、gorilla/websocket、pgx、go-redis）。例外是 metrics：`internal/prometheus` 是 process 全域的 facade，哪一層都可以呼叫
+- **`cmd/server`**（`main.go`）在同心圓外面：composition root，唯一看得到所有具體型別、也唯一知道後端是 Postgres 和 Redis 的地方
+- 多數語言裡，adapter 要 import use case 才能實作它的 port；Go 的 interface 是隱式實作，所以 `handler` 和 store 都不用 import `usecase`（測試除外）。見 [ADR 0009](docs/design/0009-consumer-side-interfaces.md)
+- 其他 package：`config`、`logging`、`randx`
 
 ## 怎麼做的
 

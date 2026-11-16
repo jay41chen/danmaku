@@ -18,5 +18,6 @@ fault-injection experiment.
 | [0010](0010-room-presence.md) | Cross-server viewer count: one writer reconciling connections into Redis | presence, TTL vs explicit cleanup, desired vs actual, failure semantics |
 | [0011](0011-message-delivery-recovery.md) | Message delivery recovery: catch up on reconnect, detect a deaf Pub/Sub connection | half-open connections, watchdogs, shared-cache TTL, cache stampede, retry storms |
 | [0012](0012-room-moderation.md) | Room moderation: structured errors, hierarchical roles, read-time shadow bans | error contracts, information leaks through codes, one-to-many schema, fail-closed authorization, check ordering |
+| [0013](0013-use-case-layer.md) | A use case layer between handlers and stores | clean architecture, what stays in the transport layer, ordering vs pairing rules, characterization tests, when to extract |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.

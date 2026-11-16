@@ -1,5 +1,5 @@
 // Package ratelimit 是限流的「機制」：規則長什麼樣、怎麼組 key、問 limiter 並處理 fail open / log / metric
-// 具體的規則（上限多少）寫在用它的地方旁邊，例如 handler/auth.go、usecase/message.go
+// 具體的規則（上限多少）寫在用它的地方旁邊，例如 usecase/auth.go、usecase/message.go
 package ratelimit
 
 import (
