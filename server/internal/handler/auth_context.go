@@ -8,8 +8,8 @@ import (
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 )
 
-// 照 ratelimit.go 的 checkRate 慣例：logger 由呼叫端傳入（每個 handler 的 component 不同）
-// 回傳 false = 已經回了 500，handler 直接 return（跟 messages.go / ratelimit.go 的 allow() 一樣的約定）
+// logger 由呼叫端傳入（每個 handler 的 component 不同）
+// 回傳 false = 已經回了 500，handler 直接 return
 func requireUserID(w http.ResponseWriter, r *http.Request, logger *slog.Logger) (int64, bool) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {

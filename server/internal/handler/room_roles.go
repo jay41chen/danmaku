@@ -12,7 +12,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/model"
 )
 
-// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 ADR 0009）
 type roleUseCase interface {
 	ChangeRole(ctx context.Context, roomPublicID string, actorID, targetID int64, desired model.RoomRole) error
 	MyRole(ctx context.Context, roomPublicID string, userID int64) (model.RoomRole, error)

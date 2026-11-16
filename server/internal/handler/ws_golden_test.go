@@ -44,7 +44,7 @@ func TestWebsocketErrorFrameGolden(t *testing.T) {
 		t.Fatalf("consts has %d entries, golden has %d", len(consts), len(wsErrorGolden))
 	}
 	db := &wsFakeDB{}
-	h := NewWebsocketHandler(&fakeRedis{}, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	for _, tc := range wsErrorGolden {
 		t.Run(tc.name, func(t *testing.T) {
 			c := consts[tc.name]

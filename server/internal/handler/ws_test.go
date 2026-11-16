@@ -85,7 +85,8 @@ func (fakeClaimsParser) ParseAccessTokenClaims(token string) (int64, time.Time, 
 	return id, time.Now().Add(ttl), nil
 }
 
-// 假 DB：實作 wsStore（GetUserByID）和 usecase 的 roomStore（GetRoomByPublicID，其餘是 stub）；users 裡沒有的 id 回 ErrUserNotFound
+// 假 DB：實作 usecase 的 authStore（GetUserByID 是真的，其餘是 stub）和 roomStore（GetRoomByPublicID 是真的，其餘是 stub）
+// users 裡沒有的 id 回 ErrUserNotFound
 type wsFakeDB struct {
 	users   map[int64]string
 	err     error
@@ -124,6 +125,27 @@ func (f *wsFakeDB) GetRoomLists(ctx context.Context, userID *int64, after *model
 	return nil, nil, errors.New("not used in ws tests")
 }
 
+// 以下只是為了滿足 usecase.authStore，ws 測試不會呼叫
+func (f *wsFakeDB) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
+	return 0, errors.New("not used in ws tests")
+}
+
+func (f *wsFakeDB) GetUser(ctx context.Context, username string) (model.User, error) {
+	return model.User{}, errors.New("not used in ws tests")
+}
+
+func (f *wsFakeDB) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+	return errors.New("not used in ws tests")
+}
+
+func (f *wsFakeDB) RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error) {
+	return 0, errors.New("not used in ws tests")
+}
+
+func (f *wsFakeDB) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	return errors.New("not used in ws tests")
+}
+
 type wsFrame struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -131,11 +153,18 @@ type wsFrame struct {
 
 func newAuthTestServer(t *testing.T) (*WebsocketHandler, string) {
 	t.Helper()
+	h, url, _ := newAuthTestServerWithDB(t)
+	return h, url
+}
+
+// 同 newAuthTestServer，但把 fake DB 也回傳，讓 test 在連線前改它的行為（例如注入 err）
+func newAuthTestServerWithDB(t *testing.T) (*WebsocketHandler, string, *wsFakeDB) {
+	t.Helper()
 	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
-	h := NewWebsocketHandler(&fakeRedis{}, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	t.Cleanup(srv.Close)
-	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
+	return h, "ws" + strings.TrimPrefix(srv.URL, "http"), db
 }
 
 func dialWS(t *testing.T, url string) *websocket.Conn {
@@ -287,8 +316,8 @@ func TestWebsocketAuthUserNotFound(t *testing.T) {
 }
 
 func TestWebsocketAuthDBError(t *testing.T) {
-	h, url := newAuthTestServer(t)
-	h.db.(*wsFakeDB).err = errors.New("db down")
+	_, url, db := newAuthTestServerWithDB(t)
+	db.err = errors.New("db down")
 	conn := dialWS(t, url)
 
 	sendAuth(t, conn, "user7")
@@ -387,7 +416,7 @@ func TestWebsocketMemberRefcount(t *testing.T) {
 func newKeepaliveTestServer(t *testing.T, pingPeriod, pongWait time.Duration) (*WebsocketHandler, string) {
 	t.Helper()
 	db := &wsFakeDB{users: map[int64]string{7: "jay", 8: "amy"}}
-	h := NewWebsocketHandler(&fakeRedis{}, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
+	h := NewWebsocketHandler(&fakeRedis{}, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	h.pingPeriod = pingPeriod
 	h.pongWait = pongWait
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
@@ -493,7 +522,7 @@ func TestWebsocketMessageExtendsDeadline(t *testing.T) {
 
 func newRoomTestServer(t *testing.T, redis *fakeRedis, db *wsFakeDB) (*WebsocketHandler, string) {
 	t.Helper()
-	h := NewWebsocketHandler(redis, db, usecase.NewRoomUseCase(db), fakeClaimsParser{})
+	h := NewWebsocketHandler(redis, usecase.NewRoomUseCase(db), usecase.NewAuthUseCase(db, nil, nil), fakeClaimsParser{})
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebsocket))
 	t.Cleanup(srv.Close)
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http")

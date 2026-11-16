@@ -24,7 +24,7 @@ type errorResponse struct {
 }
 
 // 所有回 JSON 的 handler 都走這裡
-// logger 由呼叫端傳入（照 checkRate 慣例）：各 handler 的 component 不同，log 才分得出是哪來的
+// logger 由呼叫端傳入：各 handler 的 component 不同，log 才分得出是哪來的
 func WriteJSON(w http.ResponseWriter, r *http.Request, logger *slog.Logger, status int, v any) {
 	// marshal 在 WriteHeader 之前做，失敗時還能改回 500；這是程式寫錯，記 Error
 	data, err := json.Marshal(v)

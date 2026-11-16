@@ -42,9 +42,10 @@ func main() {
 	redis := initRedis(cfg.RedisURL)
 
 	roomUseCase := usecase.NewRoomUseCase(db)
+	authUseCase := usecase.NewAuthUseCase(db, redis, tokens) // WS auth frame 和 auth handler 共用
 
-	// RedisStore 同時實作 Pub/Sub 和 rateLimiter，同一條連線共用
-	wsHandler := handler.NewWebsocketHandler(redis, db, roomUseCase, tokens, handler.WithMaxClients(cfg.WSMaxClients))
+	// RedisStore 同時實作 Pub/Sub 和限流器（use case 的 limiter），同一條連線共用
+	wsHandler := handler.NewWebsocketHandler(redis, roomUseCase, authUseCase, tokens, handler.WithMaxClients(cfg.WSMaxClients))
 	msgDeps := messageDepsFor(db, redis, cfg.LoadtestTimingLog)
 	messageHandler := handler.NewMessageHandler(usecase.NewMessageUseCase(msgDeps.store, handler.NewMessageNotifier(msgDeps.publisher), msgDeps.limiter))
 	mux := http.NewServeMux()
@@ -53,7 +54,7 @@ func main() {
 		rooms:    handler.NewRoomHandler(roomUseCase),
 		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(redis))),
 		health:   handler.NewHealthHandler(db, redis),
-		auth:     handler.NewAuthHandler(usecase.NewAuthUseCase(db, redis, tokens), db, redis, cfg.ClientIPHeader, tokens),
+		auth:     handler.NewAuthHandler(authUseCase, cfg.ClientIPHeader),
 		ws:       wsHandler,
 	})
 	go wsHandler.StartBroadcast()

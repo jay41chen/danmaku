@@ -401,10 +401,13 @@ func TestAuthRateLimitBeforeDecode(t *testing.T) {
 	}{
 		{"login", "/login", "rl:login:ip:192.0.2.1", func(h *AuthHandler) http.HandlerFunc { return h.HandleLogin }},
 		{"register", "/register", "rl:register:ip:192.0.2.1", func(h *AuthHandler) http.HandlerFunc { return h.HandleRegister }},
+		{"refresh", "/refresh", "rl:refresh:ip:192.0.2.1", func(h *AuthHandler) http.HandlerFunc { return h.HandleRefresh }},
 	}
+	bodies := []struct{ label, body string }{{"truncated", `{`}, {"not json", `not json`}}
 	for _, tc := range cases {
-		for _, badBody := range []string{`{`, `not json`} {
-			t.Run(tc.name+" ip blocked with malformed body "+badBody, func(t *testing.T) {
+		for _, bb := range bodies {
+			badBody := bb.body
+			t.Run(tc.name+" ip blocked with malformed body "+bb.label, func(t *testing.T) {
 				limiter := &fakeRateLimiter{blockKey: tc.ipKey, retryAfter: 30 * time.Second}
 				h := newTestAuthHandler(&fakeDBStore{}, limiter, "", testTokens)
 				req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(badBody))
@@ -423,7 +426,7 @@ func TestAuthRateLimitBeforeDecode(t *testing.T) {
 				}
 			})
 
-			t.Run(tc.name+" malformed body counts against ip "+badBody, func(t *testing.T) {
+			t.Run(tc.name+" malformed body counts against ip "+bb.label, func(t *testing.T) {
 				limiter := &fakeRateLimiter{}
 				h := newTestAuthHandler(&fakeDBStore{}, limiter, "", testTokens)
 				req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(badBody))

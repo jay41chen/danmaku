@@ -16,12 +16,12 @@ import (
 // 廣播（Redis PUBLISH）的上限時間：Redis 正常 < 1ms，500ms 只是卡住時的保險
 const publishTimeout = 500 * time.Millisecond
 
-// 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 ADR 0009）
 type messagePublisher interface {
 	Publish(ctx context.Context, roomID, msg string) error // 發到 roomChannel(roomID)
 }
 
-// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 ADR 0009）
 type messageUseCase interface {
 	Post(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error)
 	History(ctx context.Context, roomPublicID string) ([]model.Message, error)
@@ -98,14 +98,13 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 	}
 
 	msg, err := this.messages.Post(r.Context(), roomPublicID, userID, req.Content)
+	if writeIfRateLimited(w, err) {
+		return
+	}
 	var coded *model.CodedError
-	var limited *model.RateLimitedError
 	switch {
 	case errors.As(err, &coded):
 		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, coded)
-		return
-	case errors.As(err, &limited):
-		writeTooManyRequests(w, limited.RetryAfter)
 		return
 	case errors.Is(err, model.ErrRoomNotFound):
 		// 房間不存在或已刪除（兩者都不讓外人分辨）

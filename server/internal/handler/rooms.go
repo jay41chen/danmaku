@@ -14,7 +14,7 @@ import (
 // limit 沒帶時的預設值；上限是 model.MaxRoomListLimit
 const defaultRoomListLimit = 20
 
-// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 ADR 0009）
 type roomUseCase interface {
 	CreateRoom(ctx context.Context, ownerID int64, name string) (model.Room, error)
 	GetRoom(ctx context.Context, publicID string) (model.Room, error)

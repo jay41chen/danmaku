@@ -20,7 +20,7 @@ const (
 	defaultMaxClients = 100
 	rateLimit         = 5
 
-	// auth frame 查 DB（GetUserByID）的上限，卡住時不能一直佔著這條連線的讀取迴圈
+	// auth frame 查 user（CurrentUser）的上限，卡住時不能一直佔著這條連線的讀取迴圈
 	wsAuthDBTimeout = 3 * time.Second
 
 	// server 送 protocol ping 的間隔；必須小於 nginx proxy_read_timeout（60s）
@@ -40,17 +40,17 @@ type AccessTokenClaimsParser interface {
 	ParseAccessTokenClaims(token string) (userID int64, expiresAt time.Time, err error)
 }
 
-// 這個 handler 需要的 DB 方法（為什麼定義在這裡見 authStore）
-type wsStore interface {
-	GetUserByID(ctx context.Context, id int64) (model.User, error)
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 ADR 0009）
+type wsUserUseCase interface {
+	CurrentUser(ctx context.Context, userID int64) (model.User, error)
 }
 
-// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 ADR 0009）
 type wsRoomUseCase interface {
 	GetRoom(ctx context.Context, publicID string) (model.Room, error)
 }
 
-// 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 Redis 方法（為什麼定義在這裡見 ADR 0009）
 type wsPubSub interface {
 	Subscribe(ctx context.Context, handler func(roomID, msg string), onResync func(roomID string)) error
 	JoinRoom(ctx context.Context, roomID string) error // 委派給 roomSubscriptions.Join
@@ -64,7 +64,7 @@ type wsPubSub interface {
 //	  ├ PingLoop / WriteLoop（ws.Client）→ 沿用上層 ctx（只拿來記 log）
 //	  └ listenConnection（ReadLoop）/ hub.Unregister → 沿用上層 ctx
 //	    └ session.onMessage → dispatch → 沿用上層 ctx
-//	      ├ handleAuth → 沿用上層 ctx，但 GetUserByID 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
+//	      ├ handleAuth → 沿用上層 ctx，但 CurrentUser 另外包 wsAuthDBTimeout（DB 卡住不能擋住讀取迴圈）
 //	      ├ handleJoin（enterRoom → lookupRoom / subscribeRoom）→ 沿用上層 ctx，但房間查詢（經 room use case 的 GetRoom）、JoinRoom 各自另外包 wsJoinTimeout
 //	      ├ handleLeave → 沿用上層 ctx，但 LeaveRoom 另外包 wsJoinTimeout
 //	      └ 其餘（回 error frame）沒有 DB / Redis 呼叫，不需要 timeout
@@ -76,8 +76,8 @@ type wsPubSub interface {
 // 連線的 registry（clients / members / 房間 / 身分 / 到期 timer / 廣播）全部在 ws.Hub，這裡不持有任何鎖
 type WebsocketHandler struct {
 	redis  wsPubSub
-	db     wsStore
 	rooms  wsRoomUseCase
+	users  wsUserUseCase
 	tokens AccessTokenClaimsParser
 	hub    *ws.Hub
 	logger *slog.Logger
@@ -107,15 +107,15 @@ func WithMaxClients(n int) WebsocketOption {
 }
 
 // constructor
-func NewWebsocketHandler(redis wsPubSub, db wsStore, rooms wsRoomUseCase, tokens AccessTokenClaimsParser, opts ...WebsocketOption) *WebsocketHandler {
+func NewWebsocketHandler(redis wsPubSub, rooms wsRoomUseCase, users wsUserUseCase, tokens AccessTokenClaimsParser, opts ...WebsocketOption) *WebsocketHandler {
 	options := websocketOptions{maxClients: defaultMaxClients}
 	for _, opt := range opts {
 		opt(&options)
 	}
 	return &WebsocketHandler{
 		redis:  redis,
-		db:     db,
 		rooms:  rooms,
+		users:  users,
 		tokens: tokens,
 		hub:    ws.NewHub(options.maxClients),
 		logger: slog.Default().With("component", "websocket"),
@@ -270,7 +270,7 @@ func (this *WebsocketHandler) verifyAuthPayload(ctx context.Context, raw json.Ra
 	}
 	dbCtx, cancel := context.WithTimeout(ctx, wsAuthDBTimeout)
 	defer cancel()
-	user, err := this.db.GetUserByID(dbCtx, userID)
+	user, err := this.users.CurrentUser(dbCtx, userID)
 	if err != nil {
 		if errors.Is(err, model.ErrUserNotFound) {
 			// user 已被刪除，但 token 還沒過期（stateless，撤不掉）

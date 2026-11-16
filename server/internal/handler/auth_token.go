@@ -4,30 +4,21 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
-
-// 簽 access token，跟已經存好的 refresh token 明文組成 response
-func (this *AuthHandler) withAccessToken(r *http.Request, userID int64, refreshToken string) (tokenResponse, error) {
-	accessToken, expiresIn, err := this.tokens.IssueAccessToken(userID)
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "issue access token failed", "error", err)
-		return tokenResponse{}, err
-	}
-	return newTokenResponse(model.TokenPair{
-		AccessToken:  accessToken,
-		ExpiresIn:    expiresIn,
-		RefreshToken: refreshToken,
-	}), nil
-}
 
 // 用 refresh token 換一組新的（rotation：舊的作廢，回傳新的 refresh token）
 func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
+	// 放在最前面：被擋的 IP 連 body 都不用 decode
 	ip := httpx.ClientIP(r, this.trustedHeaderKey)
-	if !this.allow(w, r, refreshIPRule, ip) {
+	if err := this.auth.CheckRefreshIP(r.Context(), ip); err != nil {
+		if writeIfRateLimited(w, err) {
+			return
+		}
+		// CheckRefreshIP 只會回 RateLimitedError；萬一不是，當系統錯誤
+		this.logger.ErrorContext(r.Context(), "refresh failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -37,25 +28,16 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newPlain, newHash := auth.NewRefreshToken()
-	userID, err := this.db.RotateRefreshToken(r.Context(),
-		auth.HashRefreshToken(req.RefreshToken), newHash, usecase.RefreshTokenTTL, refreshTokenGrace)
+	pair, err := this.auth.Refresh(r.Context(), req.RefreshToken)
 	if err != nil {
 		this.writeRotateError(w, r, err, ip)
 		return
 	}
 
-	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
-	tokens, err := this.withAccessToken(r, userID, newPlain)
-	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, tokens)
+	httpx.WriteJSON(w, r, this.logger, http.StatusOK, newTokenResponse(pair))
 }
 
-// 只在 RotateRefreshToken 回 err 時呼叫
+// 只在 Refresh 回 err 時呼叫
 func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request, err error, ip string) {
 	// invalid 和 duplicate use 對 client 都是 401（重新登入），不讓對方知道「這個 token 曾經有效」
 	// RefreshTokenRevokedError 一定要在 errors.Is(Invalid) 之前判斷：它的 Is 也會對 Invalid 回 true，
@@ -81,7 +63,7 @@ func (this *AuthHandler) writeRotateError(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusUnauthorized, "invalid_refresh_token", "invalid refresh token")
 		return
 	}
-	this.logger.ErrorContext(r.Context(), "rotate refresh token failed", "error", err)
+	this.logger.ErrorContext(r.Context(), "refresh failed", "error", err)
 	httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
@@ -95,9 +77,9 @@ func (this *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := this.db.RevokeRefreshToken(r.Context(), auth.HashRefreshToken(req.RefreshToken)); err != nil {
+	if err := this.auth.Logout(r.Context(), req.RefreshToken); err != nil {
 		// DB 壞了要回 500：回 204 的話 client 以為登出了，token 其實還有效
-		this.logger.ErrorContext(r.Context(), "revoke refresh token failed", "error", err)
+		this.logger.ErrorContext(r.Context(), "logout failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}

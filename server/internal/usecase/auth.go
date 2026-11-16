@@ -19,10 +19,15 @@ var (
 	LoginIPRule       = ratelimit.Rule{Name: "login:ip", Limit: 20, Window: time.Minute}            // 一台機器狂試很多帳號
 	LoginUsernameRule = ratelimit.Rule{Name: "login:username", Limit: 10, Window: 15 * time.Minute} // 很多 IP 一起猜同一個帳號
 	RegisterIPRule    = ratelimit.Rule{Name: "register:ip", Limit: 5, Window: time.Hour}            // 一台機器狂註冊垃圾帳號
+	RefreshIPRule     = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute}          // 一台機器狂猜 refresh token
 )
 
-// refresh token 的有效期；匯出是因為 handler 的 refresh（rotate）也要用同一個值
-const RefreshTokenTTL = 7 * 24 * time.Hour
+const (
+	// refresh token 的有效期（login 發新的、refresh rotate 時都用同一個值）
+	refreshTokenTTL = 7 * 24 * time.Hour
+	// 只蓋「回應掉了、client 自動重送」的最壞情況：timeout 5 秒 × 重試 3 次（Step 10）
+	refreshTokenGrace = 15 * time.Second
+)
 
 var (
 	dummyHash, _ = auth.HashPassword("timing-equalizer")
@@ -33,6 +38,9 @@ type authStore interface {
 	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
 	GetUser(ctx context.Context, username string) (model.User, error)
 	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
+	GetUserByID(ctx context.Context, id int64) (model.User, error)
+	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 }
 
 // 限流器：Allow 之外，login 成功時還要 Reset / Refund
@@ -49,7 +57,7 @@ type tokenIssuer interface {
 	IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error)
 }
 
-// 帳號的業務操作（目前：註冊、登入）：不知道 HTTP 和 SQL
+// 帳號的業務操作（註冊、登入、refresh、登出、查目前 user）：不知道 HTTP 和 SQL
 type AuthUseCase struct {
 	store   authStore
 	limiter authLimiter
@@ -82,6 +90,12 @@ func (this *AuthUseCase) CheckRegisterIP(ctx context.Context, ip string) error {
 // 用途：POST /login 最前面
 func (this *AuthUseCase) CheckLoginIP(ctx context.Context, ip string) error {
 	return this.checkIP(ctx, LoginIPRule, ip)
+}
+
+// refresh 前先問這個 IP 的限流；被擋回 *model.RateLimitedError，否則 nil
+// 放在 decode body 之前，理由同 CheckLoginIP；用途：POST /refresh 最前面
+func (this *AuthUseCase) CheckRefreshIP(ctx context.Context, ip string) error {
+	return this.checkIP(ctx, RefreshIPRule, ip)
 }
 
 // 問 IP 規則放不放行；log 帶 client_ip（HTTP 層的 RemoteAddr 在 nginx 後面只會是 nginx 的 IP）
@@ -161,7 +175,7 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 
 	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
 	plain, hash := auth.NewRefreshToken()
-	if err := this.store.CreateRefreshToken(ctx, user.ID, hash, RefreshTokenTTL); err != nil {
+	if err := this.store.CreateRefreshToken(ctx, user.ID, hash, refreshTokenTTL); err != nil {
 		return model.User{}, model.TokenPair{}, fmt.Errorf("create refresh token: %w", err)
 	}
 	accessToken, expiresIn, err := this.tokens.IssueAccessToken(user.ID)
@@ -187,4 +201,44 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 		ExpiresIn:    expiresIn,
 		RefreshToken: plain,
 	}, nil
+}
+
+// 用 refresh token 換一組新的（rotation：舊的作廢，回傳新的 refresh token）
+// rotate 的錯誤帶步驟名稱包起來，errors.Is / As 仍可辨識 *model.RefreshTokenRevokedError、
+// *model.RefreshTokenDuplicateUseError、model.ErrRefreshTokenInvalid（handler 靠它們決定 401 和 log）
+// 不把 token 明文或 hash 放進任何 error 或 log；用途：POST /refresh（CheckRefreshIP 通過、decode body 之後）
+func (this *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (model.TokenPair, error) {
+	newPlain, newHash := auth.NewRefreshToken()
+	userID, err := this.store.RotateRefreshToken(ctx,
+		auth.HashRefreshToken(refreshToken), newHash, refreshTokenTTL, refreshTokenGrace)
+	if err != nil {
+		return model.TokenPair{}, fmt.Errorf("rotate refresh token: %w", err)
+	}
+
+	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
+	accessToken, expiresIn, err := this.tokens.IssueAccessToken(userID)
+	if err != nil {
+		return model.TokenPair{}, fmt.Errorf("issue access token: %w", err)
+	}
+	return model.TokenPair{
+		AccessToken:  accessToken,
+		ExpiresIn:    expiresIn,
+		RefreshToken: newPlain,
+	}, nil
+}
+
+// 只作廢這一個 refresh token（這台裝置登出）
+// 查不到 / 已經作廢都不算錯（idempotent）；DB 失敗帶步驟名稱包起來回傳，不吞掉
+// 不把 token 明文或 hash 放進任何 error 或 log；用途：POST /logout
+func (this *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
+	if err := this.store.RevokeRefreshToken(ctx, auth.HashRefreshToken(refreshToken)); err != nil {
+		return fmt.Errorf("revoke refresh token: %w", err)
+	}
+	return nil
+}
+
+// 用 userID 查 user；查不到回 model.ErrUserNotFound（原樣回，不包）
+// 用途：GET /me 和 WS auth frame（token 已由 RequireAuth / WS handler 解析，這裡只做 userID → user）
+func (this *AuthUseCase) CurrentUser(ctx context.Context, userID int64) (model.User, error) {
+	return this.store.GetUserByID(ctx, userID)
 }

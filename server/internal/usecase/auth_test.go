@@ -15,8 +15,9 @@ import (
 
 // 認證 use case 的假 store
 type fakeAuthStore struct {
-	user   model.User
-	getErr error
+	user      model.User
+	getErr    error
+	rotateErr error // RotateRefreshToken 回傳的錯
 }
 
 func (f *fakeAuthStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
@@ -28,6 +29,18 @@ func (f *fakeAuthStore) GetUser(ctx context.Context, username string) (model.Use
 }
 
 func (f *fakeAuthStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+	return nil
+}
+
+func (f *fakeAuthStore) GetUserByID(ctx context.Context, id int64) (model.User, error) {
+	return f.user, f.getErr
+}
+
+func (f *fakeAuthStore) RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error) {
+	return 7, f.rotateErr
+}
+
+func (f *fakeAuthStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
 	return nil
 }
 
@@ -121,5 +134,41 @@ func TestAuthLoginUsernameBlockedLogsClientIP(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "client_ip=1.2.3.4") {
 		t.Errorf("log %q does not contain client_ip=1.2.3.4", buf.String())
+	}
+}
+
+// 守住 refresh 被 IP 限流擋住時 log 要帶 client_ip；也要回 RetryAfter 給 handler 翻成 429
+func TestAuthCheckRefreshIPBlockedLogsClientIP(t *testing.T) {
+	limiter := &fakeAuthLimiter{blockKey: RefreshIPRule.Key("1.2.3.4"), retryAfter: 30 * time.Second}
+	uc := NewAuthUseCase(&fakeAuthStore{}, limiter, newTestAuthTokens(t))
+	var buf bytes.Buffer
+	uc.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	err := uc.CheckRefreshIP(context.Background(), "1.2.3.4")
+
+	var limited *model.RateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("err = %v, want *model.RateLimitedError", err)
+	}
+	if limited.RetryAfter != 30*time.Second {
+		t.Errorf("RetryAfter = %v, want 30s", limited.RetryAfter)
+	}
+	if !strings.Contains(buf.String(), "client_ip=1.2.3.4") {
+		t.Errorf("log %q does not contain client_ip=1.2.3.4", buf.String())
+	}
+}
+
+// Refresh 把 rotate 的錯帶步驟名稱包起來，但 handler 靠 errors.As 決定 401 和 log，包了之後仍要認得出來
+func TestAuthRefreshWrapsButPreservesRotateError(t *testing.T) {
+	uc := NewAuthUseCase(&fakeAuthStore{rotateErr: &model.RefreshTokenRevokedError{UserID: 7}}, &fakeAuthLimiter{}, newTestAuthTokens(t))
+
+	_, err := uc.Refresh(context.Background(), "some-token")
+
+	var revoked *model.RefreshTokenRevokedError
+	if !errors.As(err, &revoked) || revoked.UserID != 7 {
+		t.Fatalf("err = %v, want it to wrap *model.RefreshTokenRevokedError{UserID: 7}", err)
+	}
+	if !strings.Contains(err.Error(), "rotate refresh token") {
+		t.Errorf("err = %q, want it to name the failed step", err.Error())
 	}
 }

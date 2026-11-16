@@ -10,7 +10,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 )
 
-// 這個 handler 需要的 DB / Redis 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 DB / Redis 方法（為什麼定義在這裡見 ADR 0009）
 // DB 和 Redis 的 CheckHealth 簽名一樣，所以兩邊共用這一個 interface
 type healthChecker interface {
 	CheckHealth(ctx context.Context) error

@@ -149,8 +149,6 @@ func (f *fakeDBStore) GetRoomLists(ctx context.Context, userID *int64, after *mo
 }
 
 // handler test 用的假 limiter：照 test 設好的劇本回答，不真的計數
-var _ rateLimiter = (*fakeRateLimiter)(nil) // compile 時檢查 fake 有實作 interface
-
 type fakeRateLimiter struct {
 	blockKey   string                   // 收到這個 key 就回 allowed=false
 	retryAfter time.Duration            // 被擋時回傳的等待時間
@@ -199,8 +197,10 @@ var testTokens = func() *auth.TokenIssuer {
 
 // auth handler test 的組裝：use case 和 handler 共用同一組 fake，
 // 這樣 test 看到的 spy（allowKeys / resetKeys / gotTokenHash …）不分是哪一層呼叫的
-func newTestAuthHandler(db *fakeDBStore, limiter *fakeRateLimiter, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
-	return NewAuthHandler(usecase.NewAuthUseCase(db, limiter, tokens), db, limiter, trustedHeaderKey, tokens)
+func newTestAuthHandler(db *fakeDBStore, limiter *fakeRateLimiter, trustedHeaderKey string, tokens interface {
+	IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error)
+}) *AuthHandler {
+	return NewAuthHandler(usecase.NewAuthUseCase(db, limiter, tokens), trustedHeaderKey)
 }
 
 // 一定簽失敗的 issuer：真的 HS256 不會失敗，只能用 fake 走到這條路

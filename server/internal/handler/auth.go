@@ -5,11 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
-	"github.com/jay41chen/danmaku/server/internal/ratelimit"
 )
 
 const (
@@ -18,58 +16,29 @@ const (
 	msgInvalidCredentials = "invalid username or password"
 )
 
-// 限流規則（機制在 internal/ratelimit）；login / register 的規則在 use case
-var (
-	refreshIPRule = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute} // 一台機器狂猜 refresh token
-)
-
-// 只留 refresh 的寬限期；refresh token 的有效期（usecase.RefreshTokenTTL）由 use case 擁有
-const (
-	// 只蓋「回應掉了、client 自動重送」的最壞情況：timeout 5 秒 × 重試 3 次（Step 10）
-	refreshTokenGrace = 15 * time.Second
-)
-
-// handler 需要的 DB 方法：interface 定義在使用方（Go 的 accept interfaces, return structs）
-// 只列這個 handler 真的會呼叫的方法；*pgstore.DBStore 不用宣告就自動符合，main.go 照樣傳同一個 db
-// test 換成 fake 時，只要實作這幾個方法
-type authStore interface {
-	GetUserByID(ctx context.Context, id int64) (model.User, error)
-
-	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
-	RevokeRefreshToken(ctx context.Context, tokenHash string) error
-}
-
-// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 ADR 0009）
 type authUseCase interface {
 	CheckRegisterIP(ctx context.Context, ip string) error
 	Register(ctx context.Context, username, password string) (int64, error)
 	CheckLoginIP(ctx context.Context, ip string) error
 	Login(ctx context.Context, ip, username, password string) (model.User, model.TokenPair, error)
+	CheckRefreshIP(ctx context.Context, ip string) error
+	Refresh(ctx context.Context, refreshToken string) (model.TokenPair, error)
+	Logout(ctx context.Context, refreshToken string) error
+	CurrentUser(ctx context.Context, userID int64) (model.User, error)
 }
 
 type AuthHandler struct {
 	auth             authUseCase
-	db               authStore
 	logger           *slog.Logger
-	limiter          rateLimiter
 	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 httpx.ClientIP）
-	tokens           tokenIssuer
 }
 
-// handler 只需要「能簽 access token」：定義在使用方，*auth.TokenIssuer 不用宣告就自動符合
-// test 可以換成一定會失敗的 fake，驗證簽失敗時不會 Reset / Refund
-type tokenIssuer interface {
-	IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error)
-}
-
-func NewAuthHandler(auth authUseCase, db authStore, limiter rateLimiter, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
+func NewAuthHandler(auth authUseCase, trustedHeaderKey string) *AuthHandler {
 	return &AuthHandler{
 		auth:             auth,
-		db:               db,
 		logger:           slog.Default().With("component", "auth"),
-		limiter:          limiter,
 		trustedHeaderKey: trustedHeaderKey,
-		tokens:           tokens,
 	}
 }
 
@@ -115,9 +84,7 @@ type refreshRequest struct {
 func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// 做ip的429 check（在 bcrypt 之前擋，不讓攻擊者讓 server 做白工）
 	if err := this.auth.CheckRegisterIP(r.Context(), httpx.ClientIP(r, this.trustedHeaderKey)); err != nil {
-		var limited *model.RateLimitedError
-		if errors.As(err, &limited) {
-			writeTooManyRequests(w, limited.RetryAfter)
+		if writeIfRateLimited(w, err) {
 			return
 		}
 		// CheckRegisterIP 只會回 RateLimitedError；萬一不是，當系統錯誤
@@ -160,9 +127,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// 放在最前面：被擋的 IP 連 body 都不用 decode
 	ip := httpx.ClientIP(r, this.trustedHeaderKey)
 	if err := this.auth.CheckLoginIP(r.Context(), ip); err != nil {
-		var limited *model.RateLimitedError
-		if errors.As(err, &limited) {
-			writeTooManyRequests(w, limited.RetryAfter)
+		if writeIfRateLimited(w, err) {
 			return
 		}
 		// CheckLoginIP 只會回 RateLimitedError；萬一不是，當系統錯誤
@@ -178,11 +143,10 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, pair, err := this.auth.Login(r.Context(), ip, req.Username, req.Password)
-	var limited *model.RateLimitedError
-	switch {
-	case errors.As(err, &limited):
-		writeTooManyRequests(w, limited.RetryAfter)
+	if writeIfRateLimited(w, err) {
 		return
+	}
+	switch {
 	case errors.Is(err, model.ErrInvalidCredentials):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
 		return
@@ -223,7 +187,7 @@ func (this *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := this.db.GetUserByID(r.Context(), userID)
+	user, err := this.auth.CurrentUser(r.Context(), userID)
 	if errors.Is(err, model.ErrUserNotFound) {
 		// user 已刪除但 access token 還沒過期：跟 RequireAuth 同一個 401，
 		// client 會去 /refresh → refresh token 已被 CASCADE 刪除 → 401 → 登出

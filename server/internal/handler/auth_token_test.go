@@ -75,6 +75,27 @@ func TestHandleRefresh(t *testing.T) {
 		}
 	})
 
+	// rotate 已 commit、簽 access token 失敗 → 500；client 拿舊的 refresh token 重送會落在 grace 內
+	t.Run("access token signing failure after rotate returns 500", func(t *testing.T) {
+		fake := &fakeDBStore{rotateUserID: 7}
+		h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", failingTokenIssuer{})
+		req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+
+		h.HandleRefresh(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d (body: %q)", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+		if got := decodeErrorBody(t, rec).Code; got != "internal_error" {
+			t.Errorf("code = %q, want internal_error", got)
+		}
+		// 確認有走到 rotate 之後的路徑，不是更早就失敗
+		if fake.gotOldHash == "" {
+			t.Error("Rotate not called, want called before signing failure")
+		}
+	})
+
 	t.Run("ip blocked", func(t *testing.T) {
 		fake := &fakeDBStore{rotateUserID: 7}
 		limiter := &fakeRateLimiter{blockKey: "rl:refresh:ip:192.0.2.1", retryAfter: time.Minute}
