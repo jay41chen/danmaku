@@ -4,6 +4,7 @@ import { AuthForm } from "./components/AuthForm";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
 import { RoleRoster } from "./components/RoleRoster";
+import { PopularRooms } from "./components/PopularRooms";
 import { RoomList } from "./components/RoomList";
 import { fetchMyRooms, fetchRooms } from "./api/rooms";
 import { ROOM_PUBLIC_ID } from "./config";
@@ -56,6 +57,7 @@ function App() {
       ) : (
         <AuthForm />
       )}
+      <PopularRooms />
       <RoomList title="所有房間" fetcher={fetchRooms} />
       {user && <RoomList key={user.id} title="我的房間" fetcher={fetchMyRooms} />}
       {roomStatus === "not_found" ? (
