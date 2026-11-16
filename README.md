@@ -140,7 +140,8 @@ flowchart LR
 - Every change goes through design → implementation → independent review. Fixes are checked with
   **mutation testing**: deliberately break the code and confirm some test fails.
 - Integration tests run against real PostgreSQL and Redis, with `-race`, locally before each push and in
-  GitHub Actions on a fresh database, where a missing test database fails instead of skipping.
+  GitHub Actions on a fresh database without the test cache, where a missing test variable fails instead
+  of skipping.
 - Failure modes were reproduced locally before being fixed: pausing Redis (`CLIENT PAUSE`), dropping
   packets through a proxy, killing the Pub/Sub connection, and clients that never read.
 
@@ -149,7 +150,7 @@ flowchart LR
 - **Backend**: Go (`net/http`, gorilla/websocket, pgx, go-redis), golang-migrate, JWT (HS256), bcrypt
 - **Frontend**: React + TypeScript + Vite
 - **Data**: PostgreSQL 17, Redis 7 (Pub/Sub, rate limiting)
-- **Infra**: Docker Compose, Nginx; Railway (backend) + GitHub Pages (frontend); GitHub Actions (server CI)
+- **Infra**: Docker Compose, Nginx; Railway (backend, currently paused) + GitHub Pages (frontend); GitHub Actions (server CI)
 - **Observability**: slog JSON logs; Prometheus + Grafana, Promtail + Loki (local)
 
 ## Status

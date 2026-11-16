@@ -108,7 +108,7 @@ flowchart LR
 ## 怎麼做的
 
 - 每個改動都走「設計 → 實作 → 獨立審查」；修正用 **mutation testing** 驗證：故意把 code 改壞，確認有 test 會 fail
-- Integration test 打真的 PostgreSQL 和 Redis，並開 `-race`；push 前在本機跑，push 後在 GitHub Actions 用全新的 DB 再跑一次，CI 上缺測試 DB 會 fail 而不是 skip
+- Integration test 打真的 PostgreSQL 和 Redis，並開 `-race`；push 前在本機跑，push 後在 GitHub Actions 用全新的 DB、不吃測試快取再跑一次，CI 上缺測試環境變數會 fail 而不是 skip
 - 問題先在本機重現再修：讓 Redis 暫停（`CLIENT PAUSE`）、用 proxy 丟包、砍掉 Pub/Sub 連線、永遠不讀的 client
 
 ## 進度
@@ -372,7 +372,7 @@ Observability stack（Loki、Promtail、Grafana、Prometheus）只存在於 loca
 |---|---|---|
 | Frontend | GitHub Pages | push 到 `dev` 且有改到 `client/**`（`.github/workflows/deploy-frontend.yml`），也可在 Actions 手動跑 `workflow_dispatch`；`VITE_API_URL` / `VITE_WS_URL` 放在 GitHub Secrets |
 | Backend | Railway（`danmaku` service + PostgreSQL + Redis） | push 到 `dev` 由 Railway 自動 build `server/Dockerfile` 並部署；migration 在 server 啟動時自動套用。目前停用（試用期已過）；image 入口是 `/server`，重新啟用時若有自訂 start command 要跟著改 |
-| Server CI | GitHub Actions | push 到 `dev` 且有改到 `server/**`（`.github/workflows/server-ci.yml`）：測試（Postgres、Redis 用 service container）+ `docker build`，不擋部署 |
+| Server CI | GitHub Actions | push 到 `dev` 且有改到 `server/**`（`.github/workflows/server-ci.yml`）：測試（Postgres、Redis 用 service container，`-count=1` 不吃測試快取）+ `docker build`，不擋部署 |
 
 Railway 上的 env（`DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、`CORS_ORIGINS`、`CLIENT_IP_HEADER=X-Real-IP`）都在 dashboard 設定，**不進 repo**。`JWT_SECRET` 沒設時新版會 fail fast 起不來，部署前先確認。
 
