@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
+	"github.com/jay41chen/danmaku/server/internal/pgstore"
 	"github.com/jay41chen/danmaku/server/internal/testenv"
 )
 
@@ -18,6 +19,10 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	url := testenv.Require(t, "TEST_DATABASE_URL")
 	if _, err := checkDatabaseURL(url); err != nil {
 		t.Fatalf("refusing to run against this database: %v", err)
+	}
+	// 每個用 DB 的測試 package 自己保證 schema 存在，不靠別的 package 先跑（CI 是全新 DB）
+	if err := pgstore.RunMigration(url); err != nil {
+		t.Fatalf("RunMigration: %v", err)
 	}
 	pool, err := pgxpool.New(context.Background(), url)
 	if err != nil {
