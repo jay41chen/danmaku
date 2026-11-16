@@ -15,6 +15,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
 
 // handler test 共用的假 DB：auth / room / message handler 的 store interface 都靠它實作
@@ -195,6 +196,12 @@ var testTokens = func() *auth.TokenIssuer {
 	}
 	return issuer
 }()
+
+// auth handler test 的組裝：use case 和 handler 共用同一組 fake，
+// 這樣 test 看到的 spy（allowKeys / resetKeys / gotTokenHash …）不分是哪一層呼叫的
+func newTestAuthHandler(db *fakeDBStore, limiter *fakeRateLimiter, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
+	return NewAuthHandler(usecase.NewAuthUseCase(db, limiter, tokens), db, limiter, trustedHeaderKey, tokens)
+}
 
 // 一定簽失敗的 issuer：真的 HS256 不會失敗，只能用 fake 走到這條路
 type failingTokenIssuer struct{}

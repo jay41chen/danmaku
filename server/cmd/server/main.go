@@ -53,7 +53,7 @@ func main() {
 		rooms:    handler.NewRoomHandler(roomUseCase),
 		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(redis))),
 		health:   handler.NewHealthHandler(db, redis),
-		auth:     handler.NewAuthHandler(db, redis, cfg.ClientIPHeader, tokens),
+		auth:     handler.NewAuthHandler(usecase.NewAuthUseCase(db, redis, tokens), db, redis, cfg.ClientIPHeader, tokens),
 		ws:       wsHandler,
 	})
 	go wsHandler.StartBroadcast()

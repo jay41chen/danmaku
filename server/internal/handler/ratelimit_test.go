@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
 
 // 守住 auth 被限流時 log 要帶 remote_addr，才查得到攻擊來源 IP
@@ -16,9 +18,9 @@ func TestCheckRateLogsRemoteAddrWhenBlocked(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	req := httptest.NewRequest(http.MethodPost, "/login", nil)
 	req.RemoteAddr = "1.2.3.4:5"
-	limiter := &fakeRateLimiter{blockKey: loginIPRule.Key("v"), retryAfter: time.Second}
+	limiter := &fakeRateLimiter{blockKey: usecase.LoginIPRule.Key("v"), retryAfter: time.Second}
 
-	allowed, _ := checkRate(req, limiter, logger, loginIPRule, "v")
+	allowed, _ := checkRate(req, limiter, logger, usecase.LoginIPRule, "v")
 
 	if allowed {
 		t.Fatal("allowed = true, want false")

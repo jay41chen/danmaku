@@ -46,7 +46,7 @@ func TestLoginFailuresAreIndistinguishable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewAuthHandler(&fakeDBStore{user: tc.user, getErr: tc.getErr}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{user: tc.user, getErr: tc.getErr}, &fakeRateLimiter{}, "", testTokens)
 			rec := httptest.NewRecorder()
 
 			h.HandleLogin(rec, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(tc.body)))
@@ -114,7 +114,7 @@ func TestUnauthorizedResponsesAreIdentical(t *testing.T) {
 		do   func() *httptest.ResponseRecorder
 	}{
 		{"valid token, user deleted: GET /me", func() *httptest.ResponseRecorder {
-			h := NewAuthHandler(&fakeDBStore{getByIDErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{getByIDErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
 			return authed(http.HandlerFunc(h.HandleMe), httptest.NewRequest(http.MethodGet, "/me", nil))
 		}},
 		{"valid token, user deleted: POST /rooms", func() *httptest.ResponseRecorder {
@@ -194,7 +194,7 @@ func TestInvalidRefreshTokenResponsesAreIdentical(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewAuthHandler(&fakeDBStore{rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
 			rec := httptest.NewRecorder()
 
 			h.HandleRefresh(rec, httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(`{"refresh_token":"x"}`)))
@@ -212,7 +212,7 @@ func TestInvalidRefreshTokenResponsesAreIdentical(t *testing.T) {
 // 429：code 是 rate_limited，而且 Retry-After 一定要在（少了 client 不知道要等多久）
 func TestRateLimitedResponse(t *testing.T) {
 	limiter := &fakeRateLimiter{blockKey: "rl:login:ip:192.0.2.1", retryAfter: 30 * time.Second}
-	h := NewAuthHandler(&fakeDBStore{}, limiter, "", testTokens)
+	h := newTestAuthHandler(&fakeDBStore{}, limiter, "", testTokens)
 	rec := httptest.NewRecorder()
 
 	h.HandleLogin(rec, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"jay","password":"kq7vz2mx"}`)))
@@ -239,19 +239,19 @@ func TestInternalErrorDoesNotLeak(t *testing.T) {
 		do   func() *httptest.ResponseRecorder
 	}{
 		{"login", func() *httptest.ResponseRecorder {
-			h := NewAuthHandler(&fakeDBStore{getErr: leak}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{getErr: leak}, &fakeRateLimiter{}, "", testTokens)
 			rec := httptest.NewRecorder()
 			h.HandleLogin(rec, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"jay","password":"kq7vz2mx"}`)))
 			return rec
 		}},
 		{"register", func() *httptest.ResponseRecorder {
-			h := NewAuthHandler(&fakeDBStore{createErr: leak}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{createErr: leak}, &fakeRateLimiter{}, "", testTokens)
 			rec := httptest.NewRecorder()
 			h.HandleRegister(rec, httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(`{"username":"jay","password":"kq7vz2mx"}`)))
 			return rec
 		}},
 		{"refresh rotate", func() *httptest.ResponseRecorder {
-			h := NewAuthHandler(&fakeDBStore{rotateErr: leak}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{rotateErr: leak}, &fakeRateLimiter{}, "", testTokens)
 			rec := httptest.NewRecorder()
 			h.HandleRefresh(rec, httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(`{"refresh_token":"x"}`)))
 			return rec
@@ -300,7 +300,7 @@ func TestInvalidJSONCode(t *testing.T) {
 			return serveCreateRoomMessage(t, h, 7, "abcDEF12345", broken)
 		}},
 		{"logout", func() *httptest.ResponseRecorder {
-			h := NewAuthHandler(&fakeDBStore{}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{}, &fakeRateLimiter{}, "", testTokens)
 			rec := httptest.NewRecorder()
 			h.HandleLogout(rec, httptest.NewRequest(http.MethodPost, "/logout", strings.NewReader(broken)))
 			return rec

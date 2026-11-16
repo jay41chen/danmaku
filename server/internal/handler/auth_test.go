@@ -40,7 +40,7 @@ func TestHandleRegister(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{createErr: tc.createErr}
-			h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/register", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -58,7 +58,7 @@ func TestHandleRegister(t *testing.T) {
 	// 成功的 case 要多驗 response body 和存進去的 hash，形狀不同，單獨寫
 	t.Run("success returns 201 and stores hash", func(t *testing.T) {
 		fake := &fakeDBStore{createID: 7}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -123,7 +123,7 @@ func TestHandleLogin(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{user: tc.user, getErr: tc.getErr}
-			h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -138,51 +138,9 @@ func TestHandleLogin(t *testing.T) {
 		})
 	}
 
-	// 未知帳號也必須真的跑一次 bcrypt（用 dummyHash），否則回應時間會洩漏帳號存不存在
-	// 用 spy 取代 checkPassword 確認呼叫次數與收到的 hash；回應則照舊
-	t.Run("checkPassword is called once for unknown user with dummyHash", func(t *testing.T) {
-		h := NewAuthHandler(&fakeDBStore{getErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
-		var gotHashes []string
-		h.checkPassword = func(hash, pw string) (bool, error) {
-			gotHashes = append(gotHashes, hash)
-			return false, nil
-		}
-		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("nobody", password)))
-		rec := httptest.NewRecorder()
-
-		h.HandleLogin(rec, req)
-
-		if rec.Code != http.StatusBadRequest || decodeErrorBody(t, rec).Code != "invalid_credentials" {
-			t.Errorf("response = %d %q, want 400 invalid_credentials", rec.Code, rec.Body.String())
-		}
-		if len(gotHashes) != 1 || gotHashes[0] != dummyHash {
-			t.Errorf("checkPassword hashes = %q, want exactly [dummyHash]", gotHashes)
-		}
-	})
-
-	t.Run("checkPassword is called once for wrong password with user's hash", func(t *testing.T) {
-		h := NewAuthHandler(&fakeDBStore{user: stored}, &fakeRateLimiter{}, "", testTokens)
-		var gotHashes []string
-		h.checkPassword = func(hash, pw string) (bool, error) {
-			gotHashes = append(gotHashes, hash)
-			return false, nil
-		}
-		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", "wrong-password")))
-		rec := httptest.NewRecorder()
-
-		h.HandleLogin(rec, req)
-
-		if rec.Code != http.StatusBadRequest || decodeErrorBody(t, rec).Code != "invalid_credentials" {
-			t.Errorf("response = %d %q, want 400 invalid_credentials", rec.Code, rec.Body.String())
-		}
-		if len(gotHashes) != 1 || gotHashes[0] != stored.PasswordHash {
-			t.Errorf("checkPassword hashes = %q, want exactly [user's PasswordHash]", gotHashes)
-		}
-	})
-
 	t.Run("success returns 200 with access token and stored username", func(t *testing.T) {
 		fake := &fakeDBStore{user: stored}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", password)))
 		rec := httptest.NewRecorder()
 
@@ -220,7 +178,7 @@ func TestHandleLogin(t *testing.T) {
 	// 存 refresh token 失敗 = server 的錯：跟簽 access token 失敗一樣，不算登入成功
 	t.Run("refresh token store failure returns 500 without reset or refund", func(t *testing.T) {
 		limiter := &fakeRateLimiter{}
-		h := NewAuthHandler(&fakeDBStore{user: stored, createTokenErr: errors.New("db down")}, limiter, "", testTokens)
+		h := newTestAuthHandler(&fakeDBStore{user: stored, createTokenErr: errors.New("db down")}, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body("jay", password)))
 		rec := httptest.NewRecorder()
 
@@ -277,7 +235,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewAuthHandler(&fakeDBStore{user: stored}, tc.limiter, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{user: stored}, tc.limiter, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/login", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -310,7 +268,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			limiter := &fakeRateLimiter{}
 			db := &fakeDBStore{user: stored}
-			h := NewAuthHandler(db, limiter, "", testTokens)
+			h := newTestAuthHandler(db, limiter, "", testTokens)
 			req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"`+username+`","password":"`+password+`"}`))
 			rec := httptest.NewRecorder()
 
@@ -338,7 +296,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 	t.Run("ip blocked beats invalid username", func(t *testing.T) {
 		limiter := &fakeRateLimiter{blockKey: ipKey, retryAfter: 30 * time.Second}
 		db := &fakeDBStore{user: stored}
-		h := NewAuthHandler(db, limiter, "", testTokens)
+		h := newTestAuthHandler(db, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"`+strings.Repeat("a", 1000)+`","password":"`+password+`"}`))
 		rec := httptest.NewRecorder()
 
@@ -358,7 +316,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 	// 簽 token 失敗 = server 的錯：回 500，而且不算登入成功（不 Reset 帳號、不退還 IP）
 	t.Run("token issue failure returns 500 without reset or refund", func(t *testing.T) {
 		limiter := &fakeRateLimiter{}
-		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "", failingTokenIssuer{})
+		h := newTestAuthHandler(&fakeDBStore{user: stored}, limiter, "", failingTokenIssuer{})
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
 		rec := httptest.NewRecorder()
 
@@ -375,7 +333,7 @@ func TestHandleLoginRateLimit(t *testing.T) {
 	// 有設定要信任的 header 時，IP 的 key 要用 header 的值（確認 trustedHeaderKey 有接到 httpx.ClientIP）
 	t.Run("ip from trusted header", func(t *testing.T) {
 		limiter := &fakeRateLimiter{}
-		h := NewAuthHandler(&fakeDBStore{user: stored}, limiter, "X-Real-IP", testTokens)
+		h := newTestAuthHandler(&fakeDBStore{user: stored}, limiter, "X-Real-IP", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
 		req.Header.Set("X-Real-IP", "1.2.3.4")
 		rec := httptest.NewRecorder()
@@ -397,7 +355,7 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 	t.Run("ip blocked", func(t *testing.T) {
 		fake := &fakeDBStore{createID: 7}
 		limiter := &fakeRateLimiter{blockKey: ipKey, retryAfter: time.Hour}
-		h := NewAuthHandler(fake, limiter, "", testTokens)
+		h := newTestAuthHandler(fake, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -417,7 +375,7 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 
 	t.Run("limiter error fails open", func(t *testing.T) {
 		limiter := &fakeRateLimiter{err: errors.New("redis down")}
-		h := NewAuthHandler(&fakeDBStore{createID: 7}, limiter, "", testTokens)
+		h := newTestAuthHandler(&fakeDBStore{createID: 7}, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -430,6 +388,61 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 			t.Errorf("Allow keys = %q, want %q", limiter.allowKeys, []string{ipKey})
 		}
 	})
+}
+
+// 順序是 API 行為：被擋的 IP 連 body 都不 decode（回 429 而不是 400）；
+// 格式錯的請求也算這個 IP 一次失敗（只問 IP key、不問 username）
+func TestAuthRateLimitBeforeDecode(t *testing.T) {
+	cases := []struct {
+		name   string
+		path   string
+		ipKey  string // httptest.NewRequest 預設 RemoteAddr 是 192.0.2.1:1234
+		handle func(h *AuthHandler) http.HandlerFunc
+	}{
+		{"login", "/login", "rl:login:ip:192.0.2.1", func(h *AuthHandler) http.HandlerFunc { return h.HandleLogin }},
+		{"register", "/register", "rl:register:ip:192.0.2.1", func(h *AuthHandler) http.HandlerFunc { return h.HandleRegister }},
+	}
+	for _, tc := range cases {
+		for _, badBody := range []string{`{`, `not json`} {
+			t.Run(tc.name+" ip blocked with malformed body "+badBody, func(t *testing.T) {
+				limiter := &fakeRateLimiter{blockKey: tc.ipKey, retryAfter: 30 * time.Second}
+				h := newTestAuthHandler(&fakeDBStore{}, limiter, "", testTokens)
+				req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(badBody))
+				rec := httptest.NewRecorder()
+
+				tc.handle(h)(rec, req)
+
+				if rec.Code != http.StatusTooManyRequests {
+					t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+				}
+				if got := decodeErrorBody(t, rec).Code; got != "rate_limited" {
+					t.Errorf("code = %q, want %q", got, "rate_limited")
+				}
+				if got := rec.Result().Header.Get("Retry-After"); got != "30" {
+					t.Errorf("Retry-After = %q, want %q", got, "30")
+				}
+			})
+
+			t.Run(tc.name+" malformed body counts against ip "+badBody, func(t *testing.T) {
+				limiter := &fakeRateLimiter{}
+				h := newTestAuthHandler(&fakeDBStore{}, limiter, "", testTokens)
+				req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(badBody))
+				rec := httptest.NewRecorder()
+
+				tc.handle(h)(rec, req)
+
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusBadRequest, rec.Body.String())
+				}
+				if got := decodeErrorBody(t, rec).Code; got != "invalid_json" {
+					t.Errorf("code = %q, want %q", got, "invalid_json")
+				}
+				if !slices.Equal(limiter.allowKeys, []string{tc.ipKey}) {
+					t.Errorf("Allow keys = %q, want only %q", limiter.allowKeys, []string{tc.ipKey})
+				}
+			})
+		}
+	}
 }
 
 // 用 RequireAuth 包起來送 Bearer token，user id 才會進到 ctx（context key 沒有也不該 export setter）
@@ -452,7 +465,7 @@ func TestHandleMe(t *testing.T) {
 
 	t.Run("returns current user", func(t *testing.T) {
 		fake := &fakeDBStore{userByID: model.User{ID: userID, Username: "jay", PasswordHash: "secret-hash"}}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 
 		rec := serveMe(t, h, userID)
 
@@ -474,7 +487,7 @@ func TestHandleMe(t *testing.T) {
 	})
 
 	t.Run("deleted user returns same 401 as RequireAuth", func(t *testing.T) {
-		h := NewAuthHandler(&fakeDBStore{getByIDErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(&fakeDBStore{getByIDErr: model.ErrUserNotFound}, &fakeRateLimiter{}, "", testTokens)
 
 		rec := serveMe(t, h, userID)
 
@@ -495,7 +508,7 @@ func TestHandleMe(t *testing.T) {
 	})
 
 	t.Run("db error returns 500", func(t *testing.T) {
-		h := NewAuthHandler(&fakeDBStore{getByIDErr: errors.New("db down")}, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(&fakeDBStore{getByIDErr: errors.New("db down")}, &fakeRateLimiter{}, "", testTokens)
 
 		rec := serveMe(t, h, userID)
 
@@ -507,7 +520,7 @@ func TestHandleMe(t *testing.T) {
 	// handler 沒經過 RequireAuth（route 註冊錯）：fail closed 回 500，不查 DB
 	t.Run("missing user id in context returns 500", func(t *testing.T) {
 		fake := &fakeDBStore{}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 		req := httptest.NewRequest(http.MethodGet, "/me", nil)
 		rec := httptest.NewRecorder()
 

@@ -13,6 +13,8 @@ import (
 var (
 	ErrUsernameTaken = errors.New("username already taken")
 	ErrUserNotFound  = errors.New("user not found")
+	// login 的帳號格式不合法、不存在、密碼錯都回這個（防帳號列舉：對外要一模一樣）
+	ErrInvalidCredentials = errors.New("invalid credentials")
 )
 
 // --- message ---

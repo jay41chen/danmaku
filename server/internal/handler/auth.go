@@ -5,10 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/ratelimit"
@@ -20,20 +18,13 @@ const (
 	msgInvalidCredentials = "invalid username or password"
 )
 
+// 限流規則（機制在 internal/ratelimit）；login / register 的規則在 use case
 var (
-	dummyHash, _ = auth.HashPassword("timing-equalizer")
+	refreshIPRule = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute} // 一台機器狂猜 refresh token
 )
 
-// 限流規則（機制在 internal/ratelimit）
-var (
-	loginIPRule       = ratelimit.Rule{Name: "login:ip", Limit: 20, Window: time.Minute}            // 一台機器狂試很多帳號
-	loginUsernameRule = ratelimit.Rule{Name: "login:username", Limit: 10, Window: 15 * time.Minute} // 很多 IP 一起猜同一個帳號
-	registerIPRule    = ratelimit.Rule{Name: "register:ip", Limit: 5, Window: time.Hour}            // 一台機器狂註冊垃圾帳號
-	refreshIPRule     = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute}          // 一台機器狂猜 refresh token
-)
-
+// 只留 refresh 的寬限期；refresh token 的有效期（usecase.RefreshTokenTTL）由 use case 擁有
 const (
-	refreshTokenTTL = 7 * 24 * time.Hour
 	// 只蓋「回應掉了、client 自動重送」的最壞情況：timeout 5 秒 × 重試 3 次（Step 10）
 	refreshTokenGrace = 15 * time.Second
 )
@@ -42,24 +33,27 @@ const (
 // 只列這個 handler 真的會呼叫的方法；*pgstore.DBStore 不用宣告就自動符合，main.go 照樣傳同一個 db
 // test 換成 fake 時，只要實作這幾個方法
 type authStore interface {
-	CreateUser(ctx context.Context, username string, passwordHash string) (int64, error)
-	GetUser(ctx context.Context, username string) (model.User, error)
 	GetUserByID(ctx context.Context, id int64) (model.User, error)
 
-	CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
 	RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 }
 
+// 這個 handler 需要的 use case 方法（為什麼定義在這裡見 authStore）
+type authUseCase interface {
+	CheckRegisterIP(ctx context.Context, ip string) error
+	Register(ctx context.Context, username, password string) (int64, error)
+	CheckLoginIP(ctx context.Context, ip string) error
+	Login(ctx context.Context, ip, username, password string) (model.User, model.TokenPair, error)
+}
+
 type AuthHandler struct {
+	auth             authUseCase
 	db               authStore
 	logger           *slog.Logger
 	limiter          rateLimiter
 	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 httpx.ClientIP）
 	tokens           tokenIssuer
-	// 可替換只為了 test：要能確認「未知帳號」那條路也真的跑了 bcrypt，
-	// 否則 timing 防帳號列舉沒有回歸保護。正式環境永遠是 auth.CheckPassword
-	checkPassword func(hash, password string) (bool, error)
 }
 
 // handler 只需要「能簽 access token」：定義在使用方，*auth.TokenIssuer 不用宣告就自動符合
@@ -68,14 +62,14 @@ type tokenIssuer interface {
 	IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error)
 }
 
-func NewAuthHandler(db authStore, limiter rateLimiter, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
+func NewAuthHandler(auth authUseCase, db authStore, limiter rateLimiter, trustedHeaderKey string, tokens tokenIssuer) *AuthHandler {
 	return &AuthHandler{
+		auth:             auth,
 		db:               db,
 		logger:           slog.Default().With("component", "auth"),
 		limiter:          limiter,
 		trustedHeaderKey: trustedHeaderKey,
 		tokens:           tokens,
-		checkPassword:    auth.CheckPassword,
 	}
 }
 
@@ -114,14 +108,21 @@ type refreshRequest struct {
 }
 
 // flow:
-// 檢查username
-// 檢查password
-// 檢查hash
-// 試著創造user
-// 回傳結果
+// 問 IP 限流（use case）
+// 解析 body
+// 交給 use case（檢查帳密格式、hash、建立 user）
+// 回 201
 func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// 做ip的429 check（在 bcrypt 之前擋，不讓攻擊者讓 server 做白工）
-	if !this.allow(w, r, registerIPRule, httpx.ClientIP(r, this.trustedHeaderKey)) {
+	if err := this.auth.CheckRegisterIP(r.Context(), httpx.ClientIP(r, this.trustedHeaderKey)); err != nil {
+		var limited *model.RateLimitedError
+		if errors.As(err, &limited) {
+			writeTooManyRequests(w, limited.RetryAfter)
+			return
+		}
+		// CheckRegisterIP 只會回 RateLimitedError；萬一不是，當系統錯誤
+		this.logger.ErrorContext(r.Context(), "register failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -131,33 +132,18 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := auth.ValidateUsername(req.Username); err != nil {
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
+	id, err := this.auth.Register(r.Context(), req.Username, req.Password)
+	var coded *model.CodedError
+	switch {
+	case errors.As(err, &coded):
+		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, coded)
 		return
-	}
-
-	if err := auth.ValidatePassword(req.Password); err != nil {
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, err)
-		return
-	}
-
-	// hash 後面還要用，所以不能寫成 if hash, err := ...; 那樣 hash 只活在 if 裡面
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		// 只記 err，不能記 req.Password
-		this.logger.ErrorContext(r.Context(), "hash password failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-
-	id, err := this.db.CreateUser(r.Context(), req.Username, hash)
-	// 先比對已知的 sentinel，剩下的才是真的系統錯誤
-	if errors.Is(err, model.ErrUsernameTaken) {
+	case errors.Is(err, model.ErrUsernameTaken):
 		httpx.WriteError(w, http.StatusConflict, "username_taken", "username already taken")
 		return
-	}
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "create user failed", "error", err)
+	case err != nil:
+		// 只記 err，不能記 req.Password（use case 的 error 也不含密碼）
+		this.logger.ErrorContext(r.Context(), "register failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
@@ -165,12 +151,23 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, userResponse{ID: id, Username: req.Username})
 }
 
+// flow:
+// 問 IP 限流（use case；ip 存起來，登入成功時 use case 用同一個 key 退還）
+// 解析 body
+// 交給 use case（格式、帳號限流、驗密碼、簽 token、調整限流計數）
+// 回 200
 func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
-	// 做ip的429 check
-	// ip 存起來：登入成功時要用同一個 key 退還
-	// 放在最前面：被擋的 IP 連 body 都不用 decode；格式錯誤的請求也算這個 IP 的一次失敗（不 Refund）
+	// 放在最前面：被擋的 IP 連 body 都不用 decode
 	ip := httpx.ClientIP(r, this.trustedHeaderKey)
-	if !this.allow(w, r, loginIPRule, ip) {
+	if err := this.auth.CheckLoginIP(r.Context(), ip); err != nil {
+		var limited *model.RateLimitedError
+		if errors.As(err, &limited) {
+			writeTooManyRequests(w, limited.RetryAfter)
+			return
+		}
+		// CheckLoginIP 只會回 RateLimitedError；萬一不是，當系統錯誤
+		this.logger.ErrorContext(r.Context(), "login failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -180,83 +177,36 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 格式規則是公開的（register 會回 400 告知），格式不合法的帳號不可能存在，所以直接回、不洩漏帳號是否存在
-	// 放在 username 限流之前：不讓超長字串變成 Redis key；也不跑 bcrypt、不查 DB
-	if err := auth.ValidateUsername(req.Username); err != nil {
+	user, pair, err := this.auth.Login(r.Context(), ip, req.Username, req.Password)
+	var limited *model.RateLimitedError
+	switch {
+	case errors.As(err, &limited):
+		writeTooManyRequests(w, limited.RetryAfter)
+		return
+	case errors.Is(err, model.ErrInvalidCredentials):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
 		return
-	}
-
-	// 做username的429 check
-	// 轉小寫：GetUser 不分大小寫，key 也要統一，不然換大小寫（Jay / JAY）就能多猜
-	username := strings.ToLower(req.Username)
-	if !this.allow(w, r, loginUsernameRule, username) {
-		return
-	}
-
-	// 查詢user在不在
-	user, err := this.db.GetUser(r.Context(), req.Username)
-	if errors.Is(err, model.ErrUserNotFound) {
-		// 結果不重要，目的是花跟「密碼錯」一樣的時間
-		// 借以避免讓攻擊者知道錯誤
-		_, _ = this.checkPassword(dummyHash, req.Password)
-		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
-		return
-	}
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "get user failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-
-	// 有user，檢查密碼是不是正確的
-	success, err := this.checkPassword(user.PasswordHash, req.Password)
-	if err != nil {
-		this.logger.ErrorContext(r.Context(), "check password failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	if !success {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid_credentials", msgInvalidCredentials)
-		return
-	}
-
-	tokens, err := this.completeLogin(r, user.ID, username, ip)
-	if err != nil {
+	case err != nil:
+		this.logger.ErrorContext(r.Context(), "login failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
 	// 用 DB 存的 username：用 jay 登入，註冊時存的是 Jay，前端要顯示 Jay
 	httpx.WriteJSON(w, r, this.logger, http.StatusOK, loginResponse{
-		tokenResponse: tokens,
+		tokenResponse: newTokenResponse(pair),
 		User:          userResponse{ID: user.ID, Username: user.Username},
 	})
 }
 
-// 密碼比對成功之後呼叫：簽 token + 調整限流計數
-// username 是轉小寫的那個（限流 key 用的），不是 req.Username
-// 失敗時已經記了 log，呼叫端只要回 500
-func (this *AuthHandler) completeLogin(r *http.Request, userID int64, username, ip string) (tokenResponse, error) {
-	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
-	tokens, err := this.issueTokens(r, userID)
-	if err != nil {
-		return tokenResponse{}, err
+// 把 use case 發的 TokenPair 轉成回給 client 的格式（login / refresh 共用）
+func newTokenResponse(pair model.TokenPair) tokenResponse {
+	return tokenResponse{
+		AccessToken:  pair.AccessToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    int(pair.ExpiresIn.Seconds()),
+		RefreshToken: pair.RefreshToken,
 	}
-
-	// 成功登入，reset 這個帳號的計數（使用者自己打錯幾次不該被鎖）
-	// 失敗只記 log：限流的附屬功能壞掉，不該讓登入失敗
-	if err := this.limiter.Reset(r.Context(), loginUsernameRule.Key(username)); err != nil {
-		this.logger.WarnContext(r.Context(), "rate limit reset failed",
-			"rule", loginUsernameRule.Name, "error", err)
-	}
-	// IP 只退還這一次（-1），等於只數失敗：共用出口 IP 的人（公司 NAT）正常登入不會互相擋到
-	// 不 reset IP：否則攻擊者用自己的帳號登入一次，就能把 IP 計數歸零
-	if err := this.limiter.Refund(r.Context(), loginIPRule.Key(ip)); err != nil {
-		this.logger.WarnContext(r.Context(), "rate limit refund failed",
-			"rule", loginIPRule.Name, "error", err)
-	}
-	return tokens, nil
 }
 
 // 回目前登入的 user：client 重新整理頁面（F5）後只剩 token，用這個取回身分

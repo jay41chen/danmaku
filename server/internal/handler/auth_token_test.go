@@ -36,7 +36,7 @@ func TestHandleRefresh(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewAuthHandler(&fakeDBStore{rotateUserID: 7, rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{rotateUserID: 7, rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/refresh", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
@@ -50,7 +50,7 @@ func TestHandleRefresh(t *testing.T) {
 
 	t.Run("success returns new tokens and rotates by hash", func(t *testing.T) {
 		fake := &fakeDBStore{rotateUserID: 7}
-		h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+		h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -78,7 +78,7 @@ func TestHandleRefresh(t *testing.T) {
 	t.Run("ip blocked", func(t *testing.T) {
 		fake := &fakeDBStore{rotateUserID: 7}
 		limiter := &fakeRateLimiter{blockKey: "rl:refresh:ip:192.0.2.1", retryAfter: time.Minute}
-		h := NewAuthHandler(fake, limiter, "", testTokens)
+		h := newTestAuthHandler(fake, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
@@ -112,7 +112,7 @@ func TestHandleRefreshLogging(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			h := NewAuthHandler(&fakeDBStore{rotateUserID: 7, rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(&fakeDBStore{rotateUserID: 7, rotateErr: tc.rotateErr}, &fakeRateLimiter{}, "", testTokens)
 			h.logger = slog.New(slog.NewJSONHandler(&buf, nil))
 			req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(body))
 			rec := httptest.NewRecorder()
@@ -185,7 +185,7 @@ func TestHandleLogout(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeDBStore{revokeErr: tc.revokeErr}
-			h := NewAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
+			h := newTestAuthHandler(fake, &fakeRateLimiter{}, "", testTokens)
 			req := httptest.NewRequest(tc.method, "/logout", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 

@@ -7,18 +7,8 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/auth"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/usecase"
 )
-
-// login 用：簽 access token + 存一個新的 refresh token
-// 失敗時已經記了 log，呼叫端只要回 500
-func (this *AuthHandler) issueTokens(r *http.Request, userID int64) (tokenResponse, error) {
-	plain, hash := auth.NewRefreshToken()
-	if err := this.db.CreateRefreshToken(r.Context(), userID, hash, refreshTokenTTL); err != nil {
-		this.logger.ErrorContext(r.Context(), "create refresh token failed", "error", err)
-		return tokenResponse{}, err
-	}
-	return this.withAccessToken(r, userID, plain)
-}
 
 // 簽 access token，跟已經存好的 refresh token 明文組成 response
 func (this *AuthHandler) withAccessToken(r *http.Request, userID int64, refreshToken string) (tokenResponse, error) {
@@ -27,12 +17,11 @@ func (this *AuthHandler) withAccessToken(r *http.Request, userID int64, refreshT
 		this.logger.ErrorContext(r.Context(), "issue access token failed", "error", err)
 		return tokenResponse{}, err
 	}
-	return tokenResponse{
+	return newTokenResponse(model.TokenPair{
 		AccessToken:  accessToken,
-		TokenType:    "Bearer",
-		ExpiresIn:    int(expiresIn.Seconds()),
+		ExpiresIn:    expiresIn,
 		RefreshToken: refreshToken,
-	}, nil
+	}), nil
 }
 
 // 用 refresh token 換一組新的（rotation：舊的作廢，回傳新的 refresh token）
@@ -50,7 +39,7 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	newPlain, newHash := auth.NewRefreshToken()
 	userID, err := this.db.RotateRefreshToken(r.Context(),
-		auth.HashRefreshToken(req.RefreshToken), newHash, refreshTokenTTL, refreshTokenGrace)
+		auth.HashRefreshToken(req.RefreshToken), newHash, usecase.RefreshTokenTTL, refreshTokenGrace)
 	if err != nil {
 		this.writeRotateError(w, r, err, ip)
 		return
