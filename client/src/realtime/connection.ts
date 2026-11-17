@@ -17,6 +17,9 @@ const JOIN_TIMEOUT_MS = 5_000;
 // 要跟 server wsPingPeriod（server/internal/handler/ws.go）一致，範圍檢查在 server/internal/handler/ws_test.go
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const PONG_TIMEOUT_MS = 20_000;
+// resync 後撈歷史前的隨機等待上限（0 ~ 此值均勻分布）
+// loadtest 的 -redis-resync-delay-max（server/cmd/loadtest/main.go）對應這個值，兩邊要一起改
+const RESYNC_FETCH_DELAY_MAX_MS = 2000;
 
 let started = false;
 let ws: WebSocket | null = null;
@@ -34,6 +37,8 @@ let joinTimedOut = false;
 let unsubscribeSession: (() => void) | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let pongTimer: ReturnType<typeof setTimeout> | null = null;
+// resync 後延遲撈歷史的計時器；非 null 代表已有一次排定、還沒開始的補撈
+let resyncTimer: ReturnType<typeof setTimeout> | null = null;
 
 function stopHeartbeat() {
   if (heartbeatTimer !== null) {
@@ -209,8 +214,15 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       }
       break;
     case "resync":
-      // server 的 Redis 訂閱剛重建過，重建到重新訂閱好之間的訊息不會補推：重新撈歷史補洞（和已有的由 merge 去重）
-      if (payload?.room === ROOM_PUBLIC_ID) void fetchMessages();
+      // resync 發生在 server 重建 PubSub 或 go-redis 重連之後，空窗期間的訊息不會補推：重新撈歷史補洞（和已有的由 merge 去重）。
+      // 隨機延遲 0 ~ 2 秒再撈：把同房觀眾的請求攤開，也讓恢復後才發布失敗的訊息落進撈到的範圍。
+      // 已有排定中的補撈就不再排（它會在這次 resync 之後才觸發，已涵蓋）；撈取已經開始的不算，仍要另排一次
+      if (payload?.room === ROOM_PUBLIC_ID && resyncTimer === null) {
+        resyncTimer = setTimeout(() => {
+          resyncTimer = null;
+          void fetchMessages();
+        }, Math.random() * RESYNC_FETCH_DELAY_MAX_MS);
+      }
       break;
     case "pong":
       // 收到就代表連線還活著；不用渲染
@@ -333,6 +345,10 @@ export function stop() {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (resyncTimer !== null) {
+    clearTimeout(resyncTimer);
+    resyncTimer = null;
   }
   clearAuthRetry();
   clearJoinRetry();
