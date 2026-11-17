@@ -40,6 +40,7 @@
 | 依人數排序要把人數存起來，而且沒人看的房間要能自己從榜上消失，不需要有人發現「它沒人了」 | 一個 Redis Sorted Set 存人數，每次算完就寫；房間只要 presence key 還在就留在榜上，最後一個人離開，或持有最後觀眾的 server 掛掉時，這個 key 都會自己消失，所以由讀的人順手清。只排前 N 名：人數一直在變，用它當 cursor 會漏或重複 | [0015](docs/design/0015-popular-rooms-ranking.md) |
 | 測試只在本機 hook 跑；integration test 缺 DB 環境變數時會 skip，CI 設錯也是全綠、但什麼都沒測 | CI 起真的 Postgres 和 Redis；有 `CI` 環境變數時缺測試變數直接 fail，本機照舊 skip。第一次跑就抓到一個測試 package 只是靠別的 package 先 migrate 了本機 DB 才會過。image 從 1.87 GB（整套 toolchain、root）降到 39.8 MB（distroless 上的靜態執行檔、non-root） | [0016](docs/design/0016-minimal-ci.md) |
 | client 連著但不讀資料；macOS 上幾千個卡在 kernel 的寫入曾讓 server crash | 故障實驗用獨立的 compose project，不讀資料的 client 跑在 Docker 網路裡面。1 條卡住時由 75 秒的 pong 逾時踢掉；3,000 條時，核心的 TCP 記憶體（跟同一台 VM 裡的測試 client 共用）超過 high 線之後才出現第一次 outbox 踢人（只是時間上吻合，沒證明因果），44 秒內全部踢掉。Linux 上的 server 最多 22 條 thread（Docker Desktop VM、兩次各單次） | [0017](docs/design/0017-stuck-clients-fault-env.md) |
+| Redis 重啟時 go-redis 自己重連，停機期間的訊息全部遺失、而且沒有任何人被通知（停 10 秒漏 52 則、60 秒漏 303 則） | 彈幕是當下的反應，送達只做到盡力而為。已訂閱的房間又收到訂閱確認時視為重連、送 `resync`，client 隨機等 0～2 秒再補撈。停 60 秒補回最新 99 則；停 10 秒全部補回，或只缺最後 1～3 則：發送比接收晚恢復，最多約 0.6 秒（3 次單次實驗，每次不同） | [0018](docs/design/0018-redis-restart-best-effort-resync.md) |
 
 ## 架構
 

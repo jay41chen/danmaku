@@ -138,6 +138,10 @@ number may be the generator.
 - **Case 3 is not addressed.** When go-redis reconnects by itself, 1–2 messages can be missed, and in a busy
   room later messages keep arriving so nothing looks wrong. Accepted. The same `resync` frame could cover it
   cheaply if that changes.
+  - **Update (2026-11-17, [ADR 0018](0018-redis-restart-best-effort-resync.md))**: "1–2 messages" was wrong
+    for an outage. With Redis stopped for 10 s and 60 s, every message in the gap was lost (52 and 303 per
+    viewer), because nearly every publish in it also failed (case 5; 51 of the 52, and all 303). The server
+    now sends `resync` when go-redis reconnects.
 - **Case 5 waits for the next fetch.** In a quiet room that can mean until the page is reloaded.
 - **A CDN needs its own stampede setting.** The header alone won't prevent the thundering herd at expiry, as the
   nginx result shows, and each catch-up may then miss the last second or so.
