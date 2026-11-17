@@ -62,25 +62,37 @@ func parsePostDuration(r io.Reader) (snap durationSnapshot, ok bool, err error) 
 	return snap, ok, sc.Err()
 }
 
-// GET base/metrics 一次
-func fetchPostDuration(ctx context.Context, client *http.Client, base string) (durationSnapshot, error) {
+// GET base/metrics 一次，body 交給 parse；non-200 或 timeout 回 error。stuck 情境（stuck.go）也用這個
+func fetchMetrics(ctx context.Context, client *http.Client, base string, parse func(io.Reader) error) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/metrics", nil)
 	if err != nil {
-		return durationSnapshot{}, err
+		return err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return durationSnapshot{}, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return durationSnapshot{}, fmt.Errorf("GET /metrics returned %d", resp.StatusCode)
+		return fmt.Errorf("GET /metrics returned %d", resp.StatusCode)
 	}
-	snap, _, err := parsePostDuration(resp.Body) // 找不到 = 還沒有 POST，視為 0
-	return snap, err
+	return parse(resp.Body)
+}
+
+// GET base/metrics 一次，取 POST messages 的 duration 快照
+func fetchPostDuration(ctx context.Context, client *http.Client, base string) (durationSnapshot, error) {
+	var snap durationSnapshot
+	err := fetchMetrics(ctx, client, base, func(r io.Reader) (perr error) {
+		snap, _, perr = parsePostDuration(r) // 找不到 = 還沒有 POST，視為 0
+		return perr
+	})
+	if err != nil {
+		return durationSnapshot{}, err
+	}
+	return snap, nil
 }
 
 type handlerTiming struct {

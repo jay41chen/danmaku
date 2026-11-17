@@ -52,6 +52,9 @@ type options struct {
 	monInterval  time.Duration
 	otherLimit   float64
 	requireCheck bool
+	inCompose    bool
+	stuck        int
+	stuckRate    float64
 }
 
 const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
@@ -59,7 +62,7 @@ const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
 func parseFlags(args []string) (*options, error) {
 	o := &options{}
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
-	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms")
+	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck")
 	fs.StringVar(&o.servers, "servers", "", "comma-separated server base URLs (localhost / 127.0.0.1 only), e.g. http://127.0.0.1:6388,http://127.0.0.1:6389")
 	fs.StringVar(&o.out, "out", "", "JSON result path (default loadtest-<scenario>-<time>.json in the current directory)")
 	fs.StringVar(&o.serverPIDs, "server-pids", "", "comma-separated server PIDs to sample CPU with ps")
@@ -72,7 +75,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.IntVar(&o.perRoom, "viewers-per-room", 10, "rooms scenario: viewers per room")
 	fs.Float64Var(&o.roomRate, "room-rate", 1, "rooms scenario: messages per second per room")
 	fs.DurationVar(&o.warmup, "warmup", 5*time.Second, "warm-up before measuring (sends happen but are excluded from stats)")
-	fs.DurationVar(&o.duration, "duration", 30*time.Second, "measured duration per step")
+	fs.DurationVar(&o.duration, "duration", 30*time.Second, "measured duration per step; stuck scenario: observe time after the last connect, default 90s when not given, and it must exceed the server's 75s pong timeout or no connection gets kicked by pong")
 	fs.DurationVar(&o.drain, "drain", 3*time.Second, "wait after the last send for sampled connections to receive")
 	fs.DurationVar(&o.settle, "settle", 2*time.Second, "pause after ramp-up before sending")
 	fs.Float64Var(&o.rampRate, "ramp-rate", 100, "new WS connections per second while ramping up")
@@ -86,9 +89,22 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.cont, "continue", false, "mixed/fanout: keep running after an invalid or collapsed step")
 	fs.Float64Var(&o.otherLimit, "other-cores-limit", defaultOtherCoresLimit, "step is invalid when other programs use this many cores (ps -A total minus tool/servers/containers); <= 0 = off")
 	fs.BoolVar(&o.requireCheck, "require-machine-check", true, "a step is invalid when whole-machine / other-programs CPU cannot be judged, and -server-pids is required; false = warning only (ad hoc runs)")
+	fs.BoolVar(&o.inCompose, "in-compose", false, "also accept the deploy/fault compose service names (server-1, server-2, nginx, postgres, redis) as hosts; only for running inside the danmaku-fault network")
+	fs.IntVar(&o.stuck, "stuck", 1, "stuck scenario: number of connections that join and then never read")
+	fs.Float64Var(&o.stuckRate, "stuck-rate", 0, "stuck scenario: messages per second posted to the room (0 = quiet room)")
 	fs.DurationVar(&o.monInterval, "monitor-interval", 5*time.Second, "interval of background ps / docker stats sampling")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	// stuck 要等 server 的 pong timeout（75s）才踢得到沒讀的連線，30s 預設太短：沒明確給 -duration 時改 90s
+	durationSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "duration" {
+			durationSet = true
+		}
+	})
+	if o.scenario == "stuck" && !durationSet {
+		o.duration = 90 * time.Second
 	}
 	return o, nil
 }
@@ -142,8 +158,14 @@ func buildSteps(o *options) ([]stepSpec, error) {
 			return nil, fmt.Errorf("-rooms, -viewers-per-room and -room-rate must be positive")
 		}
 		return []stepSpec{{Viewers: o.rooms * o.perRoom, Rate: float64(o.rooms) * o.roomRate, Rooms: o.rooms}}, nil
+	case "stuck":
+		if o.stuck < 1 || o.stuckRate < 0 {
+			return nil, fmt.Errorf("-stuck must be >= 1 and -stuck-rate must be >= 0")
+		}
+		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 stuck.go
+		return []stepSpec{{Viewers: o.stuck, Rate: o.stuckRate, Rooms: 1}}, nil
 	}
-	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms")
+	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck")
 }
 
 func splitList(s string) []string {
@@ -213,16 +235,16 @@ func run(args []string) (code int) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	redisURL := os.Getenv("TEST_REDIS_URL")
 	sc.add(jwtSecret)
-	servers, err := checkServerURLs(splitList(o.servers))
+	servers, err := checkServerURLs(splitList(o.servers), o.inCompose)
 	if err != nil {
 		return fail("refusing to run: %v", err)
 	}
-	dbPass, err := checkDatabaseURL(dbURL)
+	dbPass, err := checkDatabaseURL(dbURL, o.inCompose)
 	if err != nil {
 		return fail("refusing to run: %v", err)
 	}
 	sc.add(dbPass)
-	redisPass, err := checkRedisURL(redisURL)
+	redisPass, err := checkRedisURL(redisURL, o.inCompose)
 	if err != nil {
 		return fail("refusing to run: %v", err)
 	}
@@ -255,6 +277,10 @@ func run(args []string) (code int) {
 	users := o.users
 	if users <= 0 {
 		users = max(50, int(3*maxRate+0.999))
+		// stuck 的安靜房間（-stuck-rate 0）不會有人發文：不 seed 發文用的 users（seedData 接受 0 個 user，仍會建 owner 與 room）
+		if o.scenario == "stuck" && o.stuckRate == 0 {
+			users = 0
+		}
 	}
 	needFD := uint64(maxViewers + o.maxInFlight + 256)
 	soft, hard, fdErr := raiseNoFile(needFD)
@@ -297,6 +323,7 @@ func run(args []string) (code int) {
 			"ramp_rate": o.rampRate, "sampled": o.sampled, "max_inflight": o.maxInFlight,
 			"lag_threshold": o.lagThreshold.String(), "tool_cpu_frac": o.toolCPUFrac, "continue": o.cont, "other_cores_limit": o.otherLimit, "require_machine_check": o.requireCheck,
 			"server_pids": pids, "docker_containers": o.containers,
+			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate,
 		},
 		Steps: []stepResult{},
 	}
@@ -319,7 +346,11 @@ func run(args []string) (code int) {
 		if err := writeReport(outPath, rep); err != nil {
 			fmt.Fprintln(os.Stderr, "loadtest: write report:", sc.err(err))
 		}
-		printTable(os.Stdout, rep)
+		if rep.Stuck != nil {
+			printStuck(os.Stdout, rep.Stuck)
+		} else {
+			printTable(os.Stdout, rep)
+		}
 		fmt.Printf("\nresult written to %s\n", outPath)
 		if cr.Error != "" || cr.Leftover != 0 {
 			fmt.Fprintf(os.Stderr, "loadtest: CLEANUP INCOMPLETE for prefix %s: %s (leftover %d)\n", prefix, cr.Error, cr.Leftover)
@@ -334,6 +365,10 @@ func run(args []string) (code int) {
 	httpClient := newHTTPClient(o.maxInFlight, o.postTimeout)
 	if err := preflight(ctx, httpClient, servers, data.rooms[0]); err != nil {
 		return fail("preflight: %s", sc.err(err))
+	}
+
+	if o.scenario == "stuck" {
+		return runStuck(ctx, o, httpClient, servers, data, runTag, rep, sc)
 	}
 
 	mon := newMonitor(pids, splitList(o.containers), o.monInterval, sc.scrub)

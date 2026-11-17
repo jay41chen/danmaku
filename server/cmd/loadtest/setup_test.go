@@ -17,7 +17,7 @@ import (
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := testenv.Require(t, "TEST_DATABASE_URL")
-	if _, err := checkDatabaseURL(url); err != nil {
+	if _, err := checkDatabaseURL(url, false); err != nil {
 		t.Fatalf("refusing to run against this database: %v", err)
 	}
 	// 每個用 DB 的測試 package 自己保證 schema 存在，不靠別的 package 先跑（CI 是全新 DB）

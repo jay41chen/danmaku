@@ -110,6 +110,7 @@ type runReport struct {
 	SlowKicksLogFile map[string]int `json:"slow_client_kicks_log_file_total,omitempty"`
 	Aborted          bool           `json:"aborted"`
 	Steps            []stepResult   `json:"steps"`
+	Stuck            *stuckReport   `json:"stuck,omitempty"` // 只有 -scenario stuck 才有，見 stuck.go
 	Cleanup          *cleanupResult `json:"cleanup,omitempty"`
 	Notes            []string       `json:"notes,omitempty"`
 }

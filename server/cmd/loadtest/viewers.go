@@ -28,6 +28,8 @@ type viewerConfig struct {
 	RampRate    float64  // 每秒建幾條連線
 	JoinTimeout time.Duration
 	MaxDialing  int // 同時進行中的 dial + join 數
+	// stuck 情境：join_ok 之後不啟動 reader，所以不讀、也不回 ping；連線保持開著，直到 closeAll
+	Stuck bool
 }
 
 type viewer struct {
@@ -52,7 +54,9 @@ type viewerPool struct {
 	closes   atomic.Int64   // join 之後非預期的斷線數
 	rejected atomic.Int64   // 沒能進房間的連線數（累計整個 run）
 	stopping atomic.Bool
-	recorder atomic.Pointer[stepRecorder]
+	// 第一條連線 join 成功的時間（unix ns，0 = 還沒有）；stuck 情境用來當時間軸的原點
+	firstJoinNs atomic.Int64
+	recorder    atomic.Pointer[stepRecorder]
 }
 
 func newViewerPool(cfg viewerConfig) *viewerPool {
@@ -138,7 +142,7 @@ func (p *viewerPool) takeIdx() int {
 	return idx
 }
 
-// 建一條連線、送 join、等 join_ok。成功回 ""，並啟動 reader；失敗回原因（連線已關掉）
+// 建一條連線、送 join、等 join_ok。成功回 ""，並啟動 reader（Stuck 時不啟動）；失敗回原因（連線已關掉）
 func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
 	v := &viewer{idx: idx, roomIdx: idx % len(p.cfg.Rooms), sampled: idx < p.cfg.Sampled}
 	base := p.cfg.Servers[serverIndex(idx, len(p.cfg.Rooms), len(p.cfg.Servers))]
@@ -189,8 +193,11 @@ func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
 	p.mu.Lock()
 	p.all = append(p.all, v)
 	p.mu.Unlock()
-	p.wg.Add(1)
-	go p.read(v)
+	p.firstJoinNs.CompareAndSwap(0, time.Now().UnixNano())
+	if !p.cfg.Stuck {
+		p.wg.Add(1)
+		go p.read(v)
+	}
 	return ""
 }
 
