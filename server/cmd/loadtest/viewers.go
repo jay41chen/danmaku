@@ -30,11 +30,16 @@ type viewerConfig struct {
 	MaxDialing  int // 同時進行中的 dial + join 數
 	// stuck 情境：join_ok 之後不啟動 reader，所以不讀、也不回 ping；連線保持開著，直到 closeAll
 	Stuck bool
+	// redis 情境：設了就用 readObserved 讀（每個 frame 都交給 OnFrame，斷線交給 OnClose），不走 sampled / recorder 那套。
+	// OnFrame 在 reader goroutine 內呼叫，不能阻塞；OnClose 只在非預期斷線時呼叫（closeAll 收尾不算）
+	OnFrame func(v *viewer, msg []byte, at time.Time)
+	OnClose func(v *viewer, err error, at time.Time)
 }
 
 type viewer struct {
 	idx     int
 	roomIdx int
+	server  string // 這條連線連的 server base URL
 	sampled bool
 	conn    *websocket.Conn
 	frames  atomic.Int64 // 收到的 frame 數（每條連線自己一個計數器，避免所有 goroutine 搶同一個）
@@ -144,8 +149,8 @@ func (p *viewerPool) takeIdx() int {
 
 // 建一條連線、送 join、等 join_ok。成功回 ""，並啟動 reader（Stuck 時不啟動）；失敗回原因（連線已關掉）
 func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
-	v := &viewer{idx: idx, roomIdx: idx % len(p.cfg.Rooms), sampled: idx < p.cfg.Sampled}
 	base := p.cfg.Servers[serverIndex(idx, len(p.cfg.Rooms), len(p.cfg.Servers))]
+	v := &viewer{idx: idx, roomIdx: idx % len(p.cfg.Rooms), sampled: idx < p.cfg.Sampled, server: base}
 	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
 
 	dialCtx, cancel := context.WithTimeout(ctx, p.cfg.JoinTimeout)
@@ -211,6 +216,10 @@ func (p *viewerPool) read(v *viewer) {
 			p.closes.Add(1)
 		}
 	}()
+	if p.cfg.OnFrame != nil {
+		p.readObserved(v)
+		return
+	}
 	if v.sampled {
 		p.readSampled(v)
 		return
@@ -257,6 +266,29 @@ func (p *viewerPool) readSampled(v *viewer) {
 		}
 		rec.record(v.idx, seq, at)
 	}
+}
+
+// 每個 frame 都交給 cfg.OnFrame；讀取失敗時（不是工具自己收尾）把原因與時間交給 cfg.OnClose，不重連
+func (p *viewerPool) readObserved(v *viewer) {
+	for {
+		_, msg, err := v.conn.ReadMessage()
+		at := time.Now()
+		if err != nil {
+			if !p.stopping.Load() && p.cfg.OnClose != nil {
+				p.cfg.OnClose(v, err, at)
+			}
+			return
+		}
+		v.frames.Add(1)
+		p.cfg.OnFrame(v, msg, at)
+	}
+}
+
+// 成功 join 過的連線（不論現在還在不在），給 redis 情境列出每條連線用
+func (p *viewerPool) joinedViewers() []*viewer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*viewer(nil), p.all...)
 }
 
 func (p *viewerPool) aliveCount() int {

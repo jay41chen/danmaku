@@ -31,47 +31,46 @@ type stuckMetrics struct {
 
 // 從 /metrics 文字挑出三個 metric（這三個都沒有 label）；缺任何一個就回 error（訊息列出缺的名稱），不當成 0
 func parseStuckMetrics(r io.Reader) (stuckMetrics, error) {
-	var m stuckMetrics
-	found := map[string]bool{}
+	vals, err := parsePlainMetrics(r, metricWSConnections, metricGoThreads, metricRSSBytes)
+	if err != nil {
+		return stuckMetrics{}, err
+	}
+	return stuckMetrics{Connections: int(vals[metricWSConnections]), GoThreads: int(vals[metricGoThreads]), RSSBytes: vals[metricRSSBytes]}, nil
+}
+
+// 從 /metrics 文字挑出指定名稱、沒有 label 的 metric；缺任何一個就回 error（訊息列出缺的名稱，依傳入順序），不當成 0
+func parsePlainMetrics(r io.Reader, names ...string) (map[string]float64, error) {
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	vals := map[string]float64{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) != 2 {
+		if len(fields) != 2 || !want[fields[0]] {
 			continue // 註解行（# HELP / # TYPE）、帶 label 的行都不是我們要的
-		}
-		switch fields[0] {
-		case metricWSConnections, metricGoThreads, metricRSSBytes:
-		default:
-			continue
 		}
 		v, err := strconv.ParseFloat(fields[1], 64)
 		if err != nil {
-			return stuckMetrics{}, fmt.Errorf("unexpected metrics line for %s", fields[0])
+			return nil, fmt.Errorf("unexpected metrics line for %s", fields[0])
 		}
-		found[fields[0]] = true
-		switch fields[0] {
-		case metricWSConnections:
-			m.Connections = int(v)
-		case metricGoThreads:
-			m.GoThreads = int(v)
-		case metricRSSBytes:
-			m.RSSBytes = v
-		}
+		vals[fields[0]] = v
 	}
 	if err := sc.Err(); err != nil {
-		return stuckMetrics{}, err
+		return nil, err
 	}
 	var missing []string
-	for _, name := range []string{metricWSConnections, metricGoThreads, metricRSSBytes} {
-		if !found[name] {
+	for _, name := range names {
+		if _, ok := vals[name]; !ok {
 			missing = append(missing, name)
 		}
 	}
 	if len(missing) > 0 {
-		return stuckMetrics{}, fmt.Errorf("/metrics is missing: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("/metrics is missing: %s", strings.Join(missing, ", "))
 	}
-	return m, nil
+	return vals, nil
 }
 
 // 一個時間點的兩種相對時間（秒）：相對第一條連線 join 成功、相對最後一條連上（ramp 結束）。還沒到那個時間點時是負的

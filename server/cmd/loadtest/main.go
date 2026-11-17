@@ -24,37 +24,40 @@ import (
 )
 
 type options struct {
-	scenario     string
-	servers      string
-	out          string
-	serverPIDs   string
-	serverLogs   string
-	containers   string
-	steps        string
-	writeRate    float64
-	fanoutRate   float64
-	rooms        int
-	perRoom      int
-	roomRate     float64
-	warmup       time.Duration
-	duration     time.Duration
-	drain        time.Duration
-	settle       time.Duration
-	rampRate     float64
-	sampled      int
-	users        int
-	maxInFlight  int
-	postTimeout  time.Duration
-	lagThreshold time.Duration
-	toolCPUFrac  float64
-	collapseP99  time.Duration
-	cont         bool
-	monInterval  time.Duration
-	otherLimit   float64
-	requireCheck bool
-	inCompose    bool
-	stuck        int
-	stuckRate    float64
+	scenario            string
+	servers             string
+	out                 string
+	serverPIDs          string
+	serverLogs          string
+	containers          string
+	steps               string
+	writeRate           float64
+	fanoutRate          float64
+	rooms               int
+	perRoom             int
+	roomRate            float64
+	warmup              time.Duration
+	duration            time.Duration
+	drain               time.Duration
+	settle              time.Duration
+	rampRate            float64
+	sampled             int
+	users               int
+	maxInFlight         int
+	postTimeout         time.Duration
+	lagThreshold        time.Duration
+	toolCPUFrac         float64
+	collapseP99         time.Duration
+	cont                bool
+	monInterval         time.Duration
+	otherLimit          float64
+	requireCheck        bool
+	inCompose           bool
+	stuck               int
+	stuckRate           float64
+	redisViewers        int
+	redisRate           float64
+	redisResyncDelayMax time.Duration
 }
 
 const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
@@ -62,7 +65,7 @@ const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
 func parseFlags(args []string) (*options, error) {
 	o := &options{}
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
-	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck")
+	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck | redis")
 	fs.StringVar(&o.servers, "servers", "", "comma-separated server base URLs (localhost / 127.0.0.1 only), e.g. http://127.0.0.1:6388,http://127.0.0.1:6389")
 	fs.StringVar(&o.out, "out", "", "JSON result path (default loadtest-<scenario>-<time>.json in the current directory)")
 	fs.StringVar(&o.serverPIDs, "server-pids", "", "comma-separated server PIDs to sample CPU with ps")
@@ -92,6 +95,10 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&o.inCompose, "in-compose", false, "also accept the deploy/fault compose service names (server-1, server-2, nginx, postgres, redis) as hosts; only for running inside the danmaku-fault network")
 	fs.IntVar(&o.stuck, "stuck", 1, "stuck scenario: number of connections that join and then never read")
 	fs.Float64Var(&o.stuckRate, "stuck-rate", 0, "stuck scenario: messages per second posted to the room (0 = quiet room)")
+	fs.IntVar(&o.redisViewers, "redis-viewers", 5, "redis scenario: WS viewers per server (all in one room)")
+	fs.Float64Var(&o.redisRate, "redis-rate", 5, "redis scenario: messages per second posted to the room")
+	// 對應 client/src/realtime/connection.ts 的 RESYNC_FETCH_DELAY_MAX_MS（兩邊要一起改）
+	fs.DurationVar(&o.redisResyncDelayMax, "redis-resync-delay-max", 2*time.Second, "redis scenario: on a resync frame each viewer waits a random delay in [0, this) before its history fetch, like the web client (0 = fetch immediately)")
 	fs.DurationVar(&o.monInterval, "monitor-interval", 5*time.Second, "interval of background ps / docker stats sampling")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -105,6 +112,10 @@ func parseFlags(args []string) (*options, error) {
 	})
 	if o.scenario == "stuck" && !durationSet {
 		o.duration = 90 * time.Second
+	}
+	// redis 要容納「前段正常 + 故障 + 恢復後觀察」，30s 預設太短：沒明確給 -duration 時改 120s
+	if o.scenario == "redis" && !durationSet {
+		o.duration = 120 * time.Second
 	}
 	return o, nil
 }
@@ -164,8 +175,14 @@ func buildSteps(o *options) ([]stepSpec, error) {
 		}
 		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 stuck.go
 		return []stepSpec{{Viewers: o.stuck, Rate: o.stuckRate, Rooms: 1}}, nil
+	case "redis":
+		if o.redisViewers < 1 || o.redisRate <= 0 || o.redisResyncDelayMax < 0 {
+			return nil, fmt.Errorf("-redis-viewers must be >= 1, -redis-rate must be positive and -redis-resync-delay-max must be >= 0")
+		}
+		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 redis.go
+		return []stepSpec{{Viewers: o.redisViewers * len(splitList(o.servers)), Rate: o.redisRate, Rooms: 1}}, nil
 	}
-	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck")
+	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck, redis")
 }
 
 func splitList(s string) []string {
@@ -323,7 +340,7 @@ func run(args []string) (code int) {
 			"ramp_rate": o.rampRate, "sampled": o.sampled, "max_inflight": o.maxInFlight,
 			"lag_threshold": o.lagThreshold.String(), "tool_cpu_frac": o.toolCPUFrac, "continue": o.cont, "other_cores_limit": o.otherLimit, "require_machine_check": o.requireCheck,
 			"server_pids": pids, "docker_containers": o.containers,
-			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate,
+			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate, "redis_viewers": o.redisViewers, "redis_rate": o.redisRate, "redis_resync_delay_max": o.redisResyncDelayMax.String(),
 		},
 		Steps: []stepResult{},
 	}
@@ -348,6 +365,8 @@ func run(args []string) (code int) {
 		}
 		if rep.Stuck != nil {
 			printStuck(os.Stdout, rep.Stuck)
+		} else if rep.Redis != nil {
+			printRedis(os.Stdout, rep.Redis)
 		} else {
 			printTable(os.Stdout, rep)
 		}
@@ -369,6 +388,10 @@ func run(args []string) (code int) {
 
 	if o.scenario == "stuck" {
 		return runStuck(ctx, o, httpClient, servers, data, runTag, rep, sc)
+	}
+
+	if o.scenario == "redis" {
+		return runRedis(ctx, o, httpClient, servers, data, runTag, rep)
 	}
 
 	mon := newMonitor(pids, splitList(o.containers), o.monInterval, sc.scrub)
