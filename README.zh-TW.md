@@ -39,6 +39,7 @@
 | 聊天類系統常把寫入改成非同步，代價是可能「已廣播但沒存到」 | 先量再決定：100 則／秒時 `POST` p99 約 6 ms，到 2,500 人 × 100 則／秒寫入都在 3 ms 以下、不隨負載變慢，CPU 花在發送給每個觀眾。維持同步寫入。5,000 人 × 100 則時測試用的 Mac 先卡住（證據指向核心網路記憶體耗盡），其中一台 server 因為卡住的寫入用光 thread 而 crash | [0014](docs/design/0014-load-baseline-keep-sync-writes.md) |
 | 依人數排序要把人數存起來，而且沒人看的房間要能自己從榜上消失，不需要有人發現「它沒人了」 | 一個 Redis Sorted Set 存人數，每次算完就寫；房間只要 presence key 還在就留在榜上，最後一個人離開，或持有最後觀眾的 server 掛掉時，這個 key 都會自己消失，所以由讀的人順手清。只排前 N 名：人數一直在變，用它當 cursor 會漏或重複 | [0015](docs/design/0015-popular-rooms-ranking.md) |
 | 測試只在本機 hook 跑；integration test 缺 DB 環境變數時會 skip，CI 設錯也是全綠、但什麼都沒測 | CI 起真的 Postgres 和 Redis；有 `CI` 環境變數時缺測試變數直接 fail，本機照舊 skip。第一次跑就抓到一個測試 package 只是靠別的 package 先 migrate 了本機 DB 才會過。image 從 1.87 GB（整套 toolchain、root）降到 39.8 MB（distroless 上的靜態執行檔、non-root） | [0016](docs/design/0016-minimal-ci.md) |
+| client 連著但不讀資料；macOS 上幾千個卡在 kernel 的寫入曾讓 server crash | 故障實驗用獨立的 compose project，不讀資料的 client 跑在 Docker 網路裡面。1 條卡住時由 75 秒的 pong 逾時踢掉；3,000 條時，核心的 TCP 記憶體（跟同一台 VM 裡的測試 client 共用）超過 high 線之後才出現第一次 outbox 踢人（只是時間上吻合，沒證明因果），44 秒內全部踢掉。Linux 上的 server 最多 22 條 thread（Docker Desktop VM、兩次各單次） | [0017](docs/design/0017-stuck-clients-fault-env.md) |
 
 ## 架構
 

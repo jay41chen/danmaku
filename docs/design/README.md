@@ -22,5 +22,6 @@ fault-injection experiment.
 | [0014](0014-load-baseline-keep-sync-writes.md) | Load baseline: keep synchronous writes, the cost is fan-out | measure before building, coordinated omission, fan-out cost, shared kernel buffers, test-rig limits |
 | [0015](0015-popular-rooms-ranking.md) | Popular rooms: a ranking that borrows presence as its heartbeat | derived data, one source of truth for liveness, lazy cleanup, consistency without atomicity, why not paginate a moving ranking |
 | [0016](0016-minimal-ci.md) | Minimal CI where missing test variables fail instead of skipping, and a runtime image without the toolchain | skip vs fail, test caching, test-order dependencies, fresh environments, multi-stage builds, distroless, static linking, build context |
+| [0017](0017-stuck-clients-fault-env.md) | Clients that stop reading: a separate fault environment, and which mechanism evicts them | slow consumers, pong timeout vs outbox, kernel TCP memory, test-rig artifacts, blocked syscalls and threads, isolated experiment environments |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.
