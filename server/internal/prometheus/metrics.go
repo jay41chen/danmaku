@@ -66,6 +66,13 @@ var (
 			Help: "Total number of times the PubSub connection was judged deaf and rebuilt",
 		},
 	)
+	// 已經確認的房間又收到訂閱確認：go-redis 重連後自動重新 SUBSCRIBE，或重送 SUBSCRIBE（確認 timer 到期，或 Redis 斷線時 SUBSCRIBE 寫入失敗後重送）；每次重新確認、每間房各 +1
+	pubSubReconfirmTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "redis_pubsub_reconfirm_total",
+			Help: "Subscribe confirmations for a room that was already confirmed: a go-redis reconnect, or a resent SUBSCRIBE (confirm timeout, or a write failure while Redis was down). Counted per room.",
+		},
+	)
 	// 重建 PubSub 之後，每個還有人在看的房間從重設到重新訂閱確認花的時間
 	pubSubResubscribeDuration = promauto.NewHistogram(
 		prometheus.HistogramOpts{
@@ -81,11 +88,14 @@ var (
 			Help: "Total number of accepted WebSocket connections",
 		},
 	)
-	// 送出 resync frame 的次數（PubSub 重建時 viewers > 0 的房間，每個房間每次重建最多一次，不是每條連線）
+	// 送出 resync frame 的次數，兩種來源：
+	//   - PubSub 重建後（重建當下 viewers > 0 的房間，每個房間每次重建最多一次；確認前房間就被刪掉的沒有）
+	//   - reconfirm（go-redis 重連或重複的訂閱確認，viewers > 0 的房間，每次確認一次）
+	// 以房間為單位，不是每條連線
 	websocketResyncTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "websocket_resync_sent_total",
-			Help: "Total number of resync frames broadcast after a PubSub rebuild (rooms with viewers > 0 at rebuild time, at most once per room per rebuild)",
+			Help: "Total number of resync frames broadcast, either after a PubSub rebuild (at most once per room with viewers per rebuild) or on a reconfirm (a go-redis reconnect or a duplicate subscribe confirmation, for rooms with viewers)",
 		},
 	)
 )
@@ -123,7 +133,7 @@ func SetViewers(members, anonymous int) {
 	websocketViewers.WithLabelValues("anonymous").Set(float64(anonymous))
 }
 
-// PubSub 重建後 resync frame 送出一次
+// resync frame 送出一次（PubSub 重建後或 reconfirm）
 func WSResync() {
 	websocketResyncTotal.Inc()
 }
@@ -131,6 +141,11 @@ func WSResync() {
 // PubSub 聾掉被判定並重建
 func PubSubDeaf() {
 	pubSubDeafTotal.Inc()
+}
+
+// 已確認的房間又收到訂閱確認（go-redis 重連或 SUBSCRIBE 重送）
+func PubSubReconfirmed() {
+	pubSubReconfirmTotal.Inc()
 }
 
 // PubSub 重建後，某房間重新訂閱確認花的時間

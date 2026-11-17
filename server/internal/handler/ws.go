@@ -300,7 +300,7 @@ func (this *WebsocketHandler) StartBroadcast() {
 		}
 		this.hub.Broadcast(context.Background(), roomID, []byte(msg))
 	}, func(roomID string) {
-		// PubSub 重建後這間房重新訂閱好了：重建到訂閱好之間發的訊息不會再推來，叫房內的 client 自己重新撈歷史
+		// PubSub 重建後這間房重新訂閱好了，或 go-redis 重連後房間又收到訂閱確認（reconfirm）：中間發的訊息不會再推來，叫房內的 client 自己重新撈歷史
 		frame := encodeResync(roomID)
 		if frame == nil {
 			// 不能把 nil 交給 Broadcast（會送出空 frame）；實務上這個固定結構不會失敗

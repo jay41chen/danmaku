@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 )
 
 // 假的 SUBSCRIBE / UNSUBSCRIBE：依序記下收到的 roomID，例如 []string{"sub a", "unsub a"}
@@ -801,24 +803,74 @@ func TestRoomSubscriptionsConfirmAfterExpireIsIgnored(t *testing.T) {
 	}
 }
 
-// 同一間房收到多次確認（go-redis 斷線重連後會自動重新 SUBSCRIBE）：不能 close 兩次（會 panic）
+// 同一間房收到多次確認（go-redis 斷線重連後會自動重新 SUBSCRIBE）：不能 close 兩次（會 panic），
+// 而且有人在看時要回報 reconfirm + resync（斷線期間可能漏訊息）
 // 不認識的房間收到確認：忽略
-func TestRoomSubscriptionsConfirmTwiceDoesNotPanic(t *testing.T) {
+func TestRoomSubscriptionsReconfirmReportsResync(t *testing.T) {
 	fake := &fakePubSub{manualConfirm: true}
 	subs := newTestRoomSubscriptions(fake, &fakeClock{})
 
 	a := joinAsync(testCtx(t), subs, "a")
 	waitViewers(t, subs, "a", 1)
 	drain(t, subs)
-	subs.confirmSubscribed("a")
+	if got := subs.confirmSubscribed("a"); got.reconfirm || got.resync {
+		t.Errorf("first confirm = %+v, want zero", got)
+	}
 	assertJoined(t, a, "A")
 
-	subs.confirmSubscribed("a") // 重連後的重複確認
-	subs.confirmSubscribed("x") // 沒有 entry 的房間
+	// 重連後的重複確認
+	if got := subs.confirmSubscribed("a"); !got.reconfirm || !got.resync || !got.since.IsZero() {
+		t.Errorf("second confirm = %+v, want reconfirm + resync without since", got)
+	}
+	// 沒有 entry 的房間
+	if got := subs.confirmSubscribed("x"); got != (confirmResult{}) {
+		t.Errorf("confirm of unknown room = %+v, want zero", got)
+	}
 
 	if got, want := viewerCounts(subs), map[string]int{"a": 1}; !maps.Equal(got, want) {
 		t.Errorf("viewers = %v, want %v", got, want)
 	}
+	if st, _ := stateOf(subs, "a"); st != subConfirmed {
+		t.Errorf("state = %v, want subConfirmed (reconfirm must not change state)", st)
+	}
+}
+
+// debounce 中（viewers = 0、timer 還在）的房間收到 reconfirm：記 reconfirm，但沒人可通知，不 resync
+func TestRoomSubscriptionsReconfirmDebouncingRoomNoResync(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs)
+	subs.confirmSubscribed("a")
+	assertJoined(t, x, "X")
+	subs.Leave(ctx, "a") // viewers 0、timer 還在
+
+	if got := subs.confirmSubscribed("a"); !got.reconfirm || got.resync {
+		t.Errorf("confirm of debouncing room = %+v, want reconfirm without resync", got)
+	}
+}
+
+// subRetry（確認 timer 到期、退回重送）時收到確認：照舊忽略，不算 reconfirm 也不 resync
+func TestRoomSubscriptionsConfirmInRetryIsIgnored(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	clock := &fakeClock{}
+	subs := newTestRoomSubscriptions(fake, clock)
+
+	x := joinAsync(testCtx(t), subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs) // subSent
+	clock.fire(confirmResendDelay)
+	if st, ok := stateOf(subs, "a"); !ok || st != subRetry {
+		t.Fatalf("state = (%v, %v), want subRetry", st, ok)
+	}
+
+	if got := subs.confirmSubscribed("a"); got != (confirmResult{}) {
+		t.Errorf("confirm in subRetry = %+v, want zero", got)
+	}
+	assertBlocked(t, x, "X")
 }
 
 // debounce 期間有人回來：entry（和已經 close 的 ready）還在，Join 立刻回傳，不用再等確認
@@ -859,6 +911,64 @@ func TestHandleSubscriptionIgnoresUnsubscribe(t *testing.T) {
 
 	store.handleSubscription(ctx, &redis.Subscription{Kind: "subscribe", Channel: roomChannel("a")}, func(string) {})
 	assertJoined(t, x, "X")
+}
+
+// reconfirm 且有人在看：handleSubscription 呼叫 onResync 一次；重複確認的第二次才會（第一次是一般確認，不 resync）
+func TestHandleSubscriptionReconfirmCallsOnResync(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	store := &RedisStore{rooms: subs, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs)
+
+	var resynced []string
+	onResync := func(roomID string) { resynced = append(resynced, roomID) }
+	sub := &redis.Subscription{Kind: "subscribe", Channel: roomChannel("a")}
+	store.handleSubscription(ctx, sub, onResync)
+	assertJoined(t, x, "X")
+	if len(resynced) != 0 {
+		t.Fatalf("resynced after first confirm = %v, want none", resynced)
+	}
+
+	reconfirmBefore := promtest.PubSubReconfirmCount()
+	durationBefore := promtest.PubSubResubscribeDurationCount()
+	store.handleSubscription(ctx, sub, onResync)
+	if want := []string{"a"}; !slices.Equal(resynced, want) {
+		t.Errorf("resynced after reconfirm = %v, want %v", resynced, want)
+	}
+	if got := promtest.PubSubReconfirmCount() - reconfirmBefore; got != 1 {
+		t.Errorf("redis_pubsub_reconfirm_total delta = %v, want 1", got)
+	}
+	if got := promtest.PubSubResubscribeDurationCount() - durationBefore; got != 0 {
+		t.Errorf("resubscribe duration samples delta = %v, want 0 (reconfirm is not the rebuild path)", got)
+	}
+}
+
+// reconfirm 但房間在 debounce（viewers = 0）：沒人可通知，不呼叫 onResync；仍記 reconfirm
+func TestHandleSubscriptionReconfirmDebouncingRoomDoesNotCallOnResync(t *testing.T) {
+	fake := &fakePubSub{manualConfirm: true}
+	subs := newTestRoomSubscriptions(fake, &fakeClock{})
+	store := &RedisStore{rooms: subs, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx := testCtx(t)
+
+	x := joinAsync(ctx, subs, "a")
+	waitViewers(t, subs, "a", 1)
+	drain(t, subs)
+	sub := &redis.Subscription{Kind: "subscribe", Channel: roomChannel("a")}
+	store.handleSubscription(ctx, sub, func(string) {})
+	assertJoined(t, x, "X")
+	subs.Leave(ctx, "a") // viewers 0、timer 還在
+
+	reconfirmBefore := promtest.PubSubReconfirmCount()
+	store.handleSubscription(ctx, sub, func(roomID string) {
+		t.Errorf("onResync called for debouncing room %q, want not called", roomID)
+	})
+	if got := promtest.PubSubReconfirmCount() - reconfirmBefore; got != 1 {
+		t.Errorf("redis_pubsub_reconfirm_total delta = %v, want 1", got)
+	}
 }
 
 // Join 並等到回傳；沒有背景 worker，所以等的同時自己 drain（Join 要等 worker 送 SUB、確認回來）
@@ -934,7 +1044,7 @@ func TestConfirmSubscribedReportsResyncOnlyOncePerReset(t *testing.T) {
 	x := joinAsync(ctx, subs, "a")
 	waitViewers(t, subs, "a", 1)
 	drain(t, subs)
-	if resync, _ := subs.confirmSubscribed("a"); resync {
+	if subs.confirmSubscribed("a").resync {
 		t.Error("normal confirm reported resync, want false")
 	}
 	assertJoined(t, x, "X")
@@ -942,12 +1052,12 @@ func TestConfirmSubscribedReportsResyncOnlyOncePerReset(t *testing.T) {
 	resetAt := time.Now()
 	subs.resetAfterRebuild(resetAt)
 	drain(t, subs) // 重送 SUB，state = subSent
-	resync, since := subs.confirmSubscribed("a")
-	if !resync || !since.Equal(resetAt) {
-		t.Errorf("confirm after reset = (%v, %v), want (true, %v)", resync, since, resetAt)
+	if got := subs.confirmSubscribed("a"); !got.resync || !got.since.Equal(resetAt) || got.reconfirm {
+		t.Errorf("confirm after reset = %+v, want resync with since %v and no reconfirm", got, resetAt)
 	}
-	if resync, _ := subs.confirmSubscribed("a"); resync {
-		t.Error("second confirm reported resync again, want once per reset")
+	// 重建路徑每次重設只報一次：再來的確認走 reconfirm（since 是零值，不會再記恢復時間）
+	if got := subs.confirmSubscribed("a"); !got.reconfirm || !got.resync || !got.since.IsZero() {
+		t.Errorf("second confirm = %+v, want reconfirm + resync without since (rebuild path only once per reset)", got)
 	}
 
 	// 走一條回到 subSent 的路徑：X 離開、expire，worker 送 UNSUB 的當下 Y 進房，worker 再送 SUB
@@ -965,7 +1075,7 @@ func TestConfirmSubscribedReportsResyncOnlyOncePerReset(t *testing.T) {
 	if want := []string{"sub a", "sub a", "unsub a", "sub a"}; !slices.Equal(fake.snapshot(), want) {
 		t.Fatalf("calls = %v, want %v", fake.snapshot(), want)
 	}
-	if resync, _ := subs.confirmSubscribed("a"); resync {
+	if subs.confirmSubscribed("a").resync {
 		t.Error("confirm after rejoin reported resync again, resyncSince was not cleared")
 	}
 	assertJoined(t, y, "Y")
@@ -973,7 +1083,7 @@ func TestConfirmSubscribedReportsResyncOnlyOncePerReset(t *testing.T) {
 	// 再重建一次：又可以回報一次
 	subs.resetAfterRebuild(time.Now())
 	drain(t, subs)
-	if resync, _ := subs.confirmSubscribed("a"); !resync {
+	if !subs.confirmSubscribed("a").resync {
 		t.Error("confirm after second reset did not report resync")
 	}
 }
@@ -999,7 +1109,7 @@ func TestResetAfterRebuildDebouncingRoomResubscribesWithoutResync(t *testing.T) 
 	if want := []string{"sub a", "sub a"}; !slices.Equal(fake.snapshot(), want) {
 		t.Errorf("calls = %v, want %v", fake.snapshot(), want)
 	}
-	if resync, _ := subs.confirmSubscribed("a"); resync {
+	if subs.confirmSubscribed("a").resync {
 		t.Error("confirm of a room with no viewers reported resync, want false")
 	}
 }
@@ -1044,7 +1154,7 @@ func TestResetAfterRebuildKeepsPendingReadyAndWakesIt(t *testing.T) {
 	drain(t, subs) // 重送 SUB
 	assertBlocked(t, x, "X")
 
-	if resync, _ := subs.confirmSubscribed("a"); !resync {
+	if !subs.confirmSubscribed("a").resync {
 		t.Error("confirm after reset did not report resync")
 	}
 	assertJoined(t, x, "X")

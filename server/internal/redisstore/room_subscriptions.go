@@ -172,40 +172,67 @@ func (this *roomSubscriptions) addViewer(roomID string) (<-chan struct{}, error)
 	return entry.ready, nil
 }
 
-// consumer 收到 Redis 對 SUBSCRIBE roomID 的確認時呼叫
-// 回傳 resync = true 表示這是 PubSub 重建後這間房第一次真的確認（subSent → subConfirmed）：since 是重建時間，
-// 呼叫端在鎖外通知 client 重新撈歷史、記恢復時間。只有重建當下還有人在看（viewers > 0）的房間會回報，每次重建最多一次；一般確認（沒有 reset 過）永遠回 false
+// confirmSubscribed 的結果：呼叫端在鎖外依這個決定要不要通知 client、記哪些 metric
+//   - resync：要通知這間房的 client 重新撈歷史
+//   - since：只有重建路徑有值（重建時間），給呼叫端記恢復時間；reconfirm 路徑是零值
+//   - reconfirm：房間已經是 subConfirmed 又收到一次確認（go-redis 重連，或確認 timer 重送造成的重複）
 //
-// 同一間房可能被呼叫多次：go-redis 斷線重連後會自動重新 SUBSCRIBE 所有記住的 channel，每個都會再回一次確認；
-// 確認 timer 退回重送時也會再收到一次
+// 三種情況：一般確認 / 被忽略 → 全零；重建後第一次確認 → resync + since；reconfirm → reconfirm，有人在看才 resync
+type confirmResult struct {
+	resync    bool
+	since     time.Time
+	reconfirm bool
+}
+
+// consumer 收到 Redis 對 SUBSCRIBE roomID 的確認時呼叫
+// 回傳值見 confirmResult。重建後第一次確認（subSent → subConfirmed 且有 resyncSince）：resync + since，
+// 只有重建當下還有人在看（viewers > 0）的房間會回報，每次重建最多一次；一般確認（沒有 reset 過）全零
+//
+// 同一間房可能被呼叫多次，重複確認有三個來源：
+//   - (a) go-redis 斷線重連後會自動重新 SUBSCRIBE 所有記住的 channel，每個都會再回一次確認。
+//     斷線期間發布的訊息收不到，所以房間已經是 subConfirmed 又收到確認時，視為重連：回報 reconfirm，
+//     有人在看（viewers > 0）才 resync，讓 client 補撈歷史；debounce 中沒人的房間沒人可通知，只記 reconfirm
+//   - (b) 確認 timer 到期、worker 重送 SUBSCRIBE（冪等）時，Redis 會再回一次確認
+//   - (c) Redis 斷線時 SUBSCRIBE 寫入失敗：go-redis 仍然記住這個 channel，房間進 subRetry；worker 重送時
+//     go-redis 的 conn() 會先把所有記住的 channel（包含這間房）重新訂閱一遍，再訂閱這間房一次，所以這間房可能收到兩次確認：
+//     第一次 subSent → subConfirmed，第二次就是 reconfirm。
+//     這要求 worker 重送時 go-redis 的連線仍是 nil；若 go-redis 的 receive loop 已先重連，較早的那次確認會在 subRetry 期間到達而被忽略，只剩一次確認
+//
+// 三者都是接受的誤報（每個 viewer 多撈一次歷史），不嘗試區分。
+// 重建之後遇到 (c)，同一間房可能先走一次重建路徑的 resync、再走一次 reconfirm 的 resync
 //
 // 不用先檢查 ready 是不是 close 過：只有 subSent → subConfirmed 這一步會 close，
 // 而要從 subConfirmed 再回到 subSent 一定要先經過「換新的 ready」——worker 決定 UNSUB，或 resetAfterRebuild（只換 subConfirmed 的）
 // → subSent 時 ready 一定還沒 close
-func (this *roomSubscriptions) confirmSubscribed(roomID string) (resync bool, since time.Time) {
+func (this *roomSubscriptions) confirmSubscribed(roomID string) confirmResult {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 	entry := this.rooms[roomID]
 	if entry == nil {
 		// 確認晚到，entry 已經不在了（worker 已經 UNSUB 完並刪掉）：沒人在等，忽略
-		return false, time.Time{}
+		return confirmResult{}
+	}
+	if entry.state == subConfirmed {
+		// 已經確認過又收到確認：go-redis 重連（或確認 timer 重送的重複，接受誤報）。
+		// 不動 state / ready / resyncSince；只有有人在看才 resync
+		return confirmResult{reconfirm: true, resync: entry.viewers > 0}
 	}
 	if entry.state != subSent {
-		// 不是在等確認：重複的確認（subConfirmed）、過期的確認（subIdle）→ 不理
+		// 不是在等確認：過期的確認（subIdle）→ 不理
 		// subRetry 也不理：這時候不知道 SUB 到底有沒有送到，worker 等一下會重送（SUBSCRIBE 冪等），
 		// 那次的確認會在 subSent 時收到。維持「只有 subSent → subConfirmed 會 close ready」這條規則，
 		// 不用另外推理 retry 時收到的確認是哪一次 SUB 的；代價只是 Join 多等一次來回
-		return false, time.Time{}
+		return confirmResult{}
 	}
 	// 正在等：簽收 + 叫醒所有在等的 Join
 	entry.state = subConfirmed
 	close(entry.ready)
 	if entry.resyncSince.IsZero() {
-		return false, time.Time{}
+		return confirmResult{}
 	}
-	since = entry.resyncSince
+	since := entry.resyncSince
 	entry.resyncSince = time.Time{} // 每房只回報一次
-	return true, since
+	return confirmResult{resync: true, since: since}
 }
 
 // PubSub 被換掉之後（Subscribe 的 consumer 在舊 channel 收完後呼叫）：新連線什麼都還沒訂，把所有房間退回「還沒訂」讓 worker 重送 SUB

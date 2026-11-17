@@ -19,7 +19,7 @@ const (
 	wsTypeLeave    = "leave"    // client → server：離開房間
 	wsTypeLeaveOK  = "leave_ok" // server → client：離開房間成功
 	wsTypePresence = "presence" // server → client：房間人數（每 5 秒推一次）
-	wsTypeResync   = "resync"   // server → client：server 的 Redis 訂閱剛重建過，這段期間可能漏訊息，請重新撈歷史
+	wsTypeResync   = "resync"   // server → client：server 的 PubSub 重建過或 go-redis 重連過（reconfirm），這段期間可能漏訊息，請重新撈歷史
 
 	// 同時是 Redis room channel 上的 payload 種類：訊息之外的第二種。Redis 上的 JSON 開頭固定是 {"type":"user_hidden"（見 userHiddenPrefix）
 	wsTypeUserHidden = "user_hidden" // server → client：這個 user 在這間房被 ban，請把畫面上他的彈幕移除（不會發給他本人的連線）

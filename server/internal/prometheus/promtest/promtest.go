@@ -86,3 +86,13 @@ func MemberViewers() float64 {
 func WSResyncCount() float64 {
 	return find("websocket_resync_sent_total", nil).GetCounter().GetValue()
 }
+
+// redis_pubsub_reconfirm_total
+func PubSubReconfirmCount() float64 {
+	return find("redis_pubsub_reconfirm_total", nil).GetCounter().GetValue()
+}
+
+// redis_pubsub_resubscribe_duration_seconds 的 histogram sample 總數
+func PubSubResubscribeDurationCount() uint64 {
+	return find("redis_pubsub_resubscribe_duration_seconds", nil).GetHistogram().GetSampleCount()
+}

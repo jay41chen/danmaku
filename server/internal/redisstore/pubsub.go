@@ -55,7 +55,13 @@ func (this *RedisStore) LeaveRoom(ctx context.Context, roomID string) {
 // 已知問題（既有行為）：channel 的 buffer 滿了（我們消費太慢）時，
 // go-redis 會直接丟掉那則訊息、只記 log（go-redis 的 pubsub.go initAllChan 約 840-850）
 //
-// onResync：重建後某間房重新訂閱確認的那一刻呼叫（重建當下還有人在看的房間，每次重建最多一次），由呼叫端決定怎麼通知 client 重新撈歷史
+// onResync：某間房需要 client 重新撈歷史的那一刻呼叫，由呼叫端決定怎麼通知。兩種時機：
+//   - 重建後重新訂閱確認（重建當下還有人在看的房間，每次重建最多一次）
+//   - 已確認的房間又收到確認（reconfirm；有人在看才呼叫）。重複確認的來源：(a) go-redis 重連後重新 SUBSCRIBE 所有已知 channel；
+//     (b) 確認 timer 到期、worker 重送 SUBSCRIBE；(c) Redis 斷線時 SUBSCRIBE 寫入失敗，go-redis 仍記住 channel、房間進 subRetry，
+//     worker 重送時 conn() 先重新訂閱所有已知 channel 再訂閱這間房，同一間房可能收到兩次確認（第二次是 reconfirm；
+//     要求重送時 go-redis 的連線仍是 nil，若 receive loop 已先重連，較早的確認在 subRetry 期間被忽略，只剩一次）。
+//     都是接受的誤報（每個 viewer 多撈一次歷史）；重建之後遇到 (c)，同一間房可能一次重建路徑 resync 加一次 reconfirm resync
 func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg string), onResync func(roomID string)) error {
 	for {
 		ps := this.pubsub.Load()
@@ -104,7 +110,12 @@ func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg 
 //	t2  t0 那個 UNSUBSCRIBE 的確認才到 → 如果不過濾，state 剛好是 subSent，會 close X 的新 ready
 //	t3  X 拿到 join_ok，但它的 SUBSCRIBE 還沒被確認 → 又回到「join_ok 之後補撈歷史也補不到」的洞
 //
-// 重建當下有人在看、重建後第一次確認的房間（confirmSubscribed 回報需要 resync）：記恢復時間、通知 onResync。onResync 在鎖外呼叫（它會去 Hub 廣播）
+// 需要 resync 的兩種情況（confirmSubscribed 回報）都會通知 onResync，onResync 在鎖外呼叫（它會去 Hub 廣播）：
+//   - 重建後第一次確認、重建當下還有人在看的房間：記恢復時間
+//   - reconfirm（已確認的房間又收到確認，視為 go-redis 重連、斷線期間可能漏訊息）且有人在看：記 reconfirm 次數，不記恢復時間。
+//     重複確認的來源有三：(a) go-redis 重連重新 SUBSCRIBE 所有已知 channel；(b) 確認 timer 到期、worker 重送 SUBSCRIBE；
+//     (c) SUBSCRIBE 寫入失敗後 worker 重送，go-redis 的 conn() 先重新訂閱所有已知 channel（含這間房）再訂一次，可能收到兩次確認（要求重送時 go-redis 的連線仍是 nil；若 receive loop 已先重連，較早的確認在 subRetry 期間被忽略，只剩一次）。
+//     都是接受的誤報；重建之後遇到 (c)，同一間房可能一次重建路徑 resync 加一次 reconfirm resync
 func (this *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subscription, onResync func(roomID string)) {
 	if msg.Kind != "subscribe" {
 		return
@@ -113,8 +124,14 @@ func (this *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subsc
 	if !ok {
 		return
 	}
-	if resync, since := this.rooms.confirmSubscribed(roomID); resync {
-		prom.PubSubResubscribed(time.Since(since))
+	result := this.rooms.confirmSubscribed(roomID)
+	if result.reconfirm {
+		// 已確認的房間又收到確認：go-redis 重連（或確認 timer 重送）。不記恢復時間，那是重建路徑的指標
+		prom.PubSubReconfirmed()
+	} else if result.resync {
+		prom.PubSubResubscribed(time.Since(result.since))
+	}
+	if result.resync {
 		onResync(roomID)
 	}
 }
