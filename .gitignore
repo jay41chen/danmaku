@@ -27,3 +27,7 @@ server/cmd/loadtest/loadtest
 
 # Server binary when built from its package dir (go build in server/cmd/server)
 server/cmd/server/server
+
+# Fault experiment env (deploy/fault): cross-compiled tool and result JSON
+deploy/fault/.bin/
+deploy/fault/out/

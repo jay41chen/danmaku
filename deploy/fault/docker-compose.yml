@@ -1,0 +1,66 @@
+# 故障注入 / 慢 client 實驗環境（ROADMAP M10）：跑完即丟，不跟根目錄的 dev compose 共用任何資源。
+# 用法見 up.sh / stuck.sh / down.sh；一律用 `-p danmaku-fault`，不要在這裡設 container_name（避免跟 dev 的 danmaku-* 撞名）。
+name: danmaku-fault
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      # fault 環境專用、跑完即丟的帳密，跟根目錄 compose 的 danmaku/danmaku 同一類
+      POSTGRES_USER: fault
+      POSTGRES_PASSWORD: fault
+      POSTGRES_DB: danmaku_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fault -d danmaku_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      # 只綁 127.0.0.1：給 Mac 原生對照組用
+      - "127.0.0.1:5489:5432"
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--save", ""]
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:5490:6379"
+
+  server-1:
+    build: ../../server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fault:fault@postgres:5432/danmaku_test?sslmode=disable
+      REDIS_URL: redis://redis:6379/15
+      JWT_SECRET: ${JWT_SECRET:?run up.sh}
+      WS_MAX_CLIENTS: "6000"
+      LOADTEST_TIMING_LOG: "true"
+      # 不設 CLIENT_IP_HEADER：跟 M6 一樣，工具直連 server
+    ports:
+      - "127.0.0.1:5488:8080"
+
+  server-2:
+    build: ../../server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fault:fault@postgres:5432/danmaku_test?sslmode=disable
+      REDIS_URL: redis://redis:6379/15
+      JWT_SECRET: ${JWT_SECRET:?run up.sh}
+      WS_MAX_CLIENTS: "6000"
+      LOADTEST_TIMING_LOG: "true"
