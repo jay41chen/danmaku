@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -57,6 +58,7 @@ type redisViewerState struct {
 	recovered  map[int]struct{}  // 補撈（GET）拿到的 seq
 	resyncs    []time.Time
 	fetches    []redisFetch
+	presence   []presenceFrame // room 相符的 presence frame（kill.go 的 presenceFrame）
 	disconnect *redisDisconnect
 
 	// 已排定、還沒開始的延遲補撈；為 true 時後來的 resync 不再排
@@ -101,6 +103,12 @@ func (s *redisViewerState) handleFrame(run, room string, msg []byte, at time.Tim
 		return true
 	}
 	return false
+}
+
+func (s *redisViewerState) addPresence(at time.Time, count int) {
+	s.mu.Lock()
+	s.presence = append(s.presence, presenceFrame{At: at, Count: count})
+	s.mu.Unlock()
 }
 
 // 嘗試把這條觀眾標成「有補撈等待中」；已經在等就回傳 false（呼叫端不用再排）
@@ -313,6 +321,38 @@ type redisServerSummary struct {
 	ConnectionsMax     int     `json:"metric_ws_connections_max"`
 	MetricSamplesOK    int     `json:"metric_samples_ok"`
 	MetricSampleErrors int     `json:"metric_sample_errors"`
+
+	// 以下兩個是後來加的（附加欄位）：這台 server 的觀眾看到的 presence，以及 POST 打到這台 server 的結果
+	Presence *redisPresenceSummary `json:"presence,omitempty"` // 沒有任何 presence frame 時省略
+	Posts    *redisPostStats       `json:"posts,omitempty"`
+}
+
+// presence 時間序列的分桶寬度（秒）
+const presenceBucketS = 5
+
+// 一個 5 秒桶裡，這台 server 的任一觀眾最後收到的 presence count。TS 是桶起點（相對 start 的秒數，join 在 start 之前的 frame 會落在負數桶）
+type presenceBucket struct {
+	TS    int `json:"t_s"`
+	Count int `json:"count"`
+}
+
+// 一台 server 的觀眾看到的 presence：第一 / 最後一筆（依時間）、最小 / 最大值，以及每 5 秒一格的序列（沒有 frame 的桶省略）
+type redisPresenceSummary struct {
+	Frames int              `json:"frames"`
+	First  int              `json:"first"`
+	Last   int              `json:"last"`
+	Min    int              `json:"min"`
+	Max    int              `json:"max"`
+	Series []presenceBucket `json:"series_5s"`
+}
+
+// POST 依目標 server 的彙整：status_counts 的 key 同 post_timeline（"201" / "500" / "err"（傳輸錯誤或 client timeout，兩者在 sender 不分）/ "dropped"）；
+// latency_201 只算 201 的（排程時間 → 回應完成）
+type redisPostStats struct {
+	Sent         int            `json:"sent"`
+	StatusCounts map[string]int `json:"status_counts"`
+	Latency201   latencySummary `json:"latency_201"`
+	LatencyAll   latencySummary `json:"latency_all"` // 除 dropped 外所有結果（201 / 500 / 其他狀態 / err），看失敗的 POST 卡了多久
 }
 
 type postSecond struct {
@@ -405,6 +445,68 @@ func buildPostTimeline(res *openLoopResult) []postSecond {
 	return out
 }
 
+// 彙整一台 server 的 presence frame（所有觀眾的，任意順序）；沒有 frame 回 nil。純計算
+// first / min / max 只看 At >= start 的 frame（start 之前的是 join 時的暫態）；start 之後沒有 frame 時三者為 0。last 是整體最後一筆。series_5s 含 start 之前的負數桶
+func summarizePresenceSeries(frames []presenceFrame, start time.Time) *redisPresenceSummary {
+	if len(frames) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(frames)
+	slices.SortStableFunc(sorted, func(a, b presenceFrame) int { return a.At.Compare(b.At) })
+	sum := &redisPresenceSummary{Frames: len(sorted), Last: sorted[len(sorted)-1].Count}
+	seen := false
+	for _, f := range sorted {
+		if !f.At.Before(start) {
+			if !seen {
+				sum.First, sum.Min, sum.Max = f.Count, f.Count, f.Count
+				seen = true
+			} else {
+				sum.Min, sum.Max = min(sum.Min, f.Count), max(sum.Max, f.Count)
+			}
+		}
+		// floor 除法：負的位移要落在負數桶，不能被截向 0
+		b := int(math.Floor(f.At.Sub(start).Seconds()/presenceBucketS)) * presenceBucketS
+		if n := len(sum.Series); n > 0 && sum.Series[n-1].TS == b {
+			sum.Series[n-1].Count = f.Count // 時間排序，後來的覆蓋 = 該桶最後一筆
+		} else {
+			sum.Series = append(sum.Series, presenceBucket{TS: b, Count: f.Count})
+		}
+	}
+	return sum
+}
+
+// 依目標 server 彙整 POST 結果。每筆 seq 的 server 用 poster 同一個公式（redis 情境只有 1 個房間）
+func buildPostStatsByServer(res *openLoopResult, servers []string) map[string]*redisPostStats {
+	out := map[string]*redisPostStats{}
+	lat := map[string][]time.Duration{}
+	latAll := map[string][]time.Duration{}
+	for _, s := range servers {
+		out[s] = &redisPostStats{StatusCounts: map[string]int{}}
+	}
+	for seq := range res.Total {
+		k := statusKey(res.Outcome[seq], res.Status[seq])
+		if k == "" {
+			continue
+		}
+		s := servers[serverIndex(seq, 1, len(servers))]
+		out[s].Sent++
+		out[s].StatusCounts[k]++
+		if res.Outcome[seq] != outcomeDropped {
+			latAll[s] = append(latAll[s], time.Duration(res.LatencyNs[seq]))
+		}
+		if res.Outcome[seq] == outcomeResponse && res.Status[seq] == http.StatusCreated {
+			lat[s] = append(lat[s], time.Duration(res.LatencyNs[seq]))
+		}
+	}
+	for s, l := range lat {
+		out[s].Latency201 = summarize(l)
+	}
+	for s, l := range latAll {
+		out[s].LatencyAll = summarize(l)
+	}
+	return out
+}
+
 func createdSeqs(res *openLoopResult) []int {
 	var out []int
 	for seq := range res.Total {
@@ -434,6 +536,7 @@ func buildRedisReport(start time.Time, rate float64, res *openLoopResult, states
 		}
 	}
 	byServer := map[string]*redisServerSummary{}
+	presenceFrames := map[string][]presenceFrame{}
 	for _, s := range servers {
 		byServer[s] = &redisServerSummary{Server: s}
 	}
@@ -469,6 +572,7 @@ func buildRedisReport(start time.Time, rate float64, res *openLoopResult, states
 		if len(st.resyncs) > 0 {
 			firstResync = st.resyncs[0]
 		}
+		presenceFrames[st.server] = append(presenceFrames[st.server], st.presence...)
 		st.mu.Unlock()
 
 		rep.Viewers = append(rep.Viewers, vr)
@@ -522,6 +626,7 @@ func buildRedisReport(start time.Time, rate float64, res *openLoopResult, states
 			ss.PubSubDeafDelta = last.PubSubDeaf - first.PubSubDeaf
 		}
 		ss.MetricSampleErrors = sampleErrs[s]
+		ss.Presence = summarizePresenceSeries(presenceFrames[s], start)
 		rep.Servers = append(rep.Servers, *ss)
 	}
 	rep.Metrics = samples
@@ -718,7 +823,13 @@ func runRedis(ctx context.Context, o *options, client *http.Client, servers []st
 	obs := &redisObserver{ctx: runCtx, client: client, run: runTag, room: room, resyncDelayMax: o.redisResyncDelayMax, states: map[int]*redisViewerState{}}
 	vp := newViewerPool(viewerConfig{
 		Servers: servers, Rooms: data.rooms[:1], Run: runTag, RampRate: o.rampRate, JoinTimeout: 10 * time.Second, MaxDialing: 128,
-		OnFrame: obs.onFrame, OnClose: obs.onClose,
+		OnFrame: func(v *viewer, msg []byte, at time.Time) {
+			if count, ok := parsePresenceFrame(room, msg); ok {
+				obs.state(v).addPresence(at, count)
+			}
+			obs.onFrame(v, msg, at)
+		},
+		OnClose: obs.onClose,
 	})
 	defer vp.closeAll()
 
@@ -753,6 +864,11 @@ func runRedis(ctx context.Context, o *options, client *http.Client, servers []st
 	obs.mu.Unlock()
 	report := buildRedisReport(start, o.redisRate, loop, states, servers, samples, sampleErrs)
 	report.Summary.ResyncDelayMax = o.redisResyncDelayMax.String()
+	// 只有 redis 情境的 poster 直接打每台 server（kill 情境走 nginx，seq → server 對不起來），所以 POST 統計不放在 buildRedisReport
+	postStats := buildPostStatsByServer(loop, servers)
+	for i := range report.Servers {
+		report.Servers[i].Posts = postStats[report.Servers[i].Server]
+	}
 	rep.Redis = &report
 	if ctx.Err() != nil {
 		rep.Aborted = true
@@ -787,4 +903,21 @@ func printRedis(w io.Writer, r *redisReport) {
 			sv.Server, sv.Viewers, sv.Missing, sv.Recovered, sv.FinalMissing, sv.ResyncViewers, first, sv.Disconnects,
 			sv.ResyncSentDelta, sv.PublishFailedDelta, sv.PubSubDeafDelta, sv.ConnectionsMin, sv.ConnectionsMax)
 	}
+	for _, sv := range r.Servers {
+		if p := sv.Presence; p != nil {
+			fmt.Fprintf(w, "%s: presence min=%d max=%d first=%d last=%d frames=%d series_5s: %s\n", sv.Server, p.Min, p.Max, p.First, p.Last, p.Frames, formatPresenceSeries(p.Series))
+		}
+		if ps := sv.Posts; ps != nil {
+			fmt.Fprintf(w, "%s: posts sent=%d status: %s 201 latency p50=%.1fms p99=%.1fms max=%.1fms, all latency p50=%.1fms p99=%.1fms max=%.1fms\n", sv.Server, ps.Sent, formatReasons(ps.StatusCounts), ps.Latency201.P50Ms, ps.Latency201.P99Ms, ps.Latency201.MaxMs, ps.LatencyAll.P50Ms, ps.LatencyAll.P99Ms, ps.LatencyAll.MaxMs)
+		}
+	}
+}
+
+// [{0,5},{5,4}] → "0s:5 5s:4"
+func formatPresenceSeries(series []presenceBucket) string {
+	parts := make([]string, 0, len(series))
+	for _, b := range series {
+		parts = append(parts, fmt.Sprintf("%ds:%d", b.TS, b.Count))
+	}
+	return strings.Join(parts, " ")
 }

@@ -304,3 +304,94 @@ func TestResyncCancelAbortsPending(t *testing.T) {
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
+
+func TestSummarizePresenceSeries(t *testing.T) {
+	if summarizePresenceSeries(nil, time.Unix(1000, 0)) != nil {
+		t.Error("no frames should give nil")
+	}
+	start := time.Unix(1000, 0)
+	at := func(sec float64) time.Time { return start.Add(time.Duration(sec * float64(time.Second))) }
+	// 任意順序；-1s 落在 -5 桶（join 在 start 之前）；0..5 桶最後一筆是 t=4.5 的 3；10 桶只有 7
+	frames := []presenceFrame{
+		{At: at(4.5), Count: 3}, {At: at(-1), Count: 1}, {At: at(2), Count: 5}, {At: at(12), Count: 7}, {At: at(5), Count: 2},
+	}
+	sum := summarizePresenceSeries(frames, start)
+	if sum.Frames != 5 || sum.First != 5 || sum.Last != 7 || sum.Min != 2 || sum.Max != 7 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	// first/min/max 只看 start 之後：-1s 的 1 不算
+	want := []presenceBucket{{-5, 1}, {0, 3}, {5, 2}, {10, 7}}
+	if !slices.Equal(sum.Series, want) {
+		t.Errorf("series = %+v, want %+v", sum.Series, want)
+	}
+	if got := formatPresenceSeries(sum.Series); got != "-5s:1 0s:3 5s:2 10s:7" {
+		t.Errorf("formatted = %q", got)
+	}
+}
+
+func TestSummarizePresenceSeriesIgnoresBeforeStart(t *testing.T) {
+	start := time.Unix(1000, 0)
+	at := func(sec float64) time.Time { return start.Add(time.Duration(sec * float64(time.Second))) }
+	sum := summarizePresenceSeries([]presenceFrame{{At: at(-3), Count: 1}, {At: at(1), Count: 8}, {At: at(2), Count: 6}}, start)
+	if sum.First != 8 || sum.Min != 6 || sum.Max != 8 || sum.Last != 6 {
+		t.Errorf("summary = %+v", sum)
+	}
+	only := summarizePresenceSeries([]presenceFrame{{At: at(-3), Count: 4}}, start)
+	if only.Frames != 1 || only.First != 0 || only.Min != 0 || only.Max != 0 || only.Last != 4 || len(only.Series) != 1 {
+		t.Errorf("only-before-start summary = %+v", only)
+	}
+}
+
+func TestBuildPostStatsByServer(t *testing.T) {
+	servers := []string{"http://a", "http://b"}
+	// 1 個房間：seq 偶數 → a、奇數 → b
+	res := &openLoopResult{
+		Interval: time.Second, Total: 7,
+		Outcome:   []int8{outcomeResponse, outcomeResponse, outcomeResponse, outcomeError, outcomeResponse, outcomeNotRun, outcomeResponse},
+		Status:    []int32{201, 201, 500, 0, 201, 0, 201},
+		LatencyNs: []int64{int64(10 * time.Millisecond), int64(20 * time.Millisecond), int64(900 * time.Millisecond), int64(5 * time.Second), int64(30 * time.Millisecond), 0, int64(50 * time.Millisecond)},
+	}
+	got := buildPostStatsByServer(res, servers)
+	a, b := got["http://a"], got["http://b"]
+	// a: seq 0(201,10ms) 2(500) 4(201,30ms) 6(201,50ms)
+	if a.Sent != 4 || a.StatusCounts["201"] != 3 || a.StatusCounts["500"] != 1 || a.Latency201.N != 3 || a.Latency201.P50Ms != 30 || a.Latency201.MaxMs != 50 {
+		t.Errorf("a = %+v", a)
+	}
+	// a 的 all latency：10 / 900（500）/ 30 / 50ms
+	if a.LatencyAll.N != 4 || a.LatencyAll.MaxMs != 900 {
+		t.Errorf("a all = %+v", a.LatencyAll)
+	}
+	// b: seq 1(201,20ms) 3(err，延遲不算) 5(沒執行，不算)
+	if b.Sent != 2 || b.StatusCounts["201"] != 1 || b.StatusCounts["err"] != 1 || b.Latency201.N != 1 || b.Latency201.MaxMs != 20 {
+		t.Errorf("b = %+v", b)
+	}
+	// b 的 all latency 含 err 的 5s
+	if b.LatencyAll.N != 2 || b.LatencyAll.MaxMs != 5000 {
+		t.Errorf("b all = %+v", b.LatencyAll)
+	}
+}
+
+func TestBuildRedisReportPresencePerServer(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	res := &openLoopResult{Interval: time.Second}
+	s1a, s1b, s2 := newRedisViewerState(0, "http://a"), newRedisViewerState(1, "http://a"), newRedisViewerState(2, "http://b")
+	s1a.addPresence(t0.Add(time.Second), 4)
+	s1b.addPresence(t0.Add(2*time.Second), 2)
+	s2.addPresence(t0.Add(time.Second), 6)
+	rep := buildRedisReport(t0, 1, res, []*redisViewerState{s1a, s1b, s2}, []string{"http://a", "http://b"}, nil, nil)
+	pa, pb := rep.Servers[0].Presence, rep.Servers[1].Presence
+	if pa == nil || pa.Min != 2 || pa.Max != 4 || pa.Last != 2 || pa.Frames != 2 || len(pa.Series) != 1 || pa.Series[0].Count != 2 {
+		t.Errorf("a presence = %+v", pa)
+	}
+	if pb == nil || pb.Min != 6 || pb.Max != 6 {
+		t.Errorf("b presence = %+v", pb)
+	}
+	if rep.Servers[0].Posts != nil {
+		t.Error("buildRedisReport must not fill Posts (runRedis does)")
+	}
+	var sb strings.Builder
+	printRedis(&sb, &rep)
+	if !strings.Contains(sb.String(), "http://a: presence min=2 max=4 first=4 last=2") {
+		t.Errorf("print output:\n%s", sb.String())
+	}
+}
