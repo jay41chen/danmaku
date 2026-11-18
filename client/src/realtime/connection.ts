@@ -1,6 +1,6 @@
 // WS 連線管理（純 TS）。level-triggered：只要 WS 連著，它的身分就要和 session 目前狀態一致。
 import { WS_URL, ROOM_MESSAGES_PATH, ROOM_PUBLIC_ID } from "../config";
-import { apiFetch } from "../api/client";
+import { apiFetch, ApiError } from "../api/client";
 import * as session from "../auth/session";
 import { equalJitter } from "../lib/backoff";
 import * as messages from "./messages";
@@ -20,6 +20,11 @@ const PONG_TIMEOUT_MS = 20_000;
 // resync 後撈歷史前的隨機等待上限（0 ~ 此值均勻分布）
 // loadtest 的 -redis-resync-delay-max（server/cmd/loadtest/main.go）對應這個值，兩邊要一起改
 const RESYNC_FETCH_DELAY_MAX_MS = 2000;
+// 撈歷史失敗時的重試：最多 3 次（含第一次），退避沿用重連的參數。
+// loadtest 的 kill 情境（server/cmd/loadtest/kill.go）對應 killHistoryMaxAttempts / killHistoryRetryBase，兩邊要一起改
+const HISTORY_MAX_ATTEMPTS = 3;
+const HISTORY_RETRY_BASE_MS = RECONNECT_BASE_MS;
+const HISTORY_RETRY_CAP_MS = RECONNECT_CAP_MS;
 
 let started = false;
 let ws: WebSocket | null = null;
@@ -39,6 +44,10 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let pongTimer: ReturnType<typeof setTimeout> | null = null;
 // resync 後延遲撈歷史的計時器；非 null 代表已有一次排定、還沒開始的補撈
 let resyncTimer: ReturnType<typeof setTimeout> | null = null;
+// 撈歷史失敗後等重試的計時器；非 null 代表有一次重試排定、還沒開始
+let historyRetryTimer: ReturnType<typeof setTimeout> | null = null;
+// 每次「新的」撈取（非重試）加一；重試只在自己這一輪沒被取代時才排，所以較新的撈取會取代等待中的重試，不會平行跑兩條
+let historyFetchGen = 0;
 
 function stopHeartbeat() {
   if (heartbeatTimer !== null) {
@@ -130,13 +139,40 @@ function syncAuth() {
   if (token && token !== sentToken) sendAuth(ws, token);
 }
 
-async function fetchMessages() {
+function clearHistoryRetry() {
+  if (historyRetryTimer !== null) {
+    clearTimeout(historyRetryTimer);
+    historyRetryTimer = null;
+  }
+}
+
+// 只重試網路錯誤 / timeout / 5xx；4xx（client 端的問題，重送一樣會失敗）和回應解析失敗不重試
+function isRetryableFetchError(e: unknown): boolean {
+  if (e instanceof ApiError) return e.status >= 500;
+  return !(e instanceof SyntaxError);
+}
+
+// 撈最新歷史並 merge。失敗時退避重試，最多 HISTORY_MAX_ATTEMPTS 次（含第一次）。
+// attempt 只給重試自己用；從外面呼叫（attempt = 0）代表一次新的撈取，會取消等待中的重試並讓進行中那次失敗後不再重試
+async function fetchMessages(attempt = 0) {
+  if (attempt === 0) {
+    historyFetchGen++;
+    clearHistoryRetry();
+  }
+  const gen = historyFetchGen;
   try {
     const res = await apiFetch(ROOM_MESSAGES_PATH);
     const data: unknown = await res.json();
     if (Array.isArray(data)) messages.merge(data.filter(messages.isMessage));
   } catch (e) {
-    console.warn(`fetch ${ROOM_MESSAGES_PATH} failed`, e);
+    console.warn(`fetch ${ROOM_MESSAGES_PATH} failed (attempt ${attempt + 1}/${HISTORY_MAX_ATTEMPTS})`, e);
+    if (!started || gen !== historyFetchGen) return;
+    if (!isRetryableFetchError(e) || attempt + 1 >= HISTORY_MAX_ATTEMPTS) return;
+    const wait = equalJitter(attempt, HISTORY_RETRY_BASE_MS, HISTORY_RETRY_CAP_MS);
+    historyRetryTimer = setTimeout(() => {
+      historyRetryTimer = null;
+      void fetchMessages(attempt + 1);
+    }, wait);
   }
 }
 
@@ -350,6 +386,8 @@ export function stop() {
     clearTimeout(resyncTimer);
     resyncTimer = null;
   }
+  clearHistoryRetry();
+  historyFetchGen++; // 進行中的撈取之後失敗也不要再排重試
   clearAuthRetry();
   clearJoinRetry();
   stopHeartbeat();
