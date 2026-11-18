@@ -147,23 +147,28 @@ func (p *viewerPool) takeIdx() int {
 	return idx
 }
 
-// 建一條連線、送 join、等 join_ok。成功回 ""，並啟動 reader（Stuck 時不啟動）；失敗回原因（連線已關掉）
-func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
-	base := p.cfg.Servers[serverIndex(idx, len(p.cfg.Rooms), len(p.cfg.Servers))]
-	v := &viewer{idx: idx, roomIdx: idx % len(p.cfg.Rooms), sampled: idx < p.cfg.Sampled, server: base}
+// 對 base 建一條 WS、（token 非空時）先送 auth frame、再送 join，等到 join_ok 為止，順序跟 web client 一樣（先 auth 再 join）。
+// 成功回連線與 ""（read deadline 已清掉）；失敗回 nil 與原因（連線已關掉）。connect 與 kill 情境的重連共用
+func (p *viewerPool) dialJoin(ctx context.Context, base, room, token string) (*websocket.Conn, string) {
 	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
 
 	dialCtx, cancel := context.WithTimeout(ctx, p.cfg.JoinTimeout)
 	defer cancel()
 	conn, _, err := p.dialer.DialContext(dialCtx, wsURL, nil)
 	if err != nil {
-		return "dial_error"
+		return nil, "dial_error"
 	}
 	conn.SetReadDeadline(time.Now().Add(p.cfg.JoinTimeout))
-	join := fmt.Sprintf(`{"type":"join","payload":{"room":%q}}`, p.cfg.Rooms[v.roomIdx])
+	if token != "" {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"auth","payload":{"token":%q}}`, token))); err != nil {
+			conn.Close()
+			return nil, "write_error"
+		}
+	}
+	join := fmt.Sprintf(`{"type":"join","payload":{"room":%q}}`, room)
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(join)); err != nil {
 		conn.Close()
-		return "write_error"
+		return nil, "write_error"
 	}
 	// 等 join_ok：中間可能先收到別的 frame（presence 等）；被擋（連線數滿）時 server 已 upgrade 才關，會讀到 close
 	for {
@@ -171,9 +176,9 @@ func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
 		if err != nil {
 			conn.Close()
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return "join_timeout"
+				return nil, "join_timeout"
 			}
-			return "closed_before_join_ok"
+			return nil, "closed_before_join_ok"
 		}
 		var env struct {
 			Type    string `json:"type"`
@@ -189,10 +194,21 @@ func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
 		}
 		if env.Type == "error" {
 			conn.Close()
-			return "join_error:" + env.Payload.Code
+			return nil, "join_error:" + env.Payload.Code
 		}
 	}
 	conn.SetReadDeadline(time.Time{})
+	return conn, ""
+}
+
+// 建一條連線、送 join、等 join_ok。成功回 ""，並啟動 reader（Stuck 時不啟動）；失敗回原因（連線已關掉）
+func (p *viewerPool) connect(ctx context.Context, idx int) (reason string) {
+	base := p.cfg.Servers[serverIndex(idx, len(p.cfg.Rooms), len(p.cfg.Servers))]
+	v := &viewer{idx: idx, roomIdx: idx % len(p.cfg.Rooms), sampled: idx < p.cfg.Sampled, server: base}
+	conn, reason := p.dialJoin(ctx, base, p.cfg.Rooms[v.roomIdx], "")
+	if reason != "" {
+		return reason
+	}
 	v.conn = conn
 	v.alive.Store(true)
 	p.mu.Lock()

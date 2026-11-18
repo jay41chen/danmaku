@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -27,6 +29,7 @@ const (
 	metricResyncSent    = "websocket_resync_sent_total"
 	metricPublishFailed = "redis_publish_failed_total"
 	metricPubSubDeaf    = "redis_pubsub_deaf_total"
+	metricWSViewers     = "websocket_viewers" // 帶 auth label，見 parseViewersByAuth
 )
 
 var redisMetricNames = []string{metricWSConnections, metricResyncSent, metricPublishFailed, metricPubSubDeaf}
@@ -133,13 +136,21 @@ func (s *redisViewerState) addFetch(at time.Time, seqs []int, err error) {
 	}
 }
 
+// 歷史 GET 的回應無法解析；不是網路問題，重試沒用（kill 情境的重試政策用它判斷）
+var errDecodeHistory = errors.New("decode history")
+
+// 歷史 GET 拿到非 200 的 status；kill 情境的重試政策依 Status 判斷（5xx 重試、4xx 不重試）
+type historyStatusError struct{ Status int }
+
+func (e *historyStatusError) Error() string { return fmt.Sprintf("GET history returned %d", e.Status) }
+
 // 解析 GET /rooms/{id}/messages 的回應（訊息陣列），挑出這次 run 的 marker 序號
 func parseHistorySeqs(run string, body []byte) ([]int, error) {
 	var msgs []struct {
 		Content string `json:"content"`
 	}
 	if err := json.Unmarshal(body, &msgs); err != nil {
-		return nil, fmt.Errorf("decode history: %w", err)
+		return nil, fmt.Errorf("%w: %v", errDecodeHistory, err)
 	}
 	var seqs []int
 	for _, m := range msgs {
@@ -166,7 +177,7 @@ func fetchHistorySeqs(ctx context.Context, client *http.Client, base, room, run 
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET history returned %d", resp.StatusCode)
+		return nil, &historyStatusError{Status: resp.StatusCode}
 	}
 	return parseHistorySeqs(run, body)
 }
@@ -319,6 +330,9 @@ type redisMetricSample struct {
 	ResyncSent    float64 `json:"resync_sent_total"`
 	PublishFailed float64 `json:"publish_failed_total"`
 	PubSubDeaf    float64 `json:"pubsub_deaf_total"`
+	// websocket_viewers{auth="member"|"anonymous"}：這台 server 的登入（不重複 user）與匿名連線數
+	ViewersMember    int `json:"ws_viewers_member"`
+	ViewersAnonymous int `json:"ws_viewers_anonymous"`
 
 	at time.Time
 }
@@ -606,6 +620,26 @@ func (o *redisObserver) onClose(v *viewer, err error, at time.Time) {
 	}
 }
 
+// 從 /metrics 文字挑出 websocket_viewers{auth="..."} 的值，key 是 auth label（member / anonymous）。
+// parsePlainMetrics 不處理帶 label 的行，所以另外解析；某個 label 還沒出現（gauge 還沒被建立）就沒有那個 key，讀出來是 0
+func parseViewersByAuth(body []byte) map[string]int {
+	const prefix = metricWSViewers + `{auth="`
+	out := map[string]int{}
+	for line := range strings.SplitSeq(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !strings.HasPrefix(fields[0], prefix) {
+			continue
+		}
+		auth, ok := strings.CutSuffix(strings.TrimPrefix(fields[0], prefix), `"}`)
+		v, err := strconv.ParseFloat(fields[1], 64)
+		if !ok || err != nil {
+			continue
+		}
+		out[auth] = int(v)
+	}
+	return out
+}
+
 // 每秒讀一台 server 的 /metrics，直到 ctx 取消
 func sampleRedisMetrics(ctx context.Context, client *http.Client, base string, start time.Time, out *[]redisMetricSample, errs *int) {
 	ticker := time.NewTicker(time.Second)
@@ -613,7 +647,18 @@ func sampleRedisMetrics(ctx context.Context, client *http.Client, base string, s
 	for {
 		at := time.Now()
 		var vals map[string]float64
-		err := fetchMetrics(ctx, client, base, func(r io.Reader) (err error) { vals, err = parsePlainMetrics(r, redisMetricNames...); return })
+		var viewers map[string]int
+		err := fetchMetrics(ctx, client, base, func(r io.Reader) error {
+			body, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			if vals, err = parsePlainMetrics(bytes.NewReader(body), redisMetricNames...); err != nil {
+				return err
+			}
+			viewers = parseViewersByAuth(body)
+			return nil
+		})
 		if ctx.Err() != nil {
 			return
 		}
@@ -622,7 +667,8 @@ func sampleRedisMetrics(ctx context.Context, client *http.Client, base string, s
 		} else {
 			*out = append(*out, redisMetricSample{
 				TS: relS(at, start), Server: base, Connections: int(vals[metricWSConnections]),
-				ResyncSent: vals[metricResyncSent], PublishFailed: vals[metricPublishFailed], PubSubDeaf: vals[metricPubSubDeaf], at: at,
+				ResyncSent: vals[metricResyncSent], PublishFailed: vals[metricPublishFailed], PubSubDeaf: vals[metricPubSubDeaf],
+				ViewersMember: viewers["member"], ViewersAnonymous: viewers["anonymous"], at: at,
 			})
 		}
 		select {
@@ -630,6 +676,37 @@ func sampleRedisMetrics(ctx context.Context, client *http.Client, base string, s
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// 每台 server 各開一個 goroutine 每秒讀 /metrics；回傳的 stop 會停掉取樣、等它們結束，並回傳依時間排序的樣本與每台的失敗次數。
+// redis 與 kill 情境共用（kill 情境的 server 是直連，不經 nginx，被 kill 的那台之後的取樣會失敗，記在 errs）
+func startMetricSamplers(ctx context.Context, client *http.Client, servers []string, start time.Time) (stop func() ([]redisMetricSample, map[string]int)) {
+	var (
+		smu        sync.Mutex
+		samples    []redisMetricSample
+		sampleErrs = map[string]int{}
+		sampleWG   sync.WaitGroup
+	)
+	sampleCtx, cancelSample := context.WithCancel(ctx)
+	for _, s := range servers {
+		sampleWG.Add(1)
+		go func() {
+			defer sampleWG.Done()
+			var n int
+			var local []redisMetricSample
+			sampleRedisMetrics(sampleCtx, client, s, start, &local, &n)
+			smu.Lock()
+			samples = append(samples, local...)
+			sampleErrs[s] += n
+			smu.Unlock()
+		}()
+	}
+	return func() ([]redisMetricSample, map[string]int) {
+		cancelSample()
+		sampleWG.Wait()
+		slices.SortFunc(samples, func(a, b redisMetricSample) int { return a.at.Compare(b.at) })
+		return samples, sampleErrs
 	}
 }
 
@@ -653,35 +730,14 @@ func runRedis(ctx context.Context, o *options, client *http.Client, servers []st
 	}
 
 	start := time.Now().Add(500 * time.Millisecond)
-	var (
-		smu        sync.Mutex
-		samples    []redisMetricSample
-		sampleErrs = map[string]int{}
-		sampleWG   sync.WaitGroup
-	)
-	sampleCtx, cancelSample := context.WithCancel(ctx)
-	defer cancelSample()
-	for _, s := range servers {
-		sampleWG.Add(1)
-		go func() {
-			defer sampleWG.Done()
-			var n int
-			var local []redisMetricSample
-			sampleRedisMetrics(sampleCtx, client, s, start, &local, &n)
-			smu.Lock()
-			samples = append(samples, local...)
-			sampleErrs[s] += n
-			smu.Unlock()
-		}()
-	}
+	stopSamplers := startMetricSamplers(ctx, client, servers, start)
 
 	fmt.Printf("redis: %d viewers/server x %d servers, %.0f msg/s for %s (start Redis fault now via redis.sh)\n", o.redisViewers, len(servers), o.redisRate, o.duration)
 	p := &poster{client: client, servers: servers, rooms: data.rooms[:1], tokens: data.tokens, run: runTag}
 	loop := runOpenLoop(runCtx, openLoopConfig{Start: start, Rate: o.redisRate, Measure: o.duration, MaxInFlight: o.maxInFlight, Send: p.send})
 	sleepCtx(ctx, o.drain)
 
-	cancelSample()
-	sampleWG.Wait()
+	samples, sampleErrs := stopSamplers()
 	vp.closeAll()      // 先關 reader（之後不會再 fetchWG.Add），再等補撈；closeAll 可重複呼叫（defer 還會再跑一次）
 	obs.fetchWG.Wait() // 進行中的補撈讓它跑完（client 有 timeout）
 
@@ -695,7 +751,6 @@ func runRedis(ctx context.Context, o *options, client *http.Client, servers []st
 		states = append(states, st)
 	}
 	obs.mu.Unlock()
-	slices.SortFunc(samples, func(a, b redisMetricSample) int { return a.at.Compare(b.at) })
 	report := buildRedisReport(start, o.redisRate, loop, states, servers, samples, sampleErrs)
 	report.Summary.ResyncDelayMax = o.redisResyncDelayMax.String()
 	rep.Redis = &report
@@ -712,13 +767,17 @@ func fail1(msg string) int {
 	return 1
 }
 
+// 摘要的前三行；disconnects 由呼叫端決定怎麼印（kill 情境沒有量測，印 n/a）
+func printRedisSummary(w io.Writer, s *redisSummary, scenario, disconnects string) {
+	fmt.Fprintf(w, "\nscenario=%s  start=%s  rate=%.0f msg/s  viewers=%d  posts=%d (201: %d)  post status: %s\n",
+		scenario, s.Start, s.Rate, s.Viewers, s.Posts, s.PostsCreated, formatReasons(s.PostStatus))
+	fmt.Fprintf(w, "resync_delay_max=%s\n", s.ResyncDelayMax)
+	fmt.Fprintf(w, "total: ws_received=%d missing=%d recovered=%d final_missing=%d (older_than_fetch=%d) received_not_201=%d disconnects=%s history_limit=%d\n", s.ReceivedWS, s.Missing, s.Recovered, s.FinalMissing, s.FinalMissingOlder, s.ReceivedNot201, disconnects, s.HistoryLimit)
+}
+
 // 給人看的摘要（完整資料在 JSON）
 func printRedis(w io.Writer, r *redisReport) {
-	s := r.Summary
-	fmt.Fprintf(w, "\nscenario=redis  start=%s  rate=%.0f msg/s  viewers=%d  posts=%d (201: %d)  post status: %s\n",
-		s.Start, s.Rate, s.Viewers, s.Posts, s.PostsCreated, formatReasons(s.PostStatus))
-	fmt.Fprintf(w, "resync_delay_max=%s\n", s.ResyncDelayMax)
-	fmt.Fprintf(w, "total: ws_received=%d missing=%d recovered=%d final_missing=%d (older_than_fetch=%d) received_not_201=%d disconnects=%d history_limit=%d\n", s.ReceivedWS, s.Missing, s.Recovered, s.FinalMissing, s.FinalMissingOlder, s.ReceivedNot201, s.Disconnects, s.HistoryLimit)
+	printRedisSummary(w, &r.Summary, "redis", strconv.Itoa(r.Summary.Disconnects))
 	for _, sv := range r.Servers {
 		first := "never"
 		if sv.FirstResyncAtS != nil {

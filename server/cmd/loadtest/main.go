@@ -58,6 +58,9 @@ type options struct {
 	redisViewers        int
 	redisRate           float64
 	redisResyncDelayMax time.Duration
+	killViewers         int
+	killRate            float64
+	killEntry           string
 }
 
 const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
@@ -65,7 +68,7 @@ const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
 func parseFlags(args []string) (*options, error) {
 	o := &options{}
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
-	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck | redis")
+	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck | redis | kill")
 	fs.StringVar(&o.servers, "servers", "", "comma-separated server base URLs (localhost / 127.0.0.1 only), e.g. http://127.0.0.1:6388,http://127.0.0.1:6389")
 	fs.StringVar(&o.out, "out", "", "JSON result path (default loadtest-<scenario>-<time>.json in the current directory)")
 	fs.StringVar(&o.serverPIDs, "server-pids", "", "comma-separated server PIDs to sample CPU with ps")
@@ -99,6 +102,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.Float64Var(&o.redisRate, "redis-rate", 5, "redis scenario: messages per second posted to the room")
 	// 對應 client/src/realtime/connection.ts 的 RESYNC_FETCH_DELAY_MAX_MS（兩邊要一起改）
 	fs.DurationVar(&o.redisResyncDelayMax, "redis-resync-delay-max", 2*time.Second, "redis scenario: on a resync frame each viewer waits a random delay in [0, this) before its history fetch, like the web client (0 = fetch immediately)")
+	fs.IntVar(&o.killViewers, "kill-viewers", 10, "kill scenario: WS viewers through the entry (by index mod 4: 0 and 1 logged in, 2 and 3 anonymous)")
+	fs.Float64Var(&o.killRate, "kill-rate", 5, "kill scenario: messages per second posted to the room through the entry")
+	fs.StringVar(&o.killEntry, "kill-entry", "http://nginx:80", "kill scenario: URL that viewers' WS and the poster's POST / history GET go through (the nginx in front of the servers); -servers is only used for seeding and /metrics sampling")
 	fs.DurationVar(&o.monInterval, "monitor-interval", 5*time.Second, "interval of background ps / docker stats sampling")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -114,7 +120,7 @@ func parseFlags(args []string) (*options, error) {
 		o.duration = 90 * time.Second
 	}
 	// redis 要容納「前段正常 + 故障 + 恢復後觀察」，30s 預設太短：沒明確給 -duration 時改 120s
-	if o.scenario == "redis" && !durationSet {
+	if (o.scenario == "redis" || o.scenario == "kill") && !durationSet {
 		o.duration = 120 * time.Second
 	}
 	return o, nil
@@ -181,8 +187,14 @@ func buildSteps(o *options) ([]stepSpec, error) {
 		}
 		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 redis.go
 		return []stepSpec{{Viewers: o.redisViewers * len(splitList(o.servers)), Rate: o.redisRate, Rooms: 1}}, nil
+	case "kill":
+		if o.killViewers < 1 || o.killRate <= 0 || o.redisResyncDelayMax < 0 {
+			return nil, fmt.Errorf("-kill-viewers must be >= 1, -kill-rate must be positive and -redis-resync-delay-max must be >= 0")
+		}
+		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 kill.go
+		return []stepSpec{{Viewers: o.killViewers, Rate: o.killRate, Rooms: 1}}, nil
 	}
-	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck, redis")
+	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck, redis, kill")
 }
 
 func splitList(s string) []string {
@@ -255,6 +267,12 @@ func run(args []string) (code int) {
 	servers, err := checkServerURLs(splitList(o.servers), o.inCompose)
 	if err != nil {
 		return fail("refusing to run: %v", err)
+	}
+	killEntry := ""
+	if o.scenario == "kill" {
+		if killEntry, err = checkServerURL(o.killEntry, o.inCompose); err != nil {
+			return fail("refusing to run: -kill-entry: %v", err)
+		}
 	}
 	dbPass, err := checkDatabaseURL(dbURL, o.inCompose)
 	if err != nil {
@@ -341,6 +359,7 @@ func run(args []string) (code int) {
 			"lag_threshold": o.lagThreshold.String(), "tool_cpu_frac": o.toolCPUFrac, "continue": o.cont, "other_cores_limit": o.otherLimit, "require_machine_check": o.requireCheck,
 			"server_pids": pids, "docker_containers": o.containers,
 			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate, "redis_viewers": o.redisViewers, "redis_rate": o.redisRate, "redis_resync_delay_max": o.redisResyncDelayMax.String(),
+			"kill_viewers": o.killViewers, "kill_rate": o.killRate, "kill_entry": killEntry,
 		},
 		Steps: []stepResult{},
 	}
@@ -365,6 +384,8 @@ func run(args []string) (code int) {
 		}
 		if rep.Stuck != nil {
 			printStuck(os.Stdout, rep.Stuck)
+		} else if rep.Kill != nil {
+			printKill(os.Stdout, rep.Kill)
 		} else if rep.Redis != nil {
 			printRedis(os.Stdout, rep.Redis)
 		} else {
@@ -388,6 +409,10 @@ func run(args []string) (code int) {
 
 	if o.scenario == "stuck" {
 		return runStuck(ctx, o, httpClient, servers, data, runTag, rep, sc)
+	}
+
+	if o.scenario == "kill" {
+		return runKill(ctx, o, httpClient, servers, killEntry, data, runTag, rep)
 	}
 
 	if o.scenario == "redis" {
