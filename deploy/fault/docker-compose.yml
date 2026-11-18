@@ -1,5 +1,6 @@
 # 故障注入 / 慢 client 實驗環境（ROADMAP M10）：跑完即丟，不跟根目錄的 dev compose 共用任何資源。
-# 用法見 up.sh / stuck.sh / down.sh；一律用 `-p danmaku-fault`，不要在這裡設 container_name（避免跟 dev 的 danmaku-* 撞名）。
+# nginx（kill 情境）：跟根目錄 compose 同一份 config/nginx.conf、同一個 image，掛在 server-1 / server-2 前面。
+# 用法見 up.sh / stuck.sh / redis.sh / kill.sh / down.sh；一律用 `-p danmaku-fault`，不要在這裡設 container_name（避免跟 dev 的 danmaku-* 撞名）。
 name: danmaku-fault
 
 services:
@@ -64,3 +65,15 @@ services:
       JWT_SECRET: ${JWT_SECRET:?run up.sh}
       WS_MAX_CLIENTS: "6000"
       LOADTEST_TIMING_LOG: "true"
+
+  # kill 情境（kill.sh）的入口：負載平衡到 server-1 / server-2。沿用根目錄的 config（不複製），
+  # 其中 upstream 的 server-1:8080 / server-2:8080 剛好跟這裡的 service 名稱一致
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - server-1
+      - server-2
+    volumes:
+      - ../../config/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:5491:80"

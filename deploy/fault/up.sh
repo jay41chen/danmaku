@@ -18,16 +18,31 @@ fi
 
 docker compose -p danmaku-fault up -d --build --wait
 
-# --wait 只代表 container healthy；再等 server-1 真的回 200
+# --wait 只代表 container healthy；再等 server-1 真的回 200，之後再等 nginx 轉得過去
 i=0
 while [ "$i" -lt 30 ]; do
   code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:5488/healthcheck || true)"
   if [ "$code" = "200" ]; then
-    echo "fault environment ready (server-1 healthcheck 200)"
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+if [ "$code" != "200" ]; then
+  echo "up.sh: server-1 /healthcheck did not return 200 within 30s (last: ${code:-none})" >&2
+  exit 1
+fi
+
+# nginx 也要能經由它轉到 server（kill 情境的入口）
+i=0
+while [ "$i" -lt 30 ]; do
+  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:5491/healthcheck || true)"
+  if [ "$code" = "200" ]; then
+    echo "fault environment ready (server-1 healthcheck 200, nginx healthcheck 200)"
     exit 0
   fi
   i=$((i + 1))
   sleep 1
 done
-echo "up.sh: server-1 /healthcheck did not return 200 within 30s (last: ${code:-none})" >&2
+echo "up.sh: nginx /healthcheck (127.0.0.1:5491) did not return 200 within 30s (last: ${code:-none})" >&2
 exit 1
