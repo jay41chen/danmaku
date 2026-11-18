@@ -25,5 +25,6 @@ fault-injection experiment.
 | [0017](0017-stuck-clients-fault-env.md) | Clients that stop reading: a separate fault environment, and which mechanism evicts them | slow consumers, pong timeout vs outbox, kernel TCP memory, test-rig artifacts, blocked syscalls and threads, isolated experiment environments |
 | [0018](0018-redis-restart-best-effort-resync.md) | Redis restarts: best-effort delivery, and a resync when go-redis reconnects by itself | silent loss, delivery guarantees follow product semantics, end-to-end argument, sequence gaps vs cursors, commit order vs id order, thundering herd and jitter, request coalescing |
 | [0019](0019-server-kill-fast-connect-failover.md) | Killing a server: nginx has to give up on connects quickly, and clients retry history fetches | connect hang vs refusal, timeouts shorter than the caller's, passive health checks, safe retries before a request is sent, idempotent reads, defense in depth |
+| [0020](0020-redis-blackhole-gray-failure.md) | One server loses Redis silently: a gray failure that health checks can't see | gray failure, blackhole vs refusal, fail open needs a timeout, connection-pool fail-fast, fan-out through a shared broker, watchdog blind spots |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.
