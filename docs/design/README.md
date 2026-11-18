@@ -24,5 +24,6 @@ fault-injection experiment.
 | [0016](0016-minimal-ci.md) | Minimal CI where missing test variables fail instead of skipping, and a runtime image without the toolchain | skip vs fail, test caching, test-order dependencies, fresh environments, multi-stage builds, distroless, static linking, build context |
 | [0017](0017-stuck-clients-fault-env.md) | Clients that stop reading: a separate fault environment, and which mechanism evicts them | slow consumers, pong timeout vs outbox, kernel TCP memory, test-rig artifacts, blocked syscalls and threads, isolated experiment environments |
 | [0018](0018-redis-restart-best-effort-resync.md) | Redis restarts: best-effort delivery, and a resync when go-redis reconnects by itself | silent loss, delivery guarantees follow product semantics, end-to-end argument, sequence gaps vs cursors, commit order vs id order, thundering herd and jitter, request coalescing |
+| [0019](0019-server-kill-fast-connect-failover.md) | Killing a server: nginx has to give up on connects quickly, and clients retry history fetches | connect hang vs refusal, timeouts shorter than the caller's, passive health checks, safe retries before a request is sent, idempotent reads, defense in depth |
 
 Each fix was checked with **mutation testing**: deliberately break the code and confirm a test fails.
