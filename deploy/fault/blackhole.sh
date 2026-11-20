@@ -1,13 +1,13 @@
 #!/bin/sh
 # 跑 `loadtest -scenario redis`，中途在 server-1 的網路 namespace 裡用 iptables DROP 掉它與 Redis 之間的封包（黑洞：不回 RST，連線只會卡住 / timeout），一段時間後再移除。
-# 用法：blackhole.sh <blackhole_seconds> [額外的 loadtest 參數，例如 -duration 180s -redis-viewers 10]
+# 用法：blackhole.sh <blackhole_seconds> [額外的 loadtest 參數，例如 -duration 180s -redis-viewers 10]；例：blackhole.sh 60 -duration 180s
 # 設計重點：
 #   - 觀眾直連 server-1 / server-2（不經 nginx），所以知道每條連線落在哪一台、哪一台是故障的那台。
 #   - 規則只影響 server-1 <-> redis；Redis 本身沒停，server-2 對 Redis 的連線完全正常（對照組）。
 # 流程：背景啟動 loadtest（跑在 danmaku-fault 網路裡）→ 等 30s → 記 T_down → 加 DROP 規則 → 等 N 秒 → 移除規則 → 記 T_up → 等 loadtest 結束。
 # 規則是用一個用完即丟的 nicolaka/netshoot 容器（--network container:<server-1>，加 NET_ADMIN）加在 server-1 的 namespace 裡，不動 server-1 容器本身。
 # 環境變數：OUT_DIR（輸出目錄，預設 deploy/fault/out/）、OUT_NAME（檔名，預設 blackhole-<秒數>-<時間>.json）
-# 注意：loadtest 的 -duration 預設 120s，必須大於 30 + N + 恢復後想觀察的時間
+# 注意：loadtest 的 -duration 預設 120s；要看到 server-1 的 resync，-duration 至少要 30 + N + 45 秒（watchdog 在恢復後要 2 輪 15 秒心跳才判定聾掉，實測 32～38 秒）。例如 N=60 用 -duration 180s。
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here"
