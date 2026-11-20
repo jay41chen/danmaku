@@ -1,6 +1,7 @@
 # 0020 — One server loses Redis silently: a gray failure that health checks can't see
 
-**Status**: Accepted (2026-11-18). Records the behaviour; the fixes are in the backlog.
+**Status**: Accepted (2026-11-18). Fixes 1 and 3 done on 2026-11-20 (see [Fixes](#fixes)); deferred `resync` is
+still in the backlog.
 
 ## Context
 
@@ -73,7 +74,7 @@ was only visible as slow POSTs and as messages that never arrived. Nothing repor
 
 **POSTs hung for 55 s, then turned fast.** Inferred from the logs and go-redis defaults, not verified step by step:
 - At first the limiter's commands went out on connections already in go-redis' pool. Each attempt waits for the
-  3 s read timeout, and go-redis retries, so one call outlasts the client's 10 s. The request context isn't
+  read timeout (5 s by default in go-redis v9.23), and go-redis retries, so one call outlasts the client's 10 s. The request context isn't
   applied to socket I/O (`ContextTimeoutEnabled` is off, as already noted in `redisstore`). 256 of the 284
   `rate limiter failed` lines are `context canceled`: the client had already gone.
 - Once those connections had failed, go-redis had to dial new ones, and dials kept failing. After enough failed
@@ -112,8 +113,62 @@ Record the behaviour now and fix it later; each fix is a separate change with it
    they missed anything.
 3. **Find out why presence went silent** without logging an error.
 
+(Fixes 1 and 3 were done afterwards; see [Fixes](#fixes).)
+
 Not chosen: making the watchdog count misses while publishing fails. During the blackhole a rebuild can't succeed
 either, and after it a faster rebuild would save at most 15 s. Fix 2 matters more.
+
+## Fixes
+
+**Fix 1: `ContextTimeoutEnabled` and a 200 ms budget for the rate limiter.**
+- `redisstore` now sets `ContextTimeoutEnabled`, so a context deadline becomes the socket deadline. It applies only
+  to plain commands and pipelines whose context has a deadline. PubSub already applied its context directly and is
+  unaffected (checked in the go-redis v9.23 source). The 500 ms budgets for heartbeats and `PUBLISH`, and the 2 s
+  for the health check, existed before but were never enforced; now they are.
+- `ratelimit.Check` gives `Allow` 200 ms. Once the deadline passes, go-redis also stops retrying, because it checks
+  the context before each backoff. 200 ms is far above normal (well under 1 ms locally; `POST` p99 about 6 ms in
+  [ADR 0014](0014-load-baseline-keep-sync-writes.md)).
+
+**Fix 3: why presence went silent.** The presence worker runs in one goroutine on `context.Background()`, so its
+Redis calls had no deadline. The first call after the blackhole began hung for about 55 s and blocked everything
+behind it: no renewals, no counts pushed, no log. That is the same 55 s after which the POSTs in the first run
+turned fast. **A Redis call without a deadline hangs in a blackhole until go-redis' pool starts returning the last
+dial error.** Why it takes 55 s exactly was not investigated; read timeout and retries alone account for about
+20 s. Each of the worker's three calls now gets its own 1 s.
+
+**Reruns**, one each, blackhole 60 s. Runs 3 and 4 observed for 180 s, because the `resync` comes 32–38 s after the
+blackhole ends and run 2's 120 s just missed it.
+
+| | Run 1, no fix | Run 3, fix 1 | Run 4, fixes 1 and 3 |
+|---|---|---|---|
+| POSTs to `server-1` failing | 128 / 300 | **0** / 450 | 0 / 450 |
+| Their latency during the blackhole | up to 10 s, then gave up | 0.2–0.92 s | up to 0.95 s |
+| Stored but not broadcast | 13 | **154** | 157 |
+| `server-2`'s viewers, lost for good | 65 | **770** | 785 |
+| `server-1`'s viewers: missed / recovered | 1640 / 500 | 2475 / 467 | 2545 / 475 |
+| First presence error after the blackhole began | ≈ 55 s | ≈ 55 s | **≈ 2.6 s**, then every 5 s |
+| `resync` after the blackhole ended | 32 s | 38 s | 40 s |
+
+**The fix moved the failure from the sender to the receivers.** Before, 128 posters saw an error and could retry.
+After, every poster gets 201, and the messages that `server-1` stores but can't publish are lost for `server-2`'s
+viewers without anyone noticing: 65 became 770. The messages are in the database, so what is missing is a
+notification, and that is deferred `resync` (fix 2). This is the cost of failing open, and it raises fix 2's
+priority.
+
+**The viewer count still freezes on `server-1`.** The worker no longer blocks and logs within seconds, but without
+Redis it can't count viewers across servers, so it pushes nothing. Kept as it is: the last known count is a
+reasonable thing to show. Pushing only the local count would show a number that is wrong (5 instead of 10), and
+an "unknown" count needs a protocol change.
+
+**Comparing with predictions for the fixes**:
+
+| Prediction | Result |
+|---|---|
+| Fix 1: POSTs to `server-1` get 20x in 500–1000 ms | Right; up to about 0.92 s |
+| Fix 1: they are stored | Right |
+| Fix 1: `server-2`'s viewers receive them | Wrong. The broken link is `server-1` → Redis, the first hop, so nobody receives them live |
+| Fix 3: `server-1`'s viewers no longer see a frozen count | Wrong, see above |
+| Fix 3: `presence count failed` about 1 s in, about 12 times | Close: 2.6 s (depends on where the 5 s tick falls), 13 times |
 
 ## Consequences
 
@@ -122,5 +177,12 @@ either, and after it a faster rebuild would save at most 15 s. Fix 2 matters mor
 - **What a viewer gets back is the latest 100.** At 5 msg/s that is 20 s; this blackhole lasted 60 s.
 - **The two servers disagree and neither is right.** `server-1`'s viewers see a frozen count; `server-2`'s see the
   other half of the room disappear.
-- One run. The 55 s before POSTs turned fast depends on go-redis' pool size, timeouts and retries, and wasn't
-  measured in isolation.
+- **Failing open hides failures.** After fix 1, posters always get 201, and the only signs of the fault are the
+  `publish_failed` metric and the logs.
+- **Redis being slow, not dead, now fails sooner.** If Redis takes over 1 s, every presence sync fails and viewers
+  may drop out of the count after the 30 s TTL. If it takes 500 ms to 5 s, a `PUBLISH` that used to arrive late is
+  now counted as failed, though Redis may still have run it.
+- **Other Redis calls still have no deadline**: `TopRooms`, and login's `Refund` and `Reset`. In a blackhole they
+  hang about 55 s. They are in the backlog.
+- One run per configuration. The 55 s before go-redis fails fast depends on its pool size, timeouts and retries,
+  and wasn't measured in isolation.
