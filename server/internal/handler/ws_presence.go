@@ -11,6 +11,10 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/ws"
 )
 
+// 每次打 Redis 的時間預算。worker 只有一個 goroutine，一個呼叫卡住（Redis 封包被丟時沒期限會卡約 55 秒）
+// 就會擋住後面的續期和人數推播；1 秒遠大於正常延遲（遠低於 1ms），也小於 count 的 5 秒間隔
+const presenceCallTimeout = 1 * time.Second
+
 // worker 需要 Hub 的兩個能力；*ws.Hub 自動符合
 type presenceHub interface {
 	PresenceSnapshot() map[model.PresenceEntry]struct{}
@@ -85,7 +89,10 @@ func (w *presenceWorker) sync(ctx context.Context, full bool) {
 		return
 	}
 
-	if err := w.store.SyncPresence(ctx, add, remove); err != nil {
+	callCtx, cancel := context.WithTimeout(ctx, presenceCallTimeout)
+	err := w.store.SyncPresence(callCtx, add, remove)
+	cancel()
+	if err != nil {
 		// 失敗（例如 timeout）時不知道 Redis 執行了沒，
 		// lastWritten 的意思是「Redis 裡可能有這些、之後要負責刪」，所以只加不減
 		// 等到下次tick就可以恢復正常
@@ -114,7 +121,9 @@ func (w *presenceWorker) count(ctx context.Context) {
 	}
 	distinctRooms := slices.Collect(maps.Keys(roomSets))
 	// 獲得每個房間名的人數
-	counts, err := w.store.CountPresence(ctx, distinctRooms)
+	callCtx, cancel := context.WithTimeout(ctx, presenceCallTimeout)
+	counts, err := w.store.CountPresence(callCtx, distinctRooms)
+	cancel()
 	if err != nil {
 		w.logger.ErrorContext(ctx, "presence count failed", "error", err)
 		return
@@ -128,7 +137,10 @@ func (w *presenceWorker) count(ctx context.Context) {
 		w.hub.Broadcast(ctx, room, frame)
 	}
 	// 排行寫在推播之後：推播不能依賴排行；寫失敗只記 log，下一輪（5 秒後）會再寫
-	if err := w.store.UpdateViewerRanking(ctx, counts); err != nil {
+	rankCtx, rankCancel := context.WithTimeout(ctx, presenceCallTimeout)
+	err = w.store.UpdateViewerRanking(rankCtx, counts)
+	rankCancel()
+	if err != nil {
 		w.logger.ErrorContext(ctx, "viewer ranking update failed", "error", err)
 	}
 }

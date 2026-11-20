@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,6 +87,12 @@ type fakePresenceStore struct {
 	countC     chan struct{} // 每次 CountPresence 後送一個訊號
 	rankings   []map[string]int
 	rankingErr error
+
+	// 設了就阻塞到 ctx 結束，模擬 Redis 封包被丟、呼叫卡住
+	blockSync, blockCount, blockRanking bool
+	syncCtxs, countCtxs, rankCtxs       []context.Context
+	rankCalledAt                        time.Time
+	countDelay                          time.Duration // CountPresence 回傳前先等這麼久（或等到 ctx 結束）
 }
 
 type fakeSync struct {
@@ -101,8 +108,14 @@ func newFakePresenceStore() *fakePresenceStore {
 func (f *fakePresenceStore) SyncPresence(ctx context.Context, add, remove []model.PresenceEntry) error {
 	f.mu.Lock()
 	f.syncs = append(f.syncs, fakeSync{entrySet(add...), entrySet(remove...)})
+	f.syncCtxs = append(f.syncCtxs, ctx)
 	err := f.syncErr
+	block := f.blockSync
 	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.syncC <- struct{}{}
 	return err
 }
@@ -110,9 +123,23 @@ func (f *fakePresenceStore) SyncPresence(ctx context.Context, add, remove []mode
 func (f *fakePresenceStore) CountPresence(ctx context.Context, rooms []string) (map[string]int, error) {
 	f.mu.Lock()
 	f.countRooms = append(f.countRooms, slices.Clone(rooms))
+	f.countCtxs = append(f.countCtxs, ctx)
 	err := f.countErr
 	out := maps.Clone(f.counts)
+	block := f.blockCount
+	delay := f.countDelay
 	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	f.countC <- struct{}{}
 	if err != nil {
 		return nil, err
@@ -122,9 +149,17 @@ func (f *fakePresenceStore) CountPresence(ctx context.Context, rooms []string) (
 
 func (f *fakePresenceStore) UpdateViewerRanking(ctx context.Context, counts map[string]int) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.rankings = append(f.rankings, maps.Clone(counts))
-	return f.rankingErr
+	f.rankCtxs = append(f.rankCtxs, ctx)
+	f.rankCalledAt = time.Now()
+	err := f.rankingErr
+	block := f.blockRanking
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return err
 }
 
 func (f *fakePresenceStore) rankingCalls() []map[string]int {
@@ -143,6 +178,30 @@ func (f *fakePresenceStore) syncCalls() []fakeSync {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.syncs)
+}
+
+func (f *fakePresenceStore) syncContexts() []context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.syncCtxs)
+}
+
+func (f *fakePresenceStore) countContexts() []context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.countCtxs)
+}
+
+func (f *fakePresenceStore) rankingContexts() []context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.rankCtxs)
+}
+
+func (f *fakePresenceStore) rankingCalledAt() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rankCalledAt
 }
 
 func (f *fakePresenceStore) countCalls() [][]string {
@@ -571,5 +630,105 @@ func TestPresenceWorkerCountErrorWritesNoRanking(t *testing.T) {
 
 	if n := len(store.rankingCalls()); n != 0 {
 		t.Errorf("ranking calls = %d, want 0", n)
+	}
+}
+
+// 收 log 輸出的 logger，用來斷言有沒有記到某句 log
+func newCapturePresenceWorker(hub *fakePresenceHub, store *fakePresenceStore) (*presenceWorker, *strings.Builder) {
+	var sb strings.Builder
+	w := newPresenceWorker(hub, store, slog.New(slog.NewTextHandler(&sb, nil)))
+	return w, &sb
+}
+
+// 斷言耗時落在預算附近：不會提早放棄，也不會卡到沒有期限
+func expectWithinBudget(t *testing.T, elapsed time.Duration) {
+	t.Helper()
+	if elapsed < presenceCallTimeout-20*time.Millisecond || elapsed >= presenceCallTimeout+time.Second {
+		t.Errorf("elapsed = %v, want about %v", elapsed, presenceCallTimeout)
+	}
+}
+
+// sync 遇到卡住的 Redis：在預算內放棄、記 log，且傳給 store 的 ctx 有 deadline
+func TestPresenceWorkerSyncTimesOutOnBlockedStore(t *testing.T) {
+	hub := newFakePresenceHub(eA)
+	store := newFakePresenceStore()
+	store.blockSync = true
+	w, logs := newCapturePresenceWorker(hub, store)
+
+	start := time.Now()
+	w.sync(t.Context(), false)
+	expectWithinBudget(t, time.Since(start))
+
+	if !strings.Contains(logs.String(), "presence sync failed") {
+		t.Errorf("log = %q, want it to contain %q", logs.String(), "presence sync failed")
+	}
+	ctxs := store.syncContexts()
+	if len(ctxs) != 1 {
+		t.Fatalf("sync calls = %d, want 1", len(ctxs))
+	}
+	if _, ok := ctxs[0].Deadline(); !ok {
+		t.Error("ctx passed to SyncPresence has no deadline")
+	}
+}
+
+// count 遇到卡住的 CountPresence：在預算內放棄、記 log、不推播
+func TestPresenceWorkerCountTimesOutOnBlockedStore(t *testing.T) {
+	hub := newFakePresenceHub(eA)
+	store := newFakePresenceStore()
+	store.blockCount = true
+	w, logs := newCapturePresenceWorker(hub, store)
+
+	start := time.Now()
+	w.count(t.Context())
+	expectWithinBudget(t, time.Since(start))
+
+	if !strings.Contains(logs.String(), "presence count failed") {
+		t.Errorf("log = %q, want it to contain %q", logs.String(), "presence count failed")
+	}
+	if n := len(hub.got()); n != 0 {
+		t.Errorf("broadcasts = %d, want 0", n)
+	}
+	ctxs := store.countContexts()
+	if len(ctxs) != 1 {
+		t.Fatalf("count calls = %d, want 1", len(ctxs))
+	}
+	if _, ok := ctxs[0].Deadline(); !ok {
+		t.Error("ctx passed to CountPresence has no deadline")
+	}
+}
+
+// 排行卡住：推播照常，排行自己有一份新的 deadline（從它被呼叫時起算，不吃 CountPresence 的預算）。
+// count 先耗掉 countDelay，若排行沿用 count 的 ctx，剩餘期限只會有 presenceCallTimeout-countDelay
+func TestPresenceWorkerRankingTimesOutWithOwnDeadline(t *testing.T) {
+	hub := newFakePresenceHub(eA)
+	store := newFakePresenceStore()
+	store.counts = map[string]int{"R": 1}
+	store.blockRanking = true
+	store.countDelay = 400 * time.Millisecond
+	w, logs := newCapturePresenceWorker(hub, store)
+
+	start := time.Now()
+	w.count(t.Context())
+	// 總耗時 = count 耗時 + 排行自己的完整預算
+	if want, elapsed := store.countDelay+presenceCallTimeout, time.Since(start); elapsed < want-20*time.Millisecond || elapsed >= want+time.Second {
+		t.Errorf("elapsed = %v, want about %v", elapsed, want)
+	}
+
+	if len(hub.got()) != 1 {
+		t.Errorf("broadcasts = %d, want 1", len(hub.got()))
+	}
+	if !strings.Contains(logs.String(), "viewer ranking update failed") {
+		t.Errorf("log = %q, want it to contain %q", logs.String(), "viewer ranking update failed")
+	}
+	ctxs := store.rankingContexts()
+	if len(ctxs) != 1 {
+		t.Fatalf("ranking calls = %d, want 1", len(ctxs))
+	}
+	dl, ok := ctxs[0].Deadline()
+	if !ok {
+		t.Fatal("ctx passed to UpdateViewerRanking has no deadline")
+	}
+	if d := dl.Sub(store.rankingCalledAt()); d < presenceCallTimeout-100*time.Millisecond || d > presenceCallTimeout+100*time.Millisecond {
+		t.Errorf("ranking deadline = %v after call, want about %v", d, presenceCallTimeout)
 	}
 }
