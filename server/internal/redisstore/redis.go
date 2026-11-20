@@ -36,6 +36,11 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 		return nil, errors.New("invalid redis url: want redis:// or rediss://[[user]:password@]host[:port][/db-number], special characters in password must be percent-encoded")
 	}
 
+	// ctx 的期限要能套到 socket 讀寫上，否則 Redis 不回應（封包被丟）時，一般指令會等 read timeout（go-redis 預設 5 秒）再重試
+	// 這個選項只影響一般指令 / pipeline，沒有期限的 ctx 行為不變
+	// PubSub 的 SUB / UNSUB / Receive 本來就直接套用 ctx 期限，不受這個選項影響
+	option.ContextTimeoutEnabled = true
+
 	client := redis.NewClient(option)
 
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -83,8 +88,8 @@ func (this *RedisStore) CheckHealth(ctx context.Context) error {
 }
 
 // 發一則心跳到自己的 heartbeat channel
-// 500ms 的 ctx 限制不了 socket I/O：沒開 ContextTimeoutEnabled，go-redis 不會把 ctx 的期限套到 socket 的讀寫上
-// （實測 PUBLISH 不回應時約 5 秒才返回）。所以 Redis 卡住時 watchdog 只是這一輪多等幾秒，15 秒的間隔容得下，不會卡死
+// 開了 ContextTimeoutEnabled，500ms 的 ctx 會套到 socket 的讀寫上：Redis 卡住時這一輪最多約 500ms 就返回，
+// 15 秒的間隔容得下，watchdog 不會卡死
 // 這不算「廣播 Publish 失敗」，不 Inc 那個 metric
 func (this *RedisStore) publishHeartbeat(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, redisCommandTimeout)

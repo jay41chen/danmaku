@@ -10,6 +10,10 @@ import (
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 )
 
+// 限流的時間預算：Redis 不回應時要在這段時間內放棄並 fail open，不能讓 request 卡住
+// 本機 Redis 一次呼叫遠低於 1ms、M6 POST p99 約 6ms，200ms 很寬鬆
+const checkTimeout = 200 * time.Millisecond
+
 // 一條限流規則：同一個 value 在 window 內最多 limit 次
 // Name 也是 Redis key 和 log 的一部分
 type Rule struct {
@@ -38,7 +42,9 @@ type Limiter interface {
 // logAttrs 附加在「被擋」的 warn log 上（例如 HTTP 層傳 "remote_addr", r.RemoteAddr）
 func Check(ctx context.Context, limiter Limiter, logger *slog.Logger, rule Rule, value string, logAttrs ...any) (allowed bool, retryAfter time.Duration) {
 	key := rule.Key(value)
-	allowed, retryAfter, err := limiter.Allow(ctx, key, rule.Limit, rule.Window)
+	allowCtx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+	allowed, retryAfter, err := limiter.Allow(allowCtx, key, rule.Limit, rule.Window)
 	// 直接遇到limiter error
 	if err != nil {
 		// fail open：limiter（Redis）壞掉時放行，不讓所有人都登入不了

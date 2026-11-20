@@ -26,6 +26,18 @@ func (f *fakeLimiter) Allow(ctx context.Context, key string, limit int, window t
 	return f.allowed, f.retryAfter, f.err
 }
 
+// Allow 一直擋到 ctx 結束才回傳（模擬 Redis 不回應），並記下收到的 ctx 期限
+type blockingLimiter struct {
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (b *blockingLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
+	b.deadline, b.hasDeadline = ctx.Deadline()
+	<-ctx.Done()
+	return false, 0, ctx.Err()
+}
+
 func newBufLogger() (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
@@ -89,6 +101,35 @@ func TestCheckBlockedCountsMetricAndLogsAttrs(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{"level=WARN", "rate limited", "rule=test:blocked", "key=rl:test:blocked:v", "remote_addr=1.2.3.4"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q missing %q", out, want)
+		}
+	}
+}
+
+// Redis 不回應時，Check 要在 checkTimeout 內放棄並 fail open，不能卡住 request
+func TestCheckFailsOpenOnTimeout(t *testing.T) {
+	l := &blockingLimiter{}
+	logger, buf := newBufLogger()
+
+	start := time.Now()
+	ok, retry := Check(context.Background(), l, logger, testRule, "v")
+	elapsed := time.Since(start)
+
+	if !ok || retry != 0 {
+		t.Errorf("got %v / %v, want true / 0", ok, retry)
+	}
+	if elapsed < checkTimeout-20*time.Millisecond || elapsed > time.Second {
+		t.Errorf("Check took %v, want about %v (< 1s)", elapsed, checkTimeout)
+	}
+	if !l.hasDeadline {
+		t.Fatal("ctx passed to Allow has no deadline")
+	}
+	if remain := l.deadline.Sub(start); remain > checkTimeout+50*time.Millisecond {
+		t.Errorf("deadline = %v after start, want <= ~%v", remain, checkTimeout)
+	}
+	out := buf.String()
+	for _, want := range []string{"rate limiter failed, fail open", "rule=test:rule", "context deadline exceeded"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log %q missing %q", out, want)
 		}
