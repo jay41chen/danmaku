@@ -113,6 +113,7 @@ type runReport struct {
 	Stuck            *stuckReport   `json:"stuck,omitempty"` // 只有 -scenario stuck 才有，見 stuck.go
 	Redis            *redisReport   `json:"redis,omitempty"` // 只有 -scenario redis 才有，見 redis.go
 	Kill             *killReport    `json:"kill,omitempty"`  // 只有 -scenario kill 才有，見 kill.go
+	Spike            *spikeReport   `json:"spike,omitempty"` // 只有 -scenario resync-spike 才有，見 spike.go
 	Cleanup          *cleanupResult `json:"cleanup,omitempty"`
 	Notes            []string       `json:"notes,omitempty"`
 }

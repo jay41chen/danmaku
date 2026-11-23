@@ -477,6 +477,11 @@ func summarizePresenceSeries(frames []presenceFrame, start time.Time) *redisPres
 
 // 依目標 server 彙整 POST 結果。每筆 seq 的 server 用 poster 同一個公式（redis 情境只有 1 個房間）
 func buildPostStatsByServer(res *openLoopResult, servers []string) map[string]*redisPostStats {
+	return buildPostStatsByServerRooms(res, servers, 1)
+}
+
+// 同上，但 poster 輪流用 rooms 個房間時 seq → server 是 serverIndex(seq, rooms, len(servers))，所以要知道房間數
+func buildPostStatsByServerRooms(res *openLoopResult, servers []string, rooms int) map[string]*redisPostStats {
 	out := map[string]*redisPostStats{}
 	lat := map[string][]time.Duration{}
 	latAll := map[string][]time.Duration{}
@@ -488,7 +493,7 @@ func buildPostStatsByServer(res *openLoopResult, servers []string) map[string]*r
 		if k == "" {
 			continue
 		}
-		s := servers[serverIndex(seq, 1, len(servers))]
+		s := servers[serverIndex(seq, rooms, len(servers))]
 		out[s].Sent++
 		out[s].StatusCounts[k]++
 		if res.Outcome[seq] != outcomeDropped {
@@ -605,22 +610,14 @@ func buildRedisReport(start time.Time, rate float64, res *openLoopResult, states
 	// 每台 server 的 /metrics 彙整（samples 已依時間排序）
 	for _, s := range servers {
 		ss := byServer[s]
-		var first, last *redisMetricSample
-		for i := range samples {
-			m := &samples[i]
-			if m.Server != s {
-				continue
+		if ms := samplesOfServer(samples, s); len(ms) > 0 {
+			first, last := ms[0], ms[len(ms)-1]
+			ss.ConnectionsMin, ss.ConnectionsMax = first.Connections, first.Connections
+			for _, m := range ms {
+				ss.ConnectionsMin = min(ss.ConnectionsMin, m.Connections)
+				ss.ConnectionsMax = max(ss.ConnectionsMax, m.Connections)
 			}
-			if first == nil {
-				first = m
-				ss.ConnectionsMin, ss.ConnectionsMax = m.Connections, m.Connections
-			}
-			last = m
-			ss.ConnectionsMin = min(ss.ConnectionsMin, m.Connections)
-			ss.ConnectionsMax = max(ss.ConnectionsMax, m.Connections)
-			ss.MetricSamplesOK++
-		}
-		if first != nil {
+			ss.MetricSamplesOK = len(ms)
 			ss.ResyncSentDelta = last.ResyncSent - first.ResyncSent
 			ss.PublishFailedDelta = last.PublishFailed - first.PublishFailed
 			ss.PubSubDeafDelta = last.PubSubDeaf - first.PubSubDeaf

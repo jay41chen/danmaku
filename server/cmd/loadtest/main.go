@@ -61,6 +61,9 @@ type options struct {
 	killViewers         int
 	killRate            float64
 	killEntry           string
+	spikeRooms          int
+	spikeViewersPerRoom int
+	spikeRoomRate       float64
 }
 
 const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
@@ -68,7 +71,7 @@ const defaultSteps = "100x10,500x20,1000x50,2500x100,5000x100"
 func parseFlags(args []string) (*options, error) {
 	o := &options{}
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
-	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck | redis | kill")
+	fs.StringVar(&o.scenario, "scenario", "", "write | mixed | fanout | rooms | stuck | redis | kill | resync-spike")
 	fs.StringVar(&o.servers, "servers", "", "comma-separated server base URLs (localhost / 127.0.0.1 only), e.g. http://127.0.0.1:6388,http://127.0.0.1:6389")
 	fs.StringVar(&o.out, "out", "", "JSON result path (default loadtest-<scenario>-<time>.json in the current directory)")
 	fs.StringVar(&o.serverPIDs, "server-pids", "", "comma-separated server PIDs to sample CPU with ps")
@@ -105,6 +108,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.IntVar(&o.killViewers, "kill-viewers", 10, "kill scenario: WS viewers through the entry (by index mod 4: 0 and 1 logged in, 2 and 3 anonymous)")
 	fs.Float64Var(&o.killRate, "kill-rate", 5, "kill scenario: messages per second posted to the room through the entry")
 	fs.StringVar(&o.killEntry, "kill-entry", "http://nginx:80", "kill scenario: URL that viewers' WS and the poster's POST / history GET go through (the nginx in front of the servers); -servers is only used for seeding and /metrics sampling")
+	fs.IntVar(&o.spikeRooms, "spike-rooms", 100, "resync-spike scenario: number of rooms (the jitter is -redis-resync-delay-max)")
+	fs.IntVar(&o.spikeViewersPerRoom, "spike-viewers-per-room", 10, "resync-spike scenario: WS viewers per room (spread over -servers)")
+	fs.Float64Var(&o.spikeRoomRate, "spike-room-rate", 1, "resync-spike scenario: messages per second posted to each room")
 	fs.DurationVar(&o.monInterval, "monitor-interval", 5*time.Second, "interval of background ps / docker stats sampling")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -122,6 +128,10 @@ func parseFlags(args []string) (*options, error) {
 	// redis 要容納「前段正常 + 故障 + 恢復後觀察」，30s 預設太短：沒明確給 -duration 時改 120s
 	if (o.scenario == "redis" || o.scenario == "kill") && !durationSet {
 		o.duration = 120 * time.Second
+	}
+	// resync-spike 要容納「前段正常 + 故障 + 恢復後觀察」：沒明確給 -duration 時改 90s
+	if o.scenario == "resync-spike" && !durationSet {
+		o.duration = 90 * time.Second
 	}
 	return o, nil
 }
@@ -193,8 +203,14 @@ func buildSteps(o *options) ([]stepSpec, error) {
 		}
 		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 kill.go
 		return []stepSpec{{Viewers: o.killViewers, Rate: o.killRate, Rooms: 1}}, nil
+	case "resync-spike":
+		if o.spikeRooms < 1 || o.spikeViewersPerRoom < 1 || o.spikeRoomRate <= 0 || o.redisResyncDelayMax < 0 {
+			return nil, fmt.Errorf("-spike-rooms, -spike-viewers-per-room and -spike-room-rate must be positive and -redis-resync-delay-max must be >= 0")
+		}
+		// 只用來算規模（fd 數、房間數、發文用的 users 數）；實際流程見 spike.go
+		return []stepSpec{{Viewers: o.spikeRooms * o.spikeViewersPerRoom, Rate: float64(o.spikeRooms) * o.spikeRoomRate, Rooms: o.spikeRooms}}, nil
 	}
-	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck, redis, kill")
+	return nil, fmt.Errorf("-scenario must be one of write, mixed, fanout, rooms, stuck, redis, kill, resync-spike")
 }
 
 func splitList(s string) []string {
@@ -360,6 +376,7 @@ func run(args []string) (code int) {
 			"server_pids": pids, "docker_containers": o.containers,
 			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate, "redis_viewers": o.redisViewers, "redis_rate": o.redisRate, "redis_resync_delay_max": o.redisResyncDelayMax.String(),
 			"kill_viewers": o.killViewers, "kill_rate": o.killRate, "kill_entry": killEntry,
+			"spike_rooms": o.spikeRooms, "spike_viewers_per_room": o.spikeViewersPerRoom, "spike_room_rate": o.spikeRoomRate,
 		},
 		Steps: []stepResult{},
 	}
@@ -388,6 +405,8 @@ func run(args []string) (code int) {
 			printKill(os.Stdout, rep.Kill)
 		} else if rep.Redis != nil {
 			printRedis(os.Stdout, rep.Redis)
+		} else if rep.Spike != nil {
+			printSpike(os.Stdout, rep.Spike)
 		} else {
 			printTable(os.Stdout, rep)
 		}
@@ -417,6 +436,10 @@ func run(args []string) (code int) {
 
 	if o.scenario == "redis" {
 		return runRedis(ctx, o, httpClient, servers, data, runTag, rep)
+	}
+
+	if o.scenario == "resync-spike" {
+		return runSpike(ctx, o, httpClient, servers, data, runTag, rep)
 	}
 
 	mon := newMonitor(pids, splitList(o.containers), o.monInterval, sc.scrub)
