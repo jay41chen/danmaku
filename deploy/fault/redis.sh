@@ -1,10 +1,11 @@
 #!/bin/sh
-# 跑 `loadtest -scenario redis`，中途把 fault 環境的 Redis stop 或 pause 一段時間，再恢復。
+# 跑 `loadtest -scenario $SCENARIO`（預設 redis），中途把 fault 環境的 Redis stop 或 pause 一段時間，再恢復。
 # 用法：redis.sh <stop|pause> <outage_seconds> [額外的 loadtest 參數，例如 -duration 180s -redis-viewers 10]
 # 流程：背景啟動 loadtest（跑在 danmaku-fault 網路裡）→ 等 30s → 記 T_down → stop/pause redis → 等 outage 秒 → start/unpause → 記 T_up → 等 loadtest 結束。
 # 注意：stop + start 會丟掉 Redis 資料（tmpfs、沒開持久化），這是刻意的；pause 則保留資料、連線只是被凍住。
-# 環境變數：OUT_DIR（輸出目錄，預設 deploy/fault/out/）、OUT_NAME（檔名，預設 redis-<mode>-<秒數>-<時間>.json）
-# 注意：loadtest 的 -duration 預設 120s，必須大於 30 + outage + 恢復後想觀察的時間
+# 例：SCENARIO=resync-spike redis.sh stop 10 -duration 90s   # 量 Redis 恢復時的歷史 GET 尖峰（見 server/cmd/loadtest/spike.go）
+# 環境變數：SCENARIO（loadtest 情境，預設 redis；resync-spike 的預設 -duration 是 90s）、OUT_DIR（輸出目錄，預設 deploy/fault/out/）、OUT_NAME（檔名，預設 <scenario>-<mode>-<秒數>-<時間>.json）
+# 注意：loadtest 的 -duration 預設 120s（resync-spike 是 90s），必須大於 30 + outage + 恢復後想觀察的時間
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here"
@@ -19,8 +20,9 @@ shift 2
 case "$mode" in stop|pause) ;; *) echo "redis.sh: mode must be stop or pause, got '$mode'" >&2; exit 2 ;; esac
 case "$outage" in ''|*[!0-9]*) echo "redis.sh: outage_seconds must be a non-negative integer, got '$outage'" >&2; exit 2 ;; esac
 
+scenario="${SCENARIO:-redis}"
 out_dir="${OUT_DIR:-$here/out}"
-out_name="${OUT_NAME:-redis-$mode-$outage-$(date +%Y%m%d-%H%M%S).json}"
+out_name="${OUT_NAME:-$scenario-$mode-$outage-$(date +%Y%m%d-%H%M%S).json}"
 mkdir -p "$here/.bin" "$out_dir"
 
 (cd "$here/../../server" && GOOS=linux CGO_ENABLED=0 go build -o "$here/.bin/loadtest" ./cmd/loadtest)
@@ -58,7 +60,7 @@ docker run --rm --user "$(id -u):$(id -g)" --network danmaku-fault_default --env
   -e TEST_REDIS_URL='redis://redis:6379/15' \
   -v "$here/.bin:/bin-loadtest:ro" -v "$out_dir:/out" \
   gcr.io/distroless/static-debian12:nonroot \
-  /bin-loadtest/loadtest -in-compose -scenario redis -servers "$servers_arg" \
+  /bin-loadtest/loadtest -in-compose -scenario "$scenario" -servers "$servers_arg" \
   -require-machine-check=false -docker-containers "" -out "/out/$out_name" "$@" &
 lt_pid=$!
 
