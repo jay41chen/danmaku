@@ -67,6 +67,11 @@ func PublishFailedCount() float64 {
 	return find("redis_publish_failed_total", nil).GetCounter().GetValue()
 }
 
+// redis_deferred_resync_published_total
+func DeferredResyncPublishedCount() float64 {
+	return find("redis_deferred_resync_published_total", nil).GetCounter().GetValue()
+}
+
 // websocket_connections_active（gauge）
 func WSConnectionsActive() float64 {
 	return find("websocket_connections_active", nil).GetGauge().GetValue()

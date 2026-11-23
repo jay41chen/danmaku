@@ -59,6 +59,13 @@ var (
 			Help: "Total number of failed Redis PUBLISH calls for message broadcast (heartbeat excluded)",
 		},
 	)
+	// 某間房先前有訊息 PUBLISH 失敗，之後補發 resync frame 成功的次數（延遲補發，見 ResyncPublisher）
+	deferredResyncPublishedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "redis_deferred_resync_published_total",
+			Help: "Total number of resync frames published to a room channel after an earlier failed message publish to that room (deferred resync)",
+		},
+	)
 	// watchdog 判定 PubSub 聾掉（連續收不到自己發的心跳）而重建的次數
 	pubSubDeafTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
@@ -114,6 +121,11 @@ func RateLimited(rule string) {
 // 訊息廣播 PUBLISH 到 Redis 失敗
 func PublishFailed() {
 	publishFailedTotal.Inc()
+}
+
+// 延遲補發的 resync frame 發送成功
+func DeferredResyncPublished() {
+	deferredResyncPublishedTotal.Inc()
 }
 
 // WS 連線被接受：在線數 +1、累計連線數 +1

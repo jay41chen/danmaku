@@ -47,12 +47,14 @@ func main() {
 	// RedisStore 同時實作 Pub/Sub 和限流器（use case 的 limiter），同一條連線共用
 	wsHandler := handler.NewWebsocketHandler(redis, roomUseCase, authUseCase, tokens, handler.WithMaxClients(cfg.WSMaxClients))
 	msgDeps := messageDepsFor(db, redis, cfg.LoadtestTimingLog)
-	messageHandler := handler.NewMessageHandler(usecase.NewMessageUseCase(msgDeps.store, handler.NewMessageNotifier(msgDeps.publisher), msgDeps.limiter))
+	// 訊息和 user_hidden 的廣播共用同一個 ResyncPublisher：每台 server 只有一份 pending map
+	resyncPub := handler.NewResyncPublisher(msgDeps.publisher)
+	messageHandler := handler.NewMessageHandler(usecase.NewMessageUseCase(msgDeps.store, handler.NewMessageNotifier(resyncPub), msgDeps.limiter))
 	mux := http.NewServeMux()
 	registerRoutes(mux, tokens, appHandlers{
 		messages: messageHandler,
 		rooms:    handler.NewRoomHandler(roomUseCase),
-		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(redis))),
+		roles:    handler.NewRoleHandler(usecase.NewRoleUseCase(db, handler.NewRoomNotifier(resyncPub))),
 		health:   handler.NewHealthHandler(db, redis),
 		auth:     handler.NewAuthHandler(authUseCase, cfg.ClientIPHeader),
 		ws:       wsHandler,
