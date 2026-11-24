@@ -1,7 +1,7 @@
 # 0020 — One server loses Redis silently: a gray failure that health checks can't see
 
-**Status**: Accepted (2026-11-18). Fixes 1 and 3 done on 2026-11-20 (see [Fixes](#fixes)); deferred `resync` is
-still in the backlog.
+**Status**: Accepted (2026-11-18). Fixes 1 and 3 done on 2026-11-20, fix 2 (deferred `resync`) on 2026-11-23 (see
+[Fixes](#fixes)).
 
 ## Context
 
@@ -113,7 +113,7 @@ Record the behaviour now and fix it later; each fix is a separate change with it
    they missed anything.
 3. **Find out why presence went silent** without logging an error.
 
-(Fixes 1 and 3 were done afterwards; see [Fixes](#fixes).)
+(All three were done afterwards; see [Fixes](#fixes).)
 
 Not chosen: making the watchdog count misses while publishing fails. During the blackhole a rebuild can't succeed
 either, and after it a faster rebuild would save at most 15 s. Fix 2 matters more.
@@ -170,11 +170,52 @@ an "unknown" count needs a protocol change.
 | Fix 3: `server-1`'s viewers no longer see a frozen count | Wrong, see above |
 | Fix 3: `presence count failed` about 1 s in, about 12 times | Close: 2.6 s (depends on where the 5 s tick falls), 13 times |
 
+**Fix 2: deferred `resync` (2026-11-23).** A dirty flag per room, not a queue: the message is already in Postgres,
+so viewers only need a signal to re-fetch history, not the data.
+- `ResyncPublisher` wraps the room publisher. When a `PUBLISH` fails, the server records the room and the time of
+  the first failure in its own memory. Not in Redis: Redis is usually what it can't reach. Only the failing server
+  knows, so each server records and repairs its own failures; if two fail, viewers get two `resync`s, an accepted
+  false positive.
+- On the next successful `PUBLISH` to that room it **takes** the flag under the lock (read and delete in one step),
+  then, outside the lock, publishes one `resync` frame to the same Redis room channel, so viewers on every server
+  get it. If that fails, the flag is put back, keeping the earlier time.
+- The lock never covers network I/O, so a slow Redis can't stall every room's POSTs. Taking the flag means at most
+  one `resync` in flight per room per server, so recovery doesn't multiply the history GET spike. Not chosen:
+  peeking and deleting conditionally on a version number. Also correct, and it gives redundancy if the one sender
+  fails, but N concurrent successes send N `resync`s.
+- Message and `user_hidden` broadcasts share one instance. Receivers are unchanged: the frame is a valid client
+  frame and is forwarded as is. New counter `redis_deferred_resync_published_total`.
+- Limits: a server that dies forgets its flags; a quiet room is repaired only on its next successful publish.
+
+**Run 5**, one run, same setup as run 4 (blackhole 60 s, observed 180 s):
+
+| | Run 4, fixes 1 and 3 | Run 5, all three fixes |
+|---|---|---|
+| POSTs to `server-1` failing | 0 / 450 | 0 / 450 |
+| Stored but not broadcast (`publish_failed`) | 157 | 152 |
+| `server-2`'s viewers: `resync` received | none | **all 5, about 1 s after the blackhole ended** |
+| `server-2`'s viewers: missed / recovered / lost for good | 785 / 0 / 785 | 760 / **230** / **530** |
+| `server-1`'s viewers: missed / recovered | 2545 / 475 | 2310 / 475 (watchdog `resync`, as before) |
+| Deferred `resync`s published | n/a | **1** (`server-1`), although many POSTs succeeded at once on recovery |
+
+**Why only 46 of about 152 per viewer came back.** The history GET returns the newest 100 messages. The poster
+alternates between servers, so about half of those 100 came from `server-2` and its viewers already had them.
+Predicted beforehand: 45–50 recovered and 105–110 lost per viewer, about 530 in total. `server-1`'s viewers
+didn't see the deferred `resync`: their own subscription was still cut until the watchdog rebuilt it.
+
+**Why the newest 100 and not everything since the failure.** This is danmaku, and delivery is best effort
+([ADR 0018](0018-redis-restart-best-effort-resync.md)): a comment that scrolled past seconds ago has little value,
+and a viewer doesn't need every message. The flag already holds the time of the first failure, so `resync` could
+carry it and the client could fetch history since then. That changes the API and the client, and makes the GET
+spike larger; it is in the backlog.
+
 ## Consequences
 
 - **A server that can't reach Redis keeps taking traffic.** Its viewers get nothing from other servers, and its
   messages reach nobody, until the path heals and the watchdog rebuilds, at least 30 s later.
 - **What a viewer gets back is the latest 100.** At 5 msg/s that is 20 s; this blackhole lasted 60 s.
+- **Viewers on other servers now learn they missed messages** (fix 2), but they share the same latest-100 window,
+  and messages they already received use part of it.
 - **The two servers disagree and neither is right.** `server-1`'s viewers see a frozen count; `server-2`'s see the
   other half of the room disappear.
 - **Failing open hides failures.** After fix 1, posters always get 201, and the only signs of the fault are the
