@@ -287,7 +287,7 @@
 - [ ] prod 主機上重跑 `resync-spike`，決定 `pool_max_conns`（2026-11-24，Q584 A，ADR 0021）：這次的數字來自 MacBook Air M1（4 顆效能核心、loadtest 和 server 同一台），只能比較前後；上線檢查清單：`DATABASE_URL` 加 `pool_max_conns`，從 CPU 數 × 2 開始實測
 - [ ] 限流在 server 過載時 fail open（2026-11-24，ADR 0021）：Redis 沒壞、只是 server 太忙時，限流呼叫超過 200 ms 也會放行，等於最需要限流的時候限流自動關掉。方向：分辨「Redis 連不到」和「server 太忙」、過載時 fail closed，或加 server 本機的限流
 - [ ] 流量突然拉高當觸發點（2026-11-24，ADR 0021）：壓測工具的發文速率從 0 直接跳到全速，還沒測過慢慢爬升會不會讓故障前的偶發過載消失
-- [ ] 測試用的 env 改放 repo 內、被 gitignore 的 `server/.env.test`，加一個自動載入它的測試指令（2026-11-24，Q582 A）：現在放在 session 的暫存目錄（`/private/tmp` 底下），會被系統清掉，每次要重建；內容只有本機 compose 的帳密和 `danmaku_test` / Redis db 15。不選測試程式碼內建預設值：帳密會寫死進公開的程式碼，而且沒設 env 就 skip 的保護機制會消失。M10 收尾後做
+- [x] 測試用的 env 改放 repo 內、被 gitignore 的 `server/.env.test`，加一個自動載入它的測試指令（2026-11-24，Q582 A）：現在放在 session 的暫存目錄（`/private/tmp` 底下），會被系統清掉，每次要重建；內容只有本機 compose 的帳密和 `danmaku_test` / Redis db 15。不選測試程式碼內建預設值：帳密會寫死進公開的程式碼，而且沒設 env 就 skip 的保護機制會消失。✅ 2026-11-24：`server/.env.test.example`（commit）→ 本機 `cp` 成 `.env.test`；`server/test.sh` 載入後跑 `go test -race -p 1`（參數原樣傳下去），找不到 `.env.test` 直接報錯不 fallback；pre-push 改呼叫 `test.sh`，原本寫死在 hook 的兩行刪掉，設定只剩一個來源（Q594–Q596 A）。補充：本機帳密早就在 `docker-compose.yml` 和 pre-push 裡，所以這項真正解決的是「單一來源」和「手動跑不會靜默 skip」
 - [ ] 用 k6 寫壓測情境（2026-11-06，M6 決定先用 Go 自己寫）：業界常見，之後想學工具或壓 HTTP API 時再試
 
 - [ ] 房主 / 房管透過 WS 直送彈幕（2026-11-06 從 RBAC 移出，不一定會做）：好處只有少一次 HTTP，要多一條寫入路徑、自己做 ack 和去重、降級時處理已連上的連線。等 M6 顯示 `POST` 真的太慢再談

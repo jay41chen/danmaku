@@ -193,12 +193,15 @@ npm run dev
 
 ### Git hooks
 
-每個 clone 設定一次。pre-commit 檢查 `gofmt`、`go vet` 和前端 lint；pre-push 依 `server/`、`client/` 有沒有變動，跑全部測試和前端 build。測試用獨立的 DB，也要建一次：
+每個 clone 設定一次。pre-commit 檢查 `gofmt`、`go vet` 和前端 lint；pre-push 依 `server/`、`client/` 有沒有變動，跑全部測試和前端 build。測試用獨立的 DB，以及被 gitignore 的 `server/.env.test`（從 `.env.test.example` 複製），也要設定一次：
 
 ```bash
 git config core.hooksPath .githooks
 docker exec danmaku-db createdb -U danmaku danmaku_test
+cp server/.env.test.example server/.env.test
 ```
+
+跑測試用 `server/test.sh`：它會載入 `.env.test`，再跑 `go test -race -p 1`（預設 `./...`，參數會原樣傳下去，例如 `server/test.sh ./internal/pgstore -run X -count=1`）。直接跑 `go test` 而沒設這兩個變數時，integration test 會 skip。
 
 ### 壓測工具
 

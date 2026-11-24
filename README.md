@@ -206,12 +206,18 @@ cd client && npm install && npm run dev                                    # htt
 ### Git hooks
 
 Run once per clone. Pre-commit checks `gofmt`, `go vet` and the client lint; pre-push runs all tests and the
-client build, for whichever of `server/` and `client/` changed. Tests use a separate database, so create it too:
+client build, for whichever of `server/` and `client/` changed. Tests use a separate database and a gitignored
+`server/.env.test` (copied from `.env.test.example`), so set those up too:
 
 ```bash
 git config core.hooksPath .githooks
 docker exec danmaku-db createdb -U danmaku danmaku_test
+cp server/.env.test.example server/.env.test
 ```
+
+Run tests with `server/test.sh`: it loads `.env.test` and runs `go test -race -p 1` (default `./...`; any arguments
+pass through, e.g. `server/test.sh ./internal/pgstore -run X -count=1`). Plain `go test` without these variables
+skips the integration tests.
 
 ### Load test tool
 
