@@ -43,6 +43,7 @@
 | Redis 重啟時 go-redis 自己重連，停機期間的訊息全部遺失、而且沒有任何人被通知（停 10 秒漏 52 則、60 秒漏 303 則） | 彈幕是當下的反應，送達只做到盡力而為。已訂閱的房間又收到訂閱確認時視為重連、送 `resync`，client 隨機等 0～2 秒再補撈。停 60 秒補回最新 99 則；停 10 秒全部補回，或只缺最後 1～3 則：發送比接收晚恢復，最多約 0.6 秒（3 次單次實驗，每次不同） | [0018](docs/design/0018-redis-restart-best-effort-resync.md) |
 | server 被 kill 時，連到它的 IP 會卡住；nginx 等 60 秒、比 client 的 10 秒還長，所以從沒發現、一直轉給它。重連最久 25.7 秒、35 個 POST 失敗，一個 viewer 撈歷史 timeout 又沒重試，永久缺 105 則 | nginx 連線 2 秒沒成功就放棄，同一個請求改送另一台（還沒送出去，所以連 POST 也安全），並 10 秒內不再用死掉那台；client 撈歷史失敗最多重試 3 次。修改後（單次）：0.6～0.9 秒重連、漏的 18 則全補回、600 個 POST 全部成功 | [0019](docs/design/0019-server-kill-fast-connect-failover.md) |
 | 只有一台 server 連不到 Redis（封包被丟、沒有 RST），Redis 本身正常：HTTP 看起來健康，所以流量照樣進來，但限流卡住 POST、訂閱也斷了。60 秒內 128 個 POST 等到 client 放棄；這台的觀眾連另一台發的訊息都收不到，永久缺 1140 則；另一台的觀眾缺 13 則沒廣播出去的訊息，而且沒有任何人通知它們 | 讓 ctx 期限真的套到 Redis 的 socket 上；限流每次 200 ms、presence worker 每次 1 s，超過就放棄（限流 fail open）。修正後（單次）POST 全部 201、最慢約 0.9 秒；presence 2.6 秒內就記錯誤、不再卡 55 秒。代價：失敗從發文的人轉到看的人，存了但沒廣播的訊息從 13 則變 154 則，另一台的觀眾默默漏掉。接著做延後補發 `resync`：publish 失敗的 server 在記憶體記下房間（dirty flag），下次 publish 成功時經 Redis 補發一則 `resync`。重跑：另一台的觀眾在恢復後約 1 秒全都收到 `resync`，每人補回 46 則；其餘超出「最新 100 則」的歷史範圍，以彈幕盡力而為的定位接受 | [0020](docs/design/0020-redis-blackhole-gray-failure.md) |
+| Redis 恢復後，所有觀眾同時重撈歷史，而且每人會收到 3 個 `resync`（自己 server 重連 1 個，加上每台 server 的延後補發各 1 個），平均每人撈約 2 次。在一台筆電上，5,000 人變慢（GET p99 351 ms），10,000 人有 6,195 個 GET timeout | 先量再改。client 改成先固定等 2.5 秒、再加隨機 0～2 秒，讓 resync 合併：每人剛好撈 1 次，5,000 人 GET p99 21 ms，10,000 人零失敗。不加快取也不加 singleflight。pgx 連線池原本沒設上限（預設 8）；16 條比 8 條和 32 條都好（CPU 已經滿時，同時跑更多查詢會讓每個查詢都變慢），所以改成每個部署在 `DATABASE_URL` 自己設。偶發的過載查到是測試用筆電只有 4 顆快核心，不是 GC、開新連線或過熱。系統過載時限流會 fail open | [0021](docs/design/0021-resync-get-spike-and-pool-size.md) |
 
 ## 架構
 
@@ -117,7 +118,7 @@ flowchart LR
 
 ## 進度
 
-2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數和熱門排行、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性、壓測基準（寫入維持同步）、server CI，以及上面那些強化。接下來：腳本化的故障情境。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
+2026-10-08 開始。已完成：跨多台 server 的即時彈幕、refresh token rotation 的登入機制、房間與分頁的房間列表、跨 server 的房間人數和熱門排行、漏訊息的自動恢復、房間角色和 shadow ban、限流、可觀測性、壓測基準（寫入維持同步）、server CI、腳本化的故障情境和各自的修正，以及上面那些強化。接下來：client 的彈幕層，然後讓 prod 重新上線並加上最小監控。詳見 [ROADMAP 的 Milestones](ROADMAP.md#milestones2026-11-03-訂暫定)。
 
 ## Tech Stack
 
@@ -397,7 +398,7 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 | Variable | Description | Local Default |
 |---|---|---|
 | `REDIS_URL` | Redis 連線 URL（`redis://` 或 `rediss://`）；密碼有特殊字元時要 percent-encode（如 `@` → `%40`） | `redis://localhost:2907` |
-| `DATABASE_URL` | PostgreSQL 連線字串（URL 或 `host=... user=...` 格式）；URL 的密碼有特殊字元時要 percent-encode（如 `@` → `%40`、`#` → `%23`） | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
+| `DATABASE_URL` | PostgreSQL 連線字串（URL 或 `host=... user=...` 格式）；URL 的密碼有特殊字元時要 percent-encode（如 `@` → `%40`、`#` → `%23`）。連線池上限用 `pool_max_conns=N` 加在 URL 上；沒設時是 pgx 預設的 max(4, CPU 數)。上線時從 CPU 數 × 2 開始，在目標主機上實測（[ADR 0021](docs/design/0021-resync-get-spike-and-pool-size.md)） | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
 | `PORT` | Server 監聽 port | `8080` |
 | `CLIENT_IP_HEADER` | 限流用的 client IP 從哪個 header 讀（如 `X-Real-IP`）；只能設成前面那層 proxy 會**覆蓋**的 header，否則 client 可以偽造。沒設時用連線的 RemoteAddr，在 proxy 後面會變成所有人共用同一個計數 | 空（用 RemoteAddr） |
 | `JWT_SECRET` | 簽 access token（JWT，HS256）用的 secret，**至少 32 bytes**，所有 server instance 要用同一把；沒設或太短時拒絕啟動。產生方式：`openssl rand -base64 48` | **必填**，無預設值 |
