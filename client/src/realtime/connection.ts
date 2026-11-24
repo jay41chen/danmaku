@@ -17,8 +17,14 @@ const JOIN_TIMEOUT_MS = 5_000;
 // 要跟 server wsPingPeriod（server/internal/handler/ws.go）一致，範圍檢查在 server/internal/handler/ws_test.go
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const PONG_TIMEOUT_MS = 20_000;
-// resync 後撈歷史前的隨機等待上限（0 ~ 此值均勻分布）
-// loadtest 的 -redis-resync-delay-max（server/cmd/loadtest/main.go）對應這個值，兩邊要一起改
+// resync 後撈歷史前的等待時間 = RESYNC_FETCH_DELAY_MIN_MS + random[0, RESYNC_FETCH_DELAY_MAX_MS)（2.5 ~ 4.5 秒）。
+// 固定的 MIN 是為了合併：Redis 恢復後，每個觀眾約在 2.5 秒內會收到 3 個左右的 resync
+// （自己那台 server 重連的 resync，加上每台 server 在該房間第一次發布成功時補發的 deferred resync）。
+// 等滿 MIN 再撈，這些 resync 就會合併成一次撈取（M10d resync-spike 實測：同一觀眾第一個到最後一個 resync 的間隔 p95 約 2.3 秒、最大約 2.5 秒，
+// 條件是每房 1 msg/s；更安靜的房間仍可能撈兩次，可接受）。
+// 隨機的 MAX 才負責把各觀眾的 GET 攤開：大家差不多同時收到第一個 resync，固定的 MIN 攤不開。
+// loadtest 的 -redis-resync-delay-min / -redis-resync-delay-max（server/cmd/loadtest/main.go）分別對應這兩個值，要一起改
+const RESYNC_FETCH_DELAY_MIN_MS = 2500;
 const RESYNC_FETCH_DELAY_MAX_MS = 2000;
 // 撈歷史失敗時的重試：最多 3 次（含第一次），退避沿用重連的參數。
 // loadtest 的 kill 情境（server/cmd/loadtest/kill.go）對應 killHistoryMaxAttempts / killHistoryRetryBase，兩邊要一起改
@@ -251,13 +257,13 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       break;
     case "resync":
       // resync 發生在 server 重建 PubSub 或 go-redis 重連之後，空窗期間的訊息不會補推：重新撈歷史補洞（和已有的由 merge 去重）。
-      // 隨機延遲 0 ~ 2 秒再撈：把同房觀眾的請求攤開，也讓恢復後才發布失敗的訊息落進撈到的範圍。
+      // 先固定等 2.5 秒（合併恢復後陸續到的 resync），再加隨機 0 ~ 2 秒（把同房觀眾的請求攤開），也讓恢復後才發布失敗的訊息落進撈到的範圍。
       // 已有排定中的補撈就不再排（它會在這次 resync 之後才觸發，已涵蓋）；撈取已經開始的不算，仍要另排一次
       if (payload?.room === ROOM_PUBLIC_ID && resyncTimer === null) {
         resyncTimer = setTimeout(() => {
           resyncTimer = null;
           void fetchMessages();
-        }, Math.random() * RESYNC_FETCH_DELAY_MAX_MS);
+        }, RESYNC_FETCH_DELAY_MIN_MS + Math.random() * RESYNC_FETCH_DELAY_MAX_MS);
       }
       break;
     case "pong":
