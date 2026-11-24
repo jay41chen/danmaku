@@ -7,6 +7,7 @@ const CODE_TEXT: Record<string, string> = {
   invalid_json: "請求格式錯誤",
   internal_error: "伺服器發生錯誤，請稍後再試",
   rate_limited: "請求太頻繁，請稍後再試",
+  auth_unavailable: "服務暫時無法使用，請稍後再試",
   unauthorized: "請先登入",
   gone: "此資源已不存在",
   username_invalid: "帳號格式不正確",
