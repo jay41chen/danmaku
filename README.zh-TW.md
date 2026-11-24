@@ -394,6 +394,23 @@ Railway dashboard → `danmaku` service → **Settings** → **Replicas**（Scal
 - 2026-10-29 已用 replicas = 2 驗證：落在不同台的 A（登入）發彈幕、B（訪客）收得到。
 - 已知限制：多台時從外部打 `/metrics` 只會落在其中一台（見 ROADMAP W6）。
 
+### 換部署平台（backend）
+
+server 只依賴 Dockerfile、env、Postgres / Redis 標準協定，沒有平台專屬設定檔，換平台照下面清單做即可。前端固定在 GitHub Pages，只需要改它指向的 API 位址。
+
+1. **建 service**：從 `server/Dockerfile` build（build context 是 `server/`），image 入口 `/server`、會讀平台給的 `PORT`。平台必須支援 WebSocket；health check 設 `/healthcheck`。
+2. **Postgres**：開新的空 DB 即可，server 啟動時會自動套 migration。要保留資料時用 `pg_dump --no-owner --no-acl` 匯出再匯入。託管服務常要求 TLS，`DATABASE_URL` 加 `sslmode=require`；`pool_max_conns` 在新主機上重新決定（[ADR 0021](docs/design/0021-resync-get-spike-and-pool-size.md)）。
+3. **Redis**：**不用搬資料**（只放 Pub/Sub 和限流計數，都是暫時的），開一個新的即可。
+4. **env**：照下方 [Environment Variables](#environment-variables) 填 `DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、`CORS_ORIGINS`、`CLIENT_IP_HEADER`。`JWT_SECRET` 沿用舊值，已登入的使用者就不會被登出；換新值也只是大家要重新登入。
+5. **`CLIENT_IP_HEADER`（最容易錯，而且設錯不會報錯）**：查新平台的 proxy 會**覆蓋**哪個 header，而且值要是**單一 IP**。目前程式只接受單一 IP；值是 `X-Forwarded-For` 那種逗號分隔的清單時會解析失敗、退回 RemoteAddr，所有人共用同一個限流計數。
+6. **前端**：改 GitHub Secrets 的 `VITE_API_URL`、`VITE_WS_URL`（`wss://`），在 Actions 手動跑 Deploy Frontend（`workflow_dispatch`）。新的 API 位址要在 `CORS_ORIGINS` 允許的前端 origin 下測。
+7. **驗證**：
+   - `curl https://<新位址>/healthcheck` 回 200。
+   - 前端登入、發彈幕，另一個瀏覽器（訪客）收得到。
+   - 限流讀到真實 IP：用同一個網路連續註冊直到 429，再換另一個網路（如手機熱點）註冊，應該不受影響。
+   - 不能偽造：帶 `-H "<CLIENT_IP_HEADER>: 203.0.113.1"` 連打註冊，每次換不同的假 IP；如果一直不會 429，代表平台沒有覆蓋這個 header，client 可以偽造。
+8. **收尾**：驗證通過後再關掉舊平台的 service 和 DB；更新本文件的 [Deployment](#deployment) 表和 [Local Dev vs Production](#local-dev-vs-production)。
+
 ## Environment Variables
 
 Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以下為 Local Development 的預設值。
