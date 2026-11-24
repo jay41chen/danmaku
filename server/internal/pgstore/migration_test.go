@@ -3,6 +3,8 @@ package pgstore
 import (
 	"strings"
 	"testing"
+
+	"github.com/jay41chen/danmaku/server/internal/testenv"
 )
 
 // RunMigration 的 error 會被 main 用 slog 印進 log，所以不管哪一步失敗，都不能帶出密碼。
@@ -63,5 +65,26 @@ func TestRunMigrationUnencodedAtInPassword(t *testing.T) {
 	// Then
 	if err == nil {
 		t.Fatalf("RunMigration(%q) error = nil, want error", raw)
+	}
+}
+
+// DATABASE_URL 可以帶 pgxpool 的 pool_* 參數（例如 pool_max_conns）：
+// migration 要跟 NewDBStore 一樣把它們吃掉，不能當成 runtime param 轉給 Postgres（否則會 FATAL: unrecognized configuration parameter）。
+// 需要真的 Postgres：沒設 TEST_DATABASE_URL 就 skip
+func TestRunMigrationAcceptsPoolParams(t *testing.T) {
+	// Given: 在 TEST_DATABASE_URL 後面接 pool_max_conns=4（URL 已經有 ? 就用 &）
+	url := testenv.Require(t, "TEST_DATABASE_URL")
+	sep := "?"
+	if strings.Contains(url, "?") {
+		sep = "&"
+	}
+	url += sep + "pool_max_conns=4"
+
+	// When
+	err := RunMigration(url)
+
+	// Then
+	if err != nil {
+		t.Fatalf("RunMigration with pool_max_conns error = %v, want nil", err)
 	}
 }

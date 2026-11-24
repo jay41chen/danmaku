@@ -7,19 +7,21 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/jay41chen/danmaku/server/migrations"
 )
 
 func RunMigration(dbURL string) error {
-	// 用 pgx 的 parser（跟 NewDBStore 的 pgxpool 同一個，照 libpq 的連線字串規格），不自己解析 URL：
-	// 1. 同一串 DATABASE_URL，store 能用、migration 就能用（例如密碼裡沒 encode 的 #，pgx 也吃得下）
+	// 用 pgxpool 的 parser（跟 NewDBStore 完全同一個，底層是 pgx 照 libpq 的連線字串規格解析），不自己解析 URL：
+	// 1. 同一串 DATABASE_URL，store 能用、migration 就能用（例如密碼裡沒 encode 的 #，pgx 也吃得下；
+	//    pool_* 參數如 pool_max_conns 也一樣：pgxpool 會從 RuntimeParams 拿掉，不會被當成 runtime param 轉給 Postgres，
+	//    不然 Postgres 會回 FATAL: unrecognized configuration parameter）
 	// 2. 支援 DSN 格式（host=... user=...）
 	// 3. 解析失敗時，pgx 會盡量（best-effort）把錯誤訊息裡的密碼遮成 xxxxx；連線失敗的錯誤只帶 user / database
 	//    前提是密碼的特殊字元已經 percent-encode：沒 encode 的 @ 會讓 URL 被切錯，密碼片段可能被當成 host / database 印進 log
-	cfg, err := pgx.ParseConfig(dbURL)
+	poolCfg, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
 		return fmt.Errorf("parse db url: %w", err)
 	}
@@ -41,8 +43,8 @@ func RunMigration(dbURL string) error {
 		return fmt.Errorf("load migration files: %w", err)
 	}
 
-	// migration 自己開一條連線，跟 store 的 pgxpool 分開；成功建立 migrator 之後，m.Close() 會一起關掉
-	db := stdlib.OpenDB(*cfg)
+	// migration 自己開一條連線（只取 ConnConfig，pool 本身不用），跟 store 的 pgxpool 分開；成功建立 migrator 之後，m.Close() 會一起關掉
+	db := stdlib.OpenDB(*poolCfg.ConnConfig)
 	driver, err := pgxmigrate.WithInstance(db, &pgxmigrate.Config{})
 	if err != nil {
 		db.Close()
