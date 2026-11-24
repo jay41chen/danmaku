@@ -402,7 +402,7 @@ server 只依賴 Dockerfile、env、Postgres / Redis 標準協定，沒有平台
 2. **Postgres**：開新的空 DB 即可，server 啟動時會自動套 migration。要保留資料時用 `pg_dump --no-owner --no-acl` 匯出再匯入。託管服務常要求 TLS，`DATABASE_URL` 加 `sslmode=require`；`pool_max_conns` 在新主機上重新決定（[ADR 0021](docs/design/0021-resync-get-spike-and-pool-size.md)）。
 3. **Redis**：**不用搬資料**（只放 Pub/Sub 和限流計數，都是暫時的），開一個新的即可。
 4. **env**：照下方 [Environment Variables](#environment-variables) 填 `DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、`CORS_ORIGINS`、`CLIENT_IP_HEADER`。`JWT_SECRET` 沿用舊值，已登入的使用者就不會被登出；換新值也只是大家要重新登入。
-5. **`CLIENT_IP_HEADER`（最容易錯，而且設錯不會報錯）**：查新平台的 proxy 會**覆蓋**哪個 header，而且值要是**單一 IP**。目前程式只接受單一 IP；值是 `X-Forwarded-For` 那種逗號分隔的清單時會解析失敗、退回 RemoteAddr，所有人共用同一個限流計數。
+5. **`CLIENT_IP_HEADER`（最容易錯，而且設錯不會報錯）**：查新平台的 proxy 會**覆蓋**哪個 header，而且值要是**單一 IP**。目前程式只接受單一 IP；值是 `X-Forwarded-For` 那種逗號分隔的清單時會解析失敗、退回 RemoteAddr，所有人共用同一個限流計數；設錯時 log 會出現一筆 `client ip header unusable` 開頭的 warn（每個 process 一次），`/metrics` 的 `client_ip_fallback_total` 也會增加。
 6. **前端**：改 GitHub Secrets 的 `VITE_API_URL`、`VITE_WS_URL`（`wss://`），在 Actions 手動跑 Deploy Frontend（`workflow_dispatch`）。新的 API 位址要在 `CORS_ORIGINS` 允許的前端 origin 下測。
 7. **驗證**：
    - `curl https://<新位址>/healthcheck` 回 200。
@@ -420,7 +420,7 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 | `REDIS_URL` | Redis 連線 URL（`redis://` 或 `rediss://`）；密碼有特殊字元時要 percent-encode（如 `@` → `%40`） | `redis://localhost:2907` |
 | `DATABASE_URL` | PostgreSQL 連線字串（URL 或 `host=... user=...` 格式）；URL 的密碼有特殊字元時要 percent-encode（如 `@` → `%40`、`#` → `%23`）。連線池上限用 `pool_max_conns=N` 加在 URL 上；沒設時是 pgx 預設的 max(4, CPU 數)。上線時從 CPU 數 × 2 開始，在目標主機上實測（[ADR 0021](docs/design/0021-resync-get-spike-and-pool-size.md)） | `postgres://danmaku:danmaku@localhost:3192/danmaku` |
 | `PORT` | Server 監聽 port | `8080` |
-| `CLIENT_IP_HEADER` | 限流用的 client IP 從哪個 header 讀（如 `X-Real-IP`）；只能設成前面那層 proxy 會**覆蓋**的 header，否則 client 可以偽造。沒設時用連線的 RemoteAddr，在 proxy 後面會變成所有人共用同一個計數 | 空（用 RemoteAddr） |
+| `CLIENT_IP_HEADER` | 限流用的 client IP 從哪個 header 讀（如 `X-Real-IP`）；只能設成前面那層 proxy 會**覆蓋**的 header，否則 client 可以偽造。沒設時用連線的 RemoteAddr，在 proxy 後面會變成所有人共用同一個計數。有設但 request 沒帶或值不是單一 IP 時也會退回 RemoteAddr，此時 metric `client_ip_fallback_total{reason="missing"\|"unparsable"}` 會增加，每個 process 第一次發生時記一筆 warn log | 空（用 RemoteAddr） |
 | `JWT_SECRET` | 簽 access token（JWT，HS256）用的 secret，**至少 32 bytes**，所有 server instance 要用同一把；沒設或太短時拒絕啟動。產生方式：`openssl rand -base64 48` | **必填**，無預設值 |
 | `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；全小寫、不寫預設 port；不可與 `*` 混用 | `*` |
 | `WS_MAX_CLIENTS` | 每台 server 的 WS 連線上限，1 到 1,000,000 的整數；壓測時才需要調高 | `100` |
