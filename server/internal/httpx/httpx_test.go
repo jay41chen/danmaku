@@ -22,18 +22,21 @@ func TestClientIP(t *testing.T) {
 		headers          map[string]string
 		remoteAddr       string
 		want             string
+		wantFallback     string
 	}{
-		// 沒設定要信任的 header：client 偽造的值不能被採用
-		{"no header configured", "", map[string]string{"X-Real-IP": "6.6.6.6"}, "10.0.0.1:5555", "10.0.0.1"},
-		{"header configured", "X-Real-IP", map[string]string{"X-Real-IP": "1.2.3.4"}, "10.0.0.1:5555", "1.2.3.4"},
+		// 沒設定要信任的 header：client 偽造的值不能被採用；沒設定不算異常，fallback 為空
+		{"no header configured", "", map[string]string{"X-Real-IP": "6.6.6.6"}, "10.0.0.1:5555", "10.0.0.1", ""},
+		{"header configured", "X-Real-IP", map[string]string{"X-Real-IP": "1.2.3.4"}, "10.0.0.1:5555", "1.2.3.4", ""},
 		// 只能讀設定的那個 header，不能寫死 X-Real-IP：別的 header 再像 IP 都不採用
-		{"other platform header", "CF-Connecting-IP", map[string]string{"CF-Connecting-IP": "1.2.3.4", "X-Real-IP": "6.6.6.6"}, "10.0.0.1:5555", "1.2.3.4"},
-		{"header missing", "X-Real-IP", nil, "10.0.0.1:5555", "10.0.0.1"},
-		{"header not an IP", "X-Real-IP", map[string]string{"X-Real-IP": "garbage"}, "10.0.0.1:5555", "10.0.0.1"},
+		{"other platform header", "CF-Connecting-IP", map[string]string{"CF-Connecting-IP": "1.2.3.4", "X-Real-IP": "6.6.6.6"}, "10.0.0.1:5555", "1.2.3.4", ""},
+		{"header missing", "X-Real-IP", nil, "10.0.0.1:5555", "10.0.0.1", ClientIPFallbackMissing},
+		{"header not an IP", "X-Real-IP", map[string]string{"X-Real-IP": "garbage"}, "10.0.0.1:5555", "10.0.0.1", ClientIPFallbackUnparsable},
+		// X-Forwarded-For 式的多值不解析，視為無法使用
+		{"header is a list", "X-Forwarded-For", map[string]string{"X-Forwarded-For": "1.2.3.4, 10.0.0.5"}, "10.0.0.1:5555", "10.0.0.1", ClientIPFallbackUnparsable},
 		// 同一個 IP 不同寫法要變成同一個 key（IPv4-mapped IPv6 → IPv4）
-		{"header normalized", "X-Real-IP", map[string]string{"X-Real-IP": "::ffff:1.2.3.4"}, "10.0.0.1:5555", "1.2.3.4"},
+		{"header normalized", "X-Real-IP", map[string]string{"X-Real-IP": "::ffff:1.2.3.4"}, "10.0.0.1:5555", "1.2.3.4", ""},
 		// IPv6 的 RemoteAddr 有中括號，要靠 SplitHostPort 去掉
-		{"IPv6 remote", "", nil, "[::1]:5555", "::1"},
+		{"IPv6 remote", "", nil, "[::1]:5555", "::1", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,10 +46,13 @@ func TestClientIP(t *testing.T) {
 				req.Header.Set(k, v)
 			}
 
-			got := ClientIP(req, tc.trustedHeaderKey)
+			got, fallback := ClientIP(req, tc.trustedHeaderKey)
 
 			if got != tc.want {
-				t.Errorf("ClientIP() = %q, want %q", got, tc.want)
+				t.Errorf("ClientIP() ip = %q, want %q", got, tc.want)
+			}
+			if fallback != tc.wantFallback {
+				t.Errorf("ClientIP() fallback = %q, want %q", fallback, tc.wantFallback)
 			}
 		})
 	}

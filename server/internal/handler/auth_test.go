@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -14,6 +16,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	middleware "github.com/jay41chen/danmaku/server/internal/middleware"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 )
 
 func TestHandleRegister(t *testing.T) {
@@ -538,6 +541,60 @@ func TestHandleMe(t *testing.T) {
 		// 錯誤回應也不能被快取：Cache-Control 要在 requireUserID 之前設
 		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+	})
+}
+
+// 有設定 client IP header 卻用不了：每次請求 metric +1，warn log 整個 process 只印一次；沒設定 header 則兩者都沒有
+func TestAuthHandlerClientIPFallback(t *testing.T) {
+	const body = `{"username":"jay","password":"kq7vz2mx"}`
+
+	send := func(h *AuthHandler, headerKey, headerValue string) {
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+		if headerKey != "" {
+			req.Header.Set(headerKey, headerValue)
+		}
+		h.HandleLogin(httptest.NewRecorder(), req)
+	}
+	warnCount := func(buf *bytes.Buffer) int {
+		return strings.Count(buf.String(), "client ip header unusable")
+	}
+
+	t.Run("misconfigured header warns once and counts every request", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := newTestAuthHandler(&fakeDBStore{}, &fakeRateLimiter{}, "X-Real-IP", testTokens)
+		h.logger = slog.New(slog.NewJSONHandler(&buf, nil))
+		before := promtest.ClientIPFallbackCount(httpx.ClientIPFallbackUnparsable)
+
+		send(h, "X-Real-IP", "1.2.3.4, 10.0.0.5")
+		send(h, "X-Real-IP", "1.2.3.4, 10.0.0.5")
+
+		if got := warnCount(&buf); got != 1 {
+			t.Errorf("warn count = %d, want 1 (log: %s)", got, buf.String())
+		}
+		if got := promtest.ClientIPFallbackCount(httpx.ClientIPFallbackUnparsable); got != before+2 {
+			t.Errorf("client_ip_fallback_total{unparsable} = %v, want %v", got, before+2)
+		}
+	})
+
+	t.Run("header not configured has no warn and no count", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := newTestAuthHandler(&fakeDBStore{}, &fakeRateLimiter{}, "", testTokens)
+		h.logger = slog.New(slog.NewJSONHandler(&buf, nil))
+		beforeMissing := promtest.ClientIPFallbackCount(httpx.ClientIPFallbackMissing)
+		beforeUnparsable := promtest.ClientIPFallbackCount(httpx.ClientIPFallbackUnparsable)
+
+		send(h, "X-Real-IP", "garbage")
+		send(h, "", "")
+
+		if got := warnCount(&buf); got != 0 {
+			t.Errorf("warn count = %d, want 0", got)
+		}
+		if got := promtest.ClientIPFallbackCount(httpx.ClientIPFallbackMissing); got != beforeMissing {
+			t.Errorf("missing count = %v, want %v", got, beforeMissing)
+		}
+		if got := promtest.ClientIPFallbackCount(httpx.ClientIPFallbackUnparsable); got != beforeUnparsable {
+			t.Errorf("unparsable count = %v, want %v", got, beforeUnparsable)
 		}
 	})
 }

@@ -62,6 +62,11 @@ func RateLimitedCount(rule string) float64 {
 	return find("rate_limited_total", map[string]string{"rule": rule}).GetCounter().GetValue()
 }
 
+// client_ip_fallback_total {reason}
+func ClientIPFallbackCount(reason string) float64 {
+	return find("client_ip_fallback_total", map[string]string{"reason": reason}).GetCounter().GetValue()
+}
+
 // redis_publish_failed_total
 func PublishFailedCount() float64 {
 	return find("redis_publish_failed_total", nil).GetCounter().GetValue()

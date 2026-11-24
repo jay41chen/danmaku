@@ -35,6 +35,14 @@ var (
 		},
 		[]string{"rule"},
 	)
+	// label 只有 missing / unparsable 兩個值（httpx.ClientIPFallback*），不放 header 的值：值是 client 控制的字串
+	clientIPFallbackTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "client_ip_fallback_total",
+			Help: "Total number of requests whose configured client IP header was unusable, falling back to RemoteAddr",
+		},
+		[]string{"reason"},
+	)
 	websocketConnections = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "websocket_connections_active",
@@ -116,6 +124,11 @@ func HTTPRequest(method, path string, status int, d time.Duration) {
 // 請求被 rate limit 規則擋下
 func RateLimited(rule string) {
 	rateLimitedTotal.WithLabelValues(rule).Inc()
+}
+
+// 有設定 client IP header 但這次請求用不了，退回 RemoteAddr；reason 是 httpx.ClientIPFallback*
+func ClientIPFallback(reason string) {
+	clientIPFallbackTotal.WithLabelValues(reason).Inc()
 }
 
 // 訊息廣播 PUBLISH 到 Redis 失敗

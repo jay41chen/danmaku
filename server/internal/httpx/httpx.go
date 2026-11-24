@@ -51,23 +51,38 @@ func DecodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	return json.NewDecoder(r.Body).Decode(dst)
 }
 
-// ClientIP 回傳用來做限流的 client IP
+// ClientIP 失敗退回 RemoteAddr 的原因（metric label 與 log 都用這兩個值）
+const (
+	ClientIPFallbackMissing    = "missing"    // 有設定 header，但請求沒帶（或值是空字串）
+	ClientIPFallbackUnparsable = "unparsable" // 有設定 header 也有值，但不是合法的單一 IP
+)
+
+// ClientIP 回傳用來做限流的 client IP，以及是否退回了 RemoteAddr
 // trustedHeaderKey 是要信任的 header 名稱（例如 "X-Real-IP"）：
 //   - 只有在前面有我們自己的 proxy 會「覆蓋」這個 header 時才能設定，否則 client 可以偽造
-//   - 空字串代表不信任任何 header，只用 TCP 連線對端的位址
-func ClientIP(r *http.Request, trustedHeaderKey string) string {
+//   - 空字串代表不信任任何 header，只用 TCP 連線對端的位址（不算異常，fallback 回 ""）
+//
+// fallback 非空代表「有設定 header 卻用不了」，值是 ClientIPFallbackMissing / ClientIPFallbackUnparsable：
+// 這時 ip 是 RemoteAddr，在 PaaS 上通常是 proxy 的 IP，所有人會共用同一個限流 bucket，呼叫端要讓這件事看得見
+func ClientIP(r *http.Request, trustedHeaderKey string) (ip string, fallback string) {
 	if trustedHeaderKey != "" {
+		value := r.Header.Get(trustedHeaderKey)
 		// 先以parse header的值為主
-		if ip := net.ParseIP(r.Header.Get(trustedHeaderKey)); ip != nil {
-			return ip.String()
+		if parsed := net.ParseIP(value); parsed != nil {
+			return parsed.String(), ""
+		}
+		if value == "" {
+			fallback = ClientIPFallbackMissing
+		} else {
+			fallback = ClientIPFallbackUnparsable
 		}
 	}
 	// 沒設定要信任的 header，或 header 沒帶 / 不是合法 IP：改用 TCP 連線對端的位址
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return r.RemoteAddr, fallback
 	}
-	return host
+	return host, fallback
 }
 
 // 所有「沒登入」的 401 都走這裡，body 和 header 完全一樣：

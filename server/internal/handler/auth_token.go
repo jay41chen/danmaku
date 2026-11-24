@@ -11,7 +11,7 @@ import (
 // 用 refresh token 換一組新的（rotation：舊的作廢，回傳新的 refresh token）
 func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	// 放在最前面：被擋的 IP 連 body 都不用 decode
-	ip := httpx.ClientIP(r, this.trustedHeaderKey)
+	ip := this.clientIP(r)
 	if err := this.auth.CheckRefreshIP(r.Context(), ip); err != nil {
 		if writeIfRateLimited(w, err) {
 			return

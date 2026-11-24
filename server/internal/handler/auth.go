@@ -5,9 +5,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/jay41chen/danmaku/server/internal/httpx"
 	"github.com/jay41chen/danmaku/server/internal/model"
+	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 )
 
 const (
@@ -31,7 +33,8 @@ type authUseCase interface {
 type AuthHandler struct {
 	auth             authUseCase
 	logger           *slog.Logger
-	trustedHeaderKey string // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 httpx.ClientIP）
+	trustedHeaderKey string      // 要信任的 client IP header；空字串 = 只用 RemoteAddr（見 httpx.ClientIP）
+	clientIPWarned   atomic.Bool // client IP header 用不了的 warn log 是否已經印過（每個 process 只印一次）
 }
 
 func NewAuthHandler(auth authUseCase, trustedHeaderKey string) *AuthHandler {
@@ -40,6 +43,26 @@ func NewAuthHandler(auth authUseCase, trustedHeaderKey string) *AuthHandler {
 		logger:           slog.Default().With("component", "auth"),
 		trustedHeaderKey: trustedHeaderKey,
 	}
+}
+
+// 取得限流用的 client IP；有設定 header 卻用不了時留下痕跡：
+// 每次都 +1 metric（label 只有 reason，不會爆）；warn log 每個 process 只印一次，
+// 因為設定錯誤時攻擊者可以一直送壞的 header 來洗 log
+// log 裡的 header 值要截到 64 bytes：server 沒設 MaxHeaderBytes（Go 預設 1 MB），原樣印會被拿來灌 log
+func (this *AuthHandler) clientIP(r *http.Request) string {
+	ip, fallback := httpx.ClientIP(r, this.trustedHeaderKey)
+	if fallback != "" {
+		prom.ClientIPFallback(fallback)
+		if this.clientIPWarned.CompareAndSwap(false, true) {
+			value := r.Header.Get(this.trustedHeaderKey)
+			if len(value) > 64 {
+				value = value[:64]
+			}
+			this.logger.WarnContext(r.Context(), "client ip header unusable, falling back to RemoteAddr",
+				"header", this.trustedHeaderKey, "reason", fallback, "value", value)
+		}
+	}
+	return ip
 }
 
 // register / login 共用的 request body
@@ -83,7 +106,7 @@ type refreshRequest struct {
 // 回 201
 func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	// 做ip的429 check（在 bcrypt 之前擋，不讓攻擊者讓 server 做白工）
-	if err := this.auth.CheckRegisterIP(r.Context(), httpx.ClientIP(r, this.trustedHeaderKey)); err != nil {
+	if err := this.auth.CheckRegisterIP(r.Context(), this.clientIP(r)); err != nil {
 		if writeIfRateLimited(w, err) {
 			return
 		}
@@ -125,7 +148,7 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 // 回 200
 func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// 放在最前面：被擋的 IP 連 body 都不用 decode
-	ip := httpx.ClientIP(r, this.trustedHeaderKey)
+	ip := this.clientIP(r)
 	if err := this.auth.CheckLoginIP(r.Context(), ip); err != nil {
 		if writeIfRateLimited(w, err) {
 			return
