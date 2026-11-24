@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ApiError, apiFetch } from "../api/client";
 import { ROOM_MESSAGES_PATH } from "../config";
 import { useSession } from "../hooks/useSession";
+import * as danmaku from "../realtime/danmaku";
 import * as messages from "../realtime/messages";
 
 const MAX_LEN = 100;
@@ -34,8 +35,11 @@ export function Composer() {
         { auth: true },
       );
       const msg: unknown = await res.json();
-      // WS 廣播也會送到，這裡先加是為了 WS 斷線時自己的訊息也看得到；merge 會依 id 去重
-      if (messages.isMessage(msg)) messages.merge([msg]);
+      // WS 廣播也會送到，這裡先加是為了 WS 斷線時自己的訊息也看得到（也會飛）；merge 與 danmaku 都依 id 去重
+      if (messages.isMessage(msg)) {
+        messages.merge([msg]);
+        danmaku.launch(msg);
+      }
       setInput("");
     } catch (e) {
       if (e instanceof ApiError) {

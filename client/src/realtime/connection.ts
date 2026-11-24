@@ -3,6 +3,7 @@ import { WS_URL, ROOM_MESSAGES_PATH, ROOM_PUBLIC_ID } from "../config";
 import { apiFetch, ApiError } from "../api/client";
 import * as session from "../auth/session";
 import { equalJitter } from "../lib/backoff";
+import * as danmaku from "./danmaku";
 import * as messages from "./messages";
 import * as room from "./room";
 
@@ -239,7 +240,10 @@ function handleFrame(sock: WebSocket, raw: unknown) {
   const payload = frame.payload as Record<string, unknown> | undefined;
   switch (frame.type) {
     case "message":
-      if (messages.isMessage(frame.payload)) messages.merge([frame.payload]);
+      if (messages.isMessage(frame.payload)) {
+        messages.merge([frame.payload]);
+        danmaku.launch(frame.payload);
+      }
       break;
     case "user_hidden":
       // 該使用者在本房被 ban：只在本地移除他的彈幕，不 refetch（GET 本來就會過濾）
@@ -247,6 +251,7 @@ function handleFrame(sock: WebSocket, raw: unknown) {
       // 他會收到，若照做，他自己的彈幕會消失而看出被 ban
       if (typeof payload?.user_id === "number" && payload.user_id !== session.getSnapshot().user?.id) {
         messages.removeByUser(payload.user_id);
+        danmaku.removeByUser(payload.user_id);
       }
       break;
     case "presence":

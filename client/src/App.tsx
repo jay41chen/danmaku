@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as session from "./auth/session";
 import { AuthForm } from "./components/AuthForm";
 import { Composer } from "./components/Composer";
+import { DanmakuStage } from "./components/DanmakuStage";
 import { MessageList } from "./components/MessageList";
 import { RoleRoster } from "./components/RoleRoster";
 import { PopularRooms } from "./components/PopularRooms";
@@ -66,6 +67,7 @@ function App() {
         <>
           {presence !== null && <div>{presence} 人在線</div>}
           <RoleRoster />
+          <DanmakuStage />
           <MessageList />
           <Composer />
         </>

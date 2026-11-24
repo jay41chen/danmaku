@@ -3,6 +3,7 @@ import { putRole } from "../api/roles";
 import { useMessages } from "../hooks/useMessages";
 import { useMyRole } from "../hooks/useMyRole";
 import { useSession } from "../hooks/useSession";
+import * as danmaku from "../realtime/danmaku";
 import * as messages from "../realtime/messages";
 import { runAction } from "../realtime/role";
 
@@ -24,7 +25,10 @@ export function MessageList() {
     const err = await runAction(fn);
     setBusy(false);
     setActionError(err);
-    if (err === null && hideUserId !== undefined) messages.removeByUser(hideUserId);
+    if (err === null && hideUserId !== undefined) {
+      messages.removeByUser(hideUserId);
+      danmaku.removeByUser(hideUserId);
+    }
   };
 
   return (
