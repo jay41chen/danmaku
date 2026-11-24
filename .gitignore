@@ -8,6 +8,7 @@ server/tmp/
 # Enviroment
 .env
 .env.local
+server/.env.test
 
 # OS
 .DS_Store

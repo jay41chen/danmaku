@@ -57,13 +57,11 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX
 if [ "$server_changed" -eq 1 ]; then
 	nc -z localhost 3192 >/dev/null 2>&1 || fail "Postgres (3192) 未啟動，請先 docker compose up -d postgres redis"
 	nc -z localhost 2907 >/dev/null 2>&1 || fail "Redis (2907) 未啟動，請先 docker compose up -d postgres redis"
-	# 一律覆寫（不沿用外部環境）：這兩個變數缺了測試會靜默 SKIP，
+	# 測試環境變數統一由 server/.env.test 提供（test.sh 會載入）；直接跑 go test 沒設這些變數會靜默 SKIP，
 	# 且測試絕不能碰開發用 DB。-p 1 因為 store 測試共用同一個 DB，不能並行。
 	# 不加 -count=1：沒改到的 package 用 Go 的測試快取，只動 DB 資料時要自己加 -count=1 重跑。
-	TEST_DATABASE_URL='postgres://danmaku:danmaku@localhost:3192/danmaku_test?sslmode=disable'
-	TEST_REDIS_URL='redis://localhost:2907/15'
-	export TEST_DATABASE_URL TEST_REDIS_URL
-	(cd "$root/server" && go test -race -p 1 ./...) || fail "server go test"
+	[ -f "$root/server/.env.test" ] || fail "找不到 server/.env.test，請先 cd server && cp .env.test.example .env.test"
+	"$root/server/test.sh" || fail "server go test"
 fi
 
 if [ "$client_changed" -eq 1 ]; then
