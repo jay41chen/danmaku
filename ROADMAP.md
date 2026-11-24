@@ -267,7 +267,8 @@
 
 > 知道、刻意先不做（2026-11-03 從 W5 移入）
 
-- [ ] 彈幕層（2026-11-17，Q494 / Q500 A）：client 目前只有訊息列表，功能上等於聊天室。要做：文字橫向飛過、分軌道避免重疊、太密時抽樣；`resync` 補回來的舊訊息只進列表、不飛。純前端，不影響後端；產品定位已經按「彈幕、送達盡力而為」決定（[ADR 0018](docs/design/0018-redis-restart-best-effort-resync.md)）。M10 收尾後決定要不要排成 milestone
+- [x] 彈幕層（✅ 2026-11-24，Q598–Q610；2026-11-17，Q494 / Q500 A）：列表上方加 320px 舞台、10 條軌道。只有即時訊息會飛（WS `message` frame、自己 POST 的回應，依 id 去重）；開房、`join_ok`、`resync` 撈的歷史只進列表。固定時間模型（每則 8 秒，越長越快），照 bilibili DanmakuFlameMaster 檢查進場（前一則尾巴已進場 + 16px）和離場（追不上前一則）兩個條件，每條軌道只需比最後一則。軌道全滿就丟掉（只進列表，盡力而為，同 [ADR 0018](docs/design/0018-redis-restart-best-effort-resync.md)）；自己的訊息一定飛（硬塞進最早開始的那條，可能重疊）；分頁隱藏時不飛；ban 時舞台上的也移除。DOM + Web Animations API，不進 React state，`textContent` 放 `<bdi>`。瀏覽器實測：12 則同時送出 → 10 則飛、2 則丟、列表 12 則，50 ms 取樣 1138 次重疊 0；重新整理撈回 21 則歷史不飛；自己的飛一次且有外框；ban 後 1 秒內舞台清空
+- [ ] 彈幕層後續（2026-11-24，Judge 觀察）：視窗 resize 時飛行中的彈幕沿用舊寬度，同軌道可能短暫重疊（要修就在軌道記錄起飛時的 W）；自己的訊息硬塞後該軌道的「只比最後一則」不再保證；每則 `offsetWidth` 會強制 layout，高頻時沒量過成本；`canPlace` / `pickLane` 是純函式，加 vitest 時先測它們（見下方 client 測試框架）
 
 - [x] 延後補發 resync（✅ 2026-11-23，Q543–Q549，[ADR 0020](docs/design/0020-redis-blackhole-gray-failure.md) Fix 2；2026-11-17，Q503 / Q504，[ADR 0018](docs/design/0018-redis-restart-best-effort-resync.md)）：publish 失敗的 server 記「房間 X 從 T 開始有訊息沒送出去」，下次對這間房 publish 成功時補發一則 `resync`（經 Redis，所有 server 的 viewer 都收到）。補的是：Redis 恢復後發送比接收晚恢復（M10b 3 次分別落後約 0.06～0.63 秒，client 的 0～2 秒 jitter 只降低機率：落後約 0.5～0.6 秒那次 6/10 個 viewer 缺最後 1～3 則；落後只有 0.05～0.18 秒那次全補）；以及 Redis 沒斷、單次 publish 失敗。限制：冷清的房間要等下一則才補發；server 死掉就忘了。不選重送訊息本身（要有上限的佇列、server 死掉一樣丟）
 
