@@ -286,7 +286,7 @@
 - [ ] 熱門排行分頁（2026-11-16，M8 只做前 N 名）：每分鐘一份排行快照，cursor = 快照版本 + 名次。要處理：快照放 Redis 讓所有 server 看得到（翻頁可能換台）；翻到一半快照換新（舊快照多留一陣子，或回錯誤從頭翻）；誰產生快照（`SET NX` 搶，或結果跟誰做無關）；0 人的房間接在後面照建立時間排，cursor 要分兩段；列表人數最舊 1 分鐘、房內 5 秒，會對不上。等第 50 名之後真的有人在翻再做
 
 - [ ] prod 主機上重跑 `resync-spike`，決定 `pool_max_conns`（2026-11-24，Q584 A，ADR 0021）：這次的數字來自 MacBook Air M1（4 顆效能核心、loadtest 和 server 同一台），只能比較前後；上線檢查清單：`DATABASE_URL` 加 `pool_max_conns`，從 CPU 數 × 2 開始實測
-- [ ] 限流在 server 過載時 fail open（2026-11-24，ADR 0021）：Redis 沒壞、只是 server 太忙時，限流呼叫超過 200 ms 也會放行，等於最需要限流的時候限流自動關掉。方向：分辨「Redis 連不到」和「server 太忙」、過載時 fail closed，或加 server 本機的限流
+- [x] 限流在 server 過載時 fail open（✅ 2026-11-24，Q618–Q628，[ADR 0022](docs/design/0022-auth-limiter-fails-closed.md)：login / register 的規則 fail closed、回 503 `auth_unavailable` 不送 Retry-After；refresh、發彈幕維持 fail open（發彈幕過載時仍會放行，Q624 接受：後果是洗版、不跑 bcrypt）；新 metric `rate_limiter_errors_total{rule}`；只跑單元測試）。原本記的：Redis 沒壞、只是 server 太忙時，限流呼叫超過 200 ms 也會放行，等於最需要限流的時候限流自動關掉。方向：分辨「Redis 連不到」和「server 太忙」、過載時 fail closed，或加 server 本機的限流
 - [ ] 流量突然拉高當觸發點（2026-11-24，ADR 0021）：壓測工具的發文速率從 0 直接跳到全速，還沒測過慢慢爬升會不會讓故障前的偶發過載消失
 - [x] 測試用的 env 改放 repo 內、被 gitignore 的 `server/.env.test`，加一個自動載入它的測試指令（2026-11-24，Q582 A）：現在放在 session 的暫存目錄（`/private/tmp` 底下），會被系統清掉，每次要重建；內容只有本機 compose 的帳密和 `danmaku_test` / Redis db 15。不選測試程式碼內建預設值：帳密會寫死進公開的程式碼，而且沒設 env 就 skip 的保護機制會消失。✅ 2026-11-24：`server/.env.test.example`（commit）→ 本機 `cp` 成 `.env.test`；`server/test.sh` 載入後跑 `go test -race -p 1`（參數原樣傳下去），找不到 `.env.test` 直接報錯不 fallback；pre-push 改呼叫 `test.sh`，原本寫死在 hook 的兩行刪掉，設定只剩一個來源（Q594–Q596 A）。補充：本機帳密早就在 `docker-compose.yml` 和 pre-push 裡，所以這項真正解決的是「單一來源」和「手動跑不會靜默 skip」
 - [ ] 用 k6 寫壓測情境（2026-11-06，M6 決定先用 Go 自己寫）：業界常見，之後想學工具或壓 HTTP API 時再試
