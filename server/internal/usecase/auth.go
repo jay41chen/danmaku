@@ -16,10 +16,10 @@ import (
 // 限流規則（機制在 internal/ratelimit）
 // 匯出：規則由 use case 擁有，其他 package（例如 handler 測試）只讀
 var (
-	LoginIPRule       = ratelimit.Rule{Name: "login:ip", Limit: 20, Window: time.Minute}            // 一台機器狂試很多帳號
-	LoginUsernameRule = ratelimit.Rule{Name: "login:username", Limit: 10, Window: 15 * time.Minute} // 很多 IP 一起猜同一個帳號
-	RegisterIPRule    = ratelimit.Rule{Name: "register:ip", Limit: 5, Window: time.Hour}            // 一台機器狂註冊垃圾帳號
-	RefreshIPRule     = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute}          // 一台機器狂猜 refresh token
+	LoginIPRule       = ratelimit.Rule{Name: "login:ip", Limit: 20, Window: time.Minute, FailClosed: true}            // 一台機器狂試很多帳號
+	LoginUsernameRule = ratelimit.Rule{Name: "login:username", Limit: 10, Window: 15 * time.Minute, FailClosed: true} // 很多 IP 一起猜同一個帳號
+	RegisterIPRule    = ratelimit.Rule{Name: "register:ip", Limit: 5, Window: time.Hour, FailClosed: true}            // 一台機器狂註冊垃圾帳號
+	RefreshIPRule     = ratelimit.Rule{Name: "refresh:ip", Limit: 10, Window: time.Minute}                            // 一台機器狂猜 refresh token
 )
 
 const (
@@ -79,28 +79,31 @@ func NewAuthUseCase(store authStore, limiter authLimiter, tokens tokenIssuer) *A
 	}
 }
 
-// 註冊前先問這個 IP 的限流；被擋回 *model.RateLimitedError，否則 nil
+// 註冊前先問這個 IP 的限流；被擋回 *model.RateLimitedError；limiter 壞掉且規則 fail closed 回 model.ErrRateLimiterUnavailable；否則 nil
 // 在 bcrypt 之前擋，不讓攻擊者讓 server 做白工；用途：POST /register 最前面（decode body 之前）
 func (this *AuthUseCase) CheckRegisterIP(ctx context.Context, ip string) error {
 	return this.checkIP(ctx, RegisterIPRule, ip)
 }
 
-// 登入前先問這個 IP 的限流；被擋回 *model.RateLimitedError，否則 nil
+// 登入前先問這個 IP 的限流；被擋回 *model.RateLimitedError；limiter 壞掉且規則 fail closed 回 model.ErrRateLimiterUnavailable；否則 nil
 // 放在 decode body 之前：被擋的 IP 連 body 都不用 decode；格式錯誤的請求也算這個 IP 的一次失敗（不 Refund）
 // 用途：POST /login 最前面
 func (this *AuthUseCase) CheckLoginIP(ctx context.Context, ip string) error {
 	return this.checkIP(ctx, LoginIPRule, ip)
 }
 
-// refresh 前先問這個 IP 的限流；被擋回 *model.RateLimitedError，否則 nil
+// refresh 前先問這個 IP 的限流；被擋回 *model.RateLimitedError，否則 nil（refresh 規則 fail open：limiter 壞掉時放行，已登入的人不受 Redis 影響）
 // 放在 decode body 之前，理由同 CheckLoginIP；用途：POST /refresh 最前面
 func (this *AuthUseCase) CheckRefreshIP(ctx context.Context, ip string) error {
 	return this.checkIP(ctx, RefreshIPRule, ip)
 }
 
-// 問 IP 規則放不放行；log 帶 client_ip（HTTP 層的 RemoteAddr 在 nginx 後面只會是 nginx 的 IP）
+// 問 IP 規則放不放行（limiter 壞掉時照規則 fail open / fail closed，後者回 model.ErrRateLimiterUnavailable）；log 帶 client_ip（HTTP 層的 RemoteAddr 在 nginx 後面只會是 nginx 的 IP）
 func (this *AuthUseCase) checkIP(ctx context.Context, rule ratelimit.Rule, ip string) error {
-	allowed, retryAfter := ratelimit.Check(ctx, this.limiter, this.logger, rule, ip, "client_ip", ip)
+	allowed, retryAfter, err := ratelimit.Check(ctx, this.limiter, this.logger, rule, ip, "client_ip", ip)
+	if err != nil {
+		return err
+	}
 	if !allowed {
 		return &model.RateLimitedError{RetryAfter: retryAfter}
 	}
@@ -148,7 +151,10 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 
 	// 轉小寫：GetUser 不分大小寫，key 也要統一，不然換大小寫（Jay / JAY）就能多猜
 	lowerName := strings.ToLower(username)
-	allowed, retryAfter := ratelimit.Check(ctx, this.limiter, this.logger, LoginUsernameRule, lowerName, "client_ip", ip)
+	allowed, retryAfter, err := ratelimit.Check(ctx, this.limiter, this.logger, LoginUsernameRule, lowerName, "client_ip", ip)
+	if err != nil {
+		return model.User{}, model.TokenPair{}, err
+	}
 	if !allowed {
 		return model.User{}, model.TokenPair{}, &model.RateLimitedError{RetryAfter: retryAfter}
 	}

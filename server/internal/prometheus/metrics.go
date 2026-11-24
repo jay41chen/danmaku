@@ -35,6 +35,14 @@ var (
 		},
 		[]string{"rule"},
 	)
+	// label 只放規則名稱，理由同 rateLimitedTotal
+	rateLimiterErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "rate_limiter_errors_total",
+			Help: "Total number of rate limiter errors (Redis failure or timeout), whether the request was then allowed or rejected",
+		},
+		[]string{"rule"},
+	)
 	// label 只有 missing / unparsable 兩個值（httpx.ClientIPFallback*），不放 header 的值：值是 client 控制的字串
 	clientIPFallbackTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -124,6 +132,11 @@ func HTTPRequest(method, path string, status int, d time.Duration) {
 // 請求被 rate limit 規則擋下
 func RateLimited(rule string) {
 	rateLimitedTotal.WithLabelValues(rule).Inc()
+}
+
+// 限流器（Redis）出錯或超時；不管之後是放行（fail open）還是擋下（fail closed）都會計
+func RateLimiterError(rule string) {
+	rateLimiterErrorsTotal.WithLabelValues(rule).Inc()
 }
 
 // 有設定 client IP header 但這次請求用不了，退回 RemoteAddr；reason 是 httpx.ClientIPFallback*

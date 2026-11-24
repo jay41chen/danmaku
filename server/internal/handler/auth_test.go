@@ -229,8 +229,10 @@ func TestHandleLoginRateLimit(t *testing.T) {
 		{"retry after rounds up", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 30400 * time.Millisecond}, http.StatusTooManyRequests, "31", []string{ipKey}, nil, nil},
 		// 剩 0 秒也至少回 1，不能叫 client 現在就再試
 		{"retry after at least 1", http.MethodPost, body, &fakeRateLimiter{blockKey: ipKey, retryAfter: 0}, http.StatusTooManyRequests, "1", []string{ipKey}, nil, nil},
-		// fail open：limiter 壞掉時照常登入
-		{"limiter error fails open", http.MethodPost, body, &fakeRateLimiter{err: errors.New("redis down")}, http.StatusOK, "", []string{ipKey, usernameKey}, []string{usernameKey}, []string{ipKey}},
+		// fail closed：limiter 壞掉時回 503，只問過 IP key（fakeRateLimiter 每個 key 都錯，IP 那關就停了），不 reset / refund
+		{"limiter error fails closed", http.MethodPost, body, &fakeRateLimiter{err: errors.New("redis down")}, http.StatusServiceUnavailable, "", []string{ipKey}, nil, nil},
+		// 只有帳號那關的 limiter 壞掉：IP 過了、帳號 Allow 回 err → 一樣 fail closed（LoginUsernameRule.FailClosed）
+		{"username limiter error fails closed", http.MethodPost, body, &fakeRateLimiter{errKey: usernameKey, err: errors.New("redis down")}, http.StatusServiceUnavailable, "", []string{ipKey, usernameKey}, nil, nil},
 		// 成功：帳號 reset、IP 只退還一次（reset IP 的話，攻擊者用自己的帳號登入一次就能把 IP 計數歸零）
 		{"success resets username and refunds ip", http.MethodPost, body, &fakeRateLimiter{}, http.StatusOK, "", []string{ipKey, usernameKey}, []string{usernameKey}, []string{ipKey}},
 		// 失敗的不退：IP 規則等於只數失敗
@@ -250,6 +252,14 @@ func TestHandleLoginRateLimit(t *testing.T) {
 			// 用 Result().Header：它是 WriteHeader 當下送出去的 header；rec.Header() 之後再 Set 也看得到，會漏掉「太晚設」的 bug
 			if got := rec.Result().Header.Get("Retry-After"); tc.wantRetryAfter != "" && got != tc.wantRetryAfter {
 				t.Errorf("Retry-After = %q, want %q", got, tc.wantRetryAfter)
+			}
+			if tc.wantStatus == http.StatusServiceUnavailable {
+				if got := decodeErrorBody(t, rec).Code; got != "auth_unavailable" {
+					t.Errorf("code = %q, want %q", got, "auth_unavailable")
+				}
+				if got := rec.Result().Header.Get("Retry-After"); got != "" {
+					t.Errorf("Retry-After = %q, want empty", got)
+				}
 			}
 			if !slices.Equal(tc.limiter.allowKeys, tc.wantAllowKeys) {
 				t.Errorf("Allow keys = %q, want %q", tc.limiter.allowKeys, tc.wantAllowKeys)
@@ -376,19 +386,30 @@ func TestHandleRegisterRateLimit(t *testing.T) {
 		}
 	})
 
-	t.Run("limiter error fails open", func(t *testing.T) {
+	t.Run("limiter error fails closed", func(t *testing.T) {
+		fake := &fakeDBStore{createID: 7}
 		limiter := &fakeRateLimiter{err: errors.New("redis down")}
-		h := newTestAuthHandler(&fakeDBStore{createID: 7}, limiter, "", testTokens)
+		h := newTestAuthHandler(fake, limiter, "", testTokens)
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(validBody))
 		rec := httptest.NewRecorder()
 
 		h.HandleRegister(rec, req)
 
-		if rec.Code != http.StatusCreated {
-			t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusCreated, rec.Body.String())
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+		}
+		if got := decodeErrorBody(t, rec).Code; got != "auth_unavailable" {
+			t.Errorf("code = %q, want %q", got, "auth_unavailable")
+		}
+		if got := rec.Result().Header.Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After = %q, want empty", got)
 		}
 		if !slices.Equal(limiter.allowKeys, []string{ipKey}) {
 			t.Errorf("Allow keys = %q, want %q", limiter.allowKeys, []string{ipKey})
+		}
+		// 不能走到建帳號
+		if fake.gotUsername != "" {
+			t.Errorf("CreateUser called with %q, want not called", fake.gotUsername)
 		}
 	})
 }

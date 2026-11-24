@@ -112,6 +112,24 @@ func TestHandleRefresh(t *testing.T) {
 			t.Errorf("Rotate called after rate limited, want not called")
 		}
 	})
+
+	// refresh 規則是 fail open（只有 login / register 是 fail closed）：limiter 壞掉時照常 refresh
+	t.Run("limiter error fails open", func(t *testing.T) {
+		fake := &fakeDBStore{rotateUserID: 7}
+		limiter := &fakeRateLimiter{err: errors.New("redis down")}
+		h := newTestAuthHandler(fake, limiter, "", testTokens)
+		req := httptest.NewRequest(http.MethodPost, "/refresh", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+
+		h.HandleRefresh(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("status = %d, want %d (body: %q)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if fake.gotOldHash == "" {
+			t.Error("Rotate not called, want called")
+		}
+	})
 }
 
 // 守住 /refresh 的 log 分支：revoked / duplicate use 要記 Warn（含 user_id、client_ip），

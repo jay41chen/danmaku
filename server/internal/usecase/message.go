@@ -64,7 +64,7 @@ func NewMessageUseCase(store messageStore, notifier messageNotifier, limiter mes
 }
 
 // 發一則訊息：檢查內容 → 限流 → 存 DB → 廣播
-// 內容不合法回 *model.CodedError；被限流回 *model.RateLimitedError；其他 store 的 error 原樣回傳
+// 內容不合法回 *model.CodedError；被限流回 *model.RateLimitedError；限流查不到結果且規則是 fail closed 回 model.ErrRateLimiterUnavailable；其他 store 的 error 原樣回傳
 // 用途：POST /rooms/{public_id}/messages
 func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
 	// client 也會檢查，但那只是 UX；server 才是防線（curl 可以繞過 client）
@@ -77,8 +77,16 @@ func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userI
 	// 兩條規則都要問（不是第一條擋住就停）：被擋時 Retry-After 要給比較長的那個，
 	// 只回短的 client 馬上重試又會被另一條擋
 	value := strconv.FormatInt(userID, 10)
-	burstOK, burstRetry := ratelimit.Check(ctx, this.limiter, this.logger, MessageBurstRule, value)
-	sustainOK, sustainRetry := ratelimit.Check(ctx, this.limiter, this.logger, MessageSustainRule, value)
+	burstOK, burstRetry, burstErr := ratelimit.Check(ctx, this.limiter, this.logger, MessageBurstRule, value)
+	sustainOK, sustainRetry, sustainErr := ratelimit.Check(ctx, this.limiter, this.logger, MessageSustainRule, value)
+	// 只有 FailClosed 的規則會回 err（現在訊息的規則都是 fail open，所以不會發生）；
+	// 原樣往上回，handler 翻成 503，不要被當成 429
+	if burstErr != nil {
+		return model.Message{}, burstErr
+	}
+	if sustainErr != nil {
+		return model.Message{}, sustainErr
+	}
 	if !burstOK || !sustainOK {
 		return model.Message{}, &model.RateLimitedError{RetryAfter: max(burstRetry, sustainRetry)}
 	}

@@ -16,7 +16,7 @@ func (this *AuthHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		if writeIfRateLimited(w, err) {
 			return
 		}
-		// CheckRefreshIP 只會回 RateLimitedError；萬一不是，當系統錯誤
+		// CheckRefreshIP 只會回 RateLimitedError（refresh 規則 fail open）；萬一不是，當系統錯誤
 		this.logger.ErrorContext(r.Context(), "refresh failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return

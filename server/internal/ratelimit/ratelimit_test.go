@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
 )
 
@@ -55,10 +56,10 @@ func TestCheckAllowed(t *testing.T) {
 	l := &fakeLimiter{allowed: true}
 	logger, buf := newBufLogger()
 
-	ok, retry := Check(context.Background(), l, logger, testRule, "v")
+	ok, retry, err := Check(context.Background(), l, logger, testRule, "v")
 
-	if !ok || retry != 0 {
-		t.Errorf("got %v / %v, want true / 0", ok, retry)
+	if !ok || retry != 0 || err != nil {
+		t.Errorf("got %v / %v / %v, want true / 0 / nil", ok, retry, err)
 	}
 	if l.gotKey != "rl:test:rule:v" || l.gotLimit != 5 || l.gotWindow != time.Minute {
 		t.Errorf("Allow got %q/%d/%v", l.gotKey, l.gotLimit, l.gotWindow)
@@ -69,16 +70,21 @@ func TestCheckAllowed(t *testing.T) {
 }
 
 func TestCheckFailsOpenOnError(t *testing.T) {
+	rule := Rule{Name: "test:open", Limit: 5, Window: time.Minute}
 	l := &fakeLimiter{err: errors.New("redis down")}
 	logger, buf := newBufLogger()
+	before := promtest.RateLimiterErrorCount(rule.Name)
 
-	ok, retry := Check(context.Background(), l, logger, testRule, "v")
+	ok, retry, err := Check(context.Background(), l, logger, rule, "v")
 
-	if !ok || retry != 0 {
-		t.Errorf("got %v / %v, want true / 0", ok, retry)
+	if !ok || retry != 0 || err != nil {
+		t.Errorf("got %v / %v / %v, want true / 0 / nil", ok, retry, err)
+	}
+	if got := promtest.RateLimiterErrorCount(rule.Name); got != before+1 {
+		t.Errorf("error metric = %v, want %v", got, before+1)
 	}
 	out := buf.String()
-	for _, want := range []string{"rate limiter failed, fail open", "rule=test:rule", "key=rl:test:rule:v", "redis down"} {
+	for _, want := range []string{"rate limiter failed, fail open", "rule=test:open", "key=rl:test:open:v", "redis down"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log %q missing %q", out, want)
 		}
@@ -91,10 +97,10 @@ func TestCheckBlockedCountsMetricAndLogsAttrs(t *testing.T) {
 	logger, buf := newBufLogger()
 	before := promtest.RateLimitedCount(rule.Name)
 
-	ok, retry := Check(context.Background(), l, logger, rule, "v", "remote_addr", "1.2.3.4")
+	ok, retry, err := Check(context.Background(), l, logger, rule, "v", "remote_addr", "1.2.3.4")
 
-	if ok || retry != 3*time.Second {
-		t.Errorf("got %v / %v, want false / 3s", ok, retry)
+	if ok || retry != 3*time.Second || err != nil {
+		t.Errorf("got %v / %v / %v, want false / 3s / nil", ok, retry, err)
 	}
 	if got := promtest.RateLimitedCount(rule.Name); got != before+1 {
 		t.Errorf("metric = %v, want %v", got, before+1)
@@ -113,11 +119,11 @@ func TestCheckFailsOpenOnTimeout(t *testing.T) {
 	logger, buf := newBufLogger()
 
 	start := time.Now()
-	ok, retry := Check(context.Background(), l, logger, testRule, "v")
+	ok, retry, err := Check(context.Background(), l, logger, testRule, "v")
 	elapsed := time.Since(start)
 
-	if !ok || retry != 0 {
-		t.Errorf("got %v / %v, want true / 0", ok, retry)
+	if !ok || retry != 0 || err != nil {
+		t.Errorf("got %v / %v / %v, want true / 0 / nil", ok, retry, err)
 	}
 	if elapsed < checkTimeout-20*time.Millisecond || elapsed > time.Second {
 		t.Errorf("Check took %v, want about %v (< 1s)", elapsed, checkTimeout)
@@ -133,5 +139,53 @@ func TestCheckFailsOpenOnTimeout(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("log %q missing %q", out, want)
 		}
+	}
+}
+
+// FailClosed 規則：limiter 出錯時擋下並回 ErrRateLimiterUnavailable
+func TestCheckFailsClosedOnError(t *testing.T) {
+	rule := Rule{Name: "test:closed", Limit: 5, Window: time.Minute, FailClosed: true}
+	l := &fakeLimiter{err: errors.New("redis down")}
+	logger, buf := newBufLogger()
+	before := promtest.RateLimiterErrorCount(rule.Name)
+
+	ok, retry, err := Check(context.Background(), l, logger, rule, "v")
+
+	if ok || retry != 0 || !errors.Is(err, model.ErrRateLimiterUnavailable) {
+		t.Errorf("got %v / %v / %v, want false / 0 / ErrRateLimiterUnavailable", ok, retry, err)
+	}
+	if got := promtest.RateLimiterErrorCount(rule.Name); got != before+1 {
+		t.Errorf("error metric = %v, want %v", got, before+1)
+	}
+	out := buf.String()
+	for _, want := range []string{"rate limiter failed, fail closed", "rule=test:closed", "key=rl:test:closed:v", "redis down"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q missing %q", out, want)
+		}
+	}
+}
+
+// FailClosed 規則 + Redis 不回應：一樣在 checkTimeout 內放棄，並回 ErrRateLimiterUnavailable
+func TestCheckFailsClosedOnTimeout(t *testing.T) {
+	rule := Rule{Name: "test:closed:timeout", Limit: 5, Window: time.Minute, FailClosed: true}
+	l := &blockingLimiter{}
+	logger, buf := newBufLogger()
+	before := promtest.RateLimiterErrorCount(rule.Name)
+
+	start := time.Now()
+	ok, retry, err := Check(context.Background(), l, logger, rule, "v")
+	elapsed := time.Since(start)
+
+	if ok || retry != 0 || !errors.Is(err, model.ErrRateLimiterUnavailable) {
+		t.Errorf("got %v / %v / %v, want false / 0 / ErrRateLimiterUnavailable", ok, retry, err)
+	}
+	if elapsed < checkTimeout-20*time.Millisecond || elapsed > time.Second {
+		t.Errorf("Check took %v, want about %v (< 1s)", elapsed, checkTimeout)
+	}
+	if got := promtest.RateLimiterErrorCount(rule.Name); got != before+1 {
+		t.Errorf("error metric = %v, want %v", got, before+1)
+	}
+	if out := buf.String(); !strings.Contains(out, "rate limiter failed, fail closed") {
+		t.Errorf("log %q missing fail closed message", out)
 	}
 }

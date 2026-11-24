@@ -110,7 +110,7 @@ func (this *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) 
 		if writeIfRateLimited(w, err) {
 			return
 		}
-		// CheckRegisterIP 只會回 RateLimitedError；萬一不是，當系統錯誤
+		// CheckRegisterIP 只會回 RateLimitedError 或 ErrRateLimiterUnavailable；萬一不是，當系統錯誤
 		this.logger.ErrorContext(r.Context(), "register failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
@@ -153,7 +153,7 @@ func (this *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		if writeIfRateLimited(w, err) {
 			return
 		}
-		// CheckLoginIP 只會回 RateLimitedError；萬一不是，當系統錯誤
+		// CheckLoginIP 只會回 RateLimitedError 或 ErrRateLimiterUnavailable；萬一不是，當系統錯誤
 		this.logger.ErrorContext(r.Context(), "login failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return

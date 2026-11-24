@@ -102,6 +102,10 @@ func (this *CodedError) Error() string {
 	return this.Message
 }
 
+// 限流器（Redis）出錯或超時、而且這條規則是 fail closed 時，ratelimit.Check 回這個；handler 翻成 503
+// 目前只有 auth 的規則（login / register）是 fail closed，其他規則 fail open 不會回這個
+var ErrRateLimiterUnavailable = errors.New("rate limiter unavailable")
+
 // 限流規則擋住時，use case 回傳這個；handler 翻成 429 + Retry-After
 // RetryAfter 是「所有被擋的規則裡最長的等待時間」，只回短的 client 馬上重試又會被另一條擋
 type RateLimitedError struct {
