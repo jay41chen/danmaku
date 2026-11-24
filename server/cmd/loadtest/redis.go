@@ -22,7 +22,7 @@ import (
 
 // -scenario redis：Redis 在跑到一半時被外部（deploy/fault/redis.sh）stop / pause，觀察 POST、WS 漏收、resync 與補撈。
 // 每台 server 各 -redis-viewers 條 WS 觀眾進同一個房間，以 -redis-rate 持續發帶序號 marker 的彈幕（step 固定 0）。
-// 觀眾不重連；收到 resync frame 時照 web client 的做法：隨機等 [0, -redis-resync-delay-max) 再 GET /rooms/{id}/messages（最新歷史），把撈到的 marker 另外記成「補回」。
+// 觀眾不重連；收到 resync frame 時照 web client 的做法：等 -redis-resync-delay-min 加隨機 [0, -redis-resync-delay-max) 再 GET /rooms/{id}/messages（最新歷史），把撈到的 marker 另外記成「補回」。
 // 已有等待中的補撈就忽略後來的 resync（它會在之後才觸發，已涵蓋）；補撈已經開始的不算，仍會另排一次。
 // 整段期間每秒讀每台 server 的 /metrics。這個情境不做有效性判定（沒有 CPU 檢查），只收資料。
 
@@ -380,7 +380,8 @@ type redisMetricSample struct {
 type redisSummary struct {
 	Start             string         `json:"start"` // t_s = 0：poster 的排程起點
 	Rate              float64        `json:"rate_msg_per_sec"`
-	ResyncDelayMax    string         `json:"resync_delay_max"` // 觀眾收到 resync 後隨機延遲撈歷史的上限（"0s" = 立刻撈）
+	ResyncDelayMin    string         `json:"resync_delay_min"` // 觀眾收到 resync 後固定等待的時間（min 與 max 都是 "0s" = 立刻撈）
+	ResyncDelayMax    string         `json:"resync_delay_max"` // 固定等待之後再加的隨機延遲上限（[0, max)）
 	DurationS         float64        `json:"duration_s"`
 	Viewers           int            `json:"viewers"`
 	Posts             int            `json:"posts_scheduled"`
@@ -639,7 +640,8 @@ type redisObserver struct {
 	run    string
 	room   string
 
-	// 收到 resync 後延遲撈歷史的上限；0 = 立刻撈（不去重，和舊行為一致）
+	// 收到 resync 後撈歷史前等 resyncDelayMin + random[0, resyncDelayMax)；兩個都是 0 = 立刻撈（不去重，和舊行為一致）
+	resyncDelayMin time.Duration
 	resyncDelayMax time.Duration
 	// 測試用的注入點：nil 時分別用 rand 與 fetchHistorySeqs
 	delayFn func() time.Duration
@@ -668,8 +670,8 @@ func (o *redisObserver) onFrame(v *viewer, msg []byte, at time.Time) {
 	}
 	// 補撈放在自己的 goroutine，reader 不能被 GET 卡住。
 	// fetchWG.Add 一定要在 reader goroutine 裡同步做（closeAll 之後不會再 Add，fetchWG.Wait 才算得完整）
-	// 是否走去重路徑只看 resyncDelayMax，不看抽到的延遲（抽到 0 也要清 pending）
-	dedupe := o.resyncDelayMax > 0
+	// 是否走去重路徑只看 resyncDelayMin / resyncDelayMax，不看抽到的延遲（抽到 0 也要清 pending）
+	dedupe := o.resyncDelayMin > 0 || o.resyncDelayMax > 0
 	delay := time.Duration(0)
 	if dedupe {
 		if !st.tryMarkPending() {
@@ -698,12 +700,20 @@ func (o *redisObserver) onFrame(v *viewer, msg []byte, at time.Time) {
 	}()
 }
 
-// [0, resyncDelayMax) 均勻分布的延遲（full jitter）
+// resyncDelayMin + [0, resyncDelayMax) 均勻分布的延遲（固定段合併 resync，隨機段攤開 GET）
 func (o *redisObserver) nextDelay() time.Duration {
 	if o.delayFn != nil {
 		return o.delayFn()
 	}
-	return rand.N(o.resyncDelayMax)
+	return resyncDelay(o.resyncDelayMin, o.resyncDelayMax)
+}
+
+// min + random[0, max)；max <= 0 時沒有隨機段，只剩 min。redisObserver 與 resyncFetcher 共用
+func resyncDelay(min, max time.Duration) time.Duration {
+	if max <= 0 {
+		return min
+	}
+	return min + rand.N(max)
 }
 
 func (o *redisObserver) fetch(server string) ([]int, error) {
@@ -817,7 +827,7 @@ func runRedis(ctx context.Context, o *options, client *http.Client, servers []st
 	room := data.rooms[0]
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
-	obs := &redisObserver{ctx: runCtx, client: client, run: runTag, room: room, resyncDelayMax: o.redisResyncDelayMax, states: map[int]*redisViewerState{}}
+	obs := &redisObserver{ctx: runCtx, client: client, run: runTag, room: room, resyncDelayMin: o.redisResyncDelayMin, resyncDelayMax: o.redisResyncDelayMax, states: map[int]*redisViewerState{}}
 	vp := newViewerPool(viewerConfig{
 		Servers: servers, Rooms: data.rooms[:1], Run: runTag, RampRate: o.rampRate, JoinTimeout: 10 * time.Second, MaxDialing: 128,
 		OnFrame: func(v *viewer, msg []byte, at time.Time) {
@@ -860,6 +870,7 @@ func runRedis(ctx context.Context, o *options, client *http.Client, servers []st
 	}
 	obs.mu.Unlock()
 	report := buildRedisReport(start, o.redisRate, loop, states, servers, samples, sampleErrs)
+	report.Summary.ResyncDelayMin = o.redisResyncDelayMin.String()
 	report.Summary.ResyncDelayMax = o.redisResyncDelayMax.String()
 	// 只有 redis 情境的 poster 直接打每台 server（kill 情境走 nginx，seq → server 對不起來），所以 POST 統計不放在 buildRedisReport
 	postStats := buildPostStatsByServer(loop, servers)
@@ -884,7 +895,7 @@ func fail1(msg string) int {
 func printRedisSummary(w io.Writer, s *redisSummary, scenario, disconnects string) {
 	fmt.Fprintf(w, "\nscenario=%s  start=%s  rate=%.0f msg/s  viewers=%d  posts=%d (201: %d)  post status: %s\n",
 		scenario, s.Start, s.Rate, s.Viewers, s.Posts, s.PostsCreated, formatReasons(s.PostStatus))
-	fmt.Fprintf(w, "resync_delay_max=%s\n", s.ResyncDelayMax)
+	fmt.Fprintf(w, "resync_delay_min=%s resync_delay_max=%s\n", s.ResyncDelayMin, s.ResyncDelayMax)
 	fmt.Fprintf(w, "total: ws_received=%d missing=%d recovered=%d final_missing=%d (older_than_fetch=%d) received_not_201=%d disconnects=%s history_limit=%d\n", s.ReceivedWS, s.Missing, s.Recovered, s.FinalMissing, s.FinalMissingOlder, s.ReceivedNot201, disconnects, s.HistoryLimit)
 }
 

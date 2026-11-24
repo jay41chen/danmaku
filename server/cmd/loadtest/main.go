@@ -57,6 +57,7 @@ type options struct {
 	stuckRate           float64
 	redisViewers        int
 	redisRate           float64
+	redisResyncDelayMin time.Duration
 	redisResyncDelayMax time.Duration
 	killViewers         int
 	killRate            float64
@@ -103,12 +104,13 @@ func parseFlags(args []string) (*options, error) {
 	fs.Float64Var(&o.stuckRate, "stuck-rate", 0, "stuck scenario: messages per second posted to the room (0 = quiet room)")
 	fs.IntVar(&o.redisViewers, "redis-viewers", 5, "redis scenario: WS viewers per server (all in one room)")
 	fs.Float64Var(&o.redisRate, "redis-rate", 5, "redis scenario: messages per second posted to the room")
-	// 對應 client/src/realtime/connection.ts 的 RESYNC_FETCH_DELAY_MAX_MS（兩邊要一起改）
-	fs.DurationVar(&o.redisResyncDelayMax, "redis-resync-delay-max", 2*time.Second, "redis scenario: on a resync frame each viewer waits a random delay in [0, this) before its history fetch, like the web client (0 = fetch immediately)")
+	// 對應 client/src/realtime/connection.ts 的 RESYNC_FETCH_DELAY_MIN_MS / RESYNC_FETCH_DELAY_MAX_MS（兩邊要一起改）
+	fs.DurationVar(&o.redisResyncDelayMin, "redis-resync-delay-min", 2500*time.Millisecond, "redis scenario: on a resync frame each viewer waits min + a random delay in [0, redis-resync-delay-max) before its history fetch, like the web client (min 0 and max 0 = fetch immediately)")
+	fs.DurationVar(&o.redisResyncDelayMax, "redis-resync-delay-max", 2*time.Second, "redis scenario: on a resync frame each viewer waits a random delay in [0, this) on top of redis-resync-delay-min before its history fetch, like the web client (min 0 and max 0 = fetch immediately)")
 	fs.IntVar(&o.killViewers, "kill-viewers", 10, "kill scenario: WS viewers through the entry (by index mod 4: 0 and 1 logged in, 2 and 3 anonymous)")
 	fs.Float64Var(&o.killRate, "kill-rate", 5, "kill scenario: messages per second posted to the room through the entry")
 	fs.StringVar(&o.killEntry, "kill-entry", "http://nginx:80", "kill scenario: URL that viewers' WS and the poster's POST / history GET go through (the nginx in front of the servers); -servers is only used for seeding and /metrics sampling")
-	fs.IntVar(&o.spikeRooms, "spike-rooms", 100, "resync-spike scenario: number of rooms (the jitter is -redis-resync-delay-max)")
+	fs.IntVar(&o.spikeRooms, "spike-rooms", 100, "resync-spike scenario: number of rooms (the wait is -redis-resync-delay-min + jitter -redis-resync-delay-max)")
 	fs.IntVar(&o.spikeViewersPerRoom, "spike-viewers-per-room", 10, "resync-spike scenario: WS viewers per room (spread over -servers)")
 	fs.Float64Var(&o.spikeRoomRate, "spike-room-rate", 1, "resync-spike scenario: messages per second posted to each room")
 	fs.DurationVar(&o.monInterval, "monitor-interval", 5*time.Second, "interval of background ps / docker stats sampling")
@@ -192,20 +194,20 @@ func buildSteps(o *options) ([]stepSpec, error) {
 		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 stuck.go
 		return []stepSpec{{Viewers: o.stuck, Rate: o.stuckRate, Rooms: 1}}, nil
 	case "redis":
-		if o.redisViewers < 1 || o.redisRate <= 0 || o.redisResyncDelayMax < 0 {
-			return nil, fmt.Errorf("-redis-viewers must be >= 1, -redis-rate must be positive and -redis-resync-delay-max must be >= 0")
+		if o.redisViewers < 1 || o.redisRate <= 0 || o.redisResyncDelayMin < 0 || o.redisResyncDelayMax < 0 {
+			return nil, fmt.Errorf("-redis-viewers must be >= 1, -redis-rate must be positive and -redis-resync-delay-min / -redis-resync-delay-max must be >= 0")
 		}
 		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 redis.go
 		return []stepSpec{{Viewers: o.redisViewers * len(splitList(o.servers)), Rate: o.redisRate, Rooms: 1}}, nil
 	case "kill":
-		if o.killViewers < 1 || o.killRate <= 0 || o.redisResyncDelayMax < 0 {
-			return nil, fmt.Errorf("-kill-viewers must be >= 1, -kill-rate must be positive and -redis-resync-delay-max must be >= 0")
+		if o.killViewers < 1 || o.killRate <= 0 || o.redisResyncDelayMin < 0 || o.redisResyncDelayMax < 0 {
+			return nil, fmt.Errorf("-kill-viewers must be >= 1, -kill-rate must be positive and -redis-resync-delay-min / -redis-resync-delay-max must be >= 0")
 		}
 		// 只用來算規模（fd 數、發文用的 users 數）；實際流程見 kill.go
 		return []stepSpec{{Viewers: o.killViewers, Rate: o.killRate, Rooms: 1}}, nil
 	case "resync-spike":
-		if o.spikeRooms < 1 || o.spikeViewersPerRoom < 1 || o.spikeRoomRate <= 0 || o.redisResyncDelayMax < 0 {
-			return nil, fmt.Errorf("-spike-rooms, -spike-viewers-per-room and -spike-room-rate must be positive and -redis-resync-delay-max must be >= 0")
+		if o.spikeRooms < 1 || o.spikeViewersPerRoom < 1 || o.spikeRoomRate <= 0 || o.redisResyncDelayMin < 0 || o.redisResyncDelayMax < 0 {
+			return nil, fmt.Errorf("-spike-rooms, -spike-viewers-per-room and -spike-room-rate must be positive and -redis-resync-delay-min / -redis-resync-delay-max must be >= 0")
 		}
 		// 只用來算規模（fd 數、房間數、發文用的 users 數）；實際流程見 spike.go
 		return []stepSpec{{Viewers: o.spikeRooms * o.spikeViewersPerRoom, Rate: float64(o.spikeRooms) * o.spikeRoomRate, Rooms: o.spikeRooms}}, nil
@@ -374,7 +376,7 @@ func run(args []string) (code int) {
 			"ramp_rate": o.rampRate, "sampled": o.sampled, "max_inflight": o.maxInFlight,
 			"lag_threshold": o.lagThreshold.String(), "tool_cpu_frac": o.toolCPUFrac, "continue": o.cont, "other_cores_limit": o.otherLimit, "require_machine_check": o.requireCheck,
 			"server_pids": pids, "docker_containers": o.containers,
-			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate, "redis_viewers": o.redisViewers, "redis_rate": o.redisRate, "redis_resync_delay_max": o.redisResyncDelayMax.String(),
+			"in_compose": o.inCompose, "stuck": o.stuck, "stuck_rate": o.stuckRate, "redis_viewers": o.redisViewers, "redis_rate": o.redisRate, "redis_resync_delay_min": o.redisResyncDelayMin.String(), "redis_resync_delay_max": o.redisResyncDelayMax.String(),
 			"kill_viewers": o.killViewers, "kill_rate": o.killRate, "kill_entry": killEntry,
 			"spike_rooms": o.spikeRooms, "spike_viewers_per_room": o.spikeViewersPerRoom, "spike_room_rate": o.spikeRoomRate,
 		},

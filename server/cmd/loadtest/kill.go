@@ -648,7 +648,7 @@ func runKill(ctx context.Context, o *options, client *http.Client, servers []str
 	defer cancelRun()
 	viewerCtx, cancelViewers := context.WithCancel(ctx)
 	defer cancelViewers()
-	obs := &redisObserver{ctx: runCtx, client: client, run: runTag, room: room, resyncDelayMax: o.redisResyncDelayMax, states: map[int]*redisViewerState{}}
+	obs := &redisObserver{ctx: runCtx, client: client, run: runTag, room: room, resyncDelayMin: o.redisResyncDelayMin, resyncDelayMax: o.redisResyncDelayMax, states: map[int]*redisViewerState{}}
 	vp := newViewerPool(viewerConfig{Servers: []string{entry}, Rooms: []string{room}, Run: runTag, RampRate: o.rampRate, JoinTimeout: 10 * time.Second, MaxDialing: 128})
 	kr := &killRun{pool: vp, obs: obs, entry: entry, room: room}
 
@@ -721,6 +721,7 @@ func runKill(ctx context.Context, o *options, client *http.Client, servers []str
 	}
 	obs.mu.Unlock()
 	base := buildRedisReport(start, o.killRate, loop, rstates, servers, samples, sampleErrs)
+	base.Summary.ResyncDelayMin = o.redisResyncDelayMin.String()
 	base.Summary.ResyncDelayMax = o.redisResyncDelayMax.String()
 	report := buildKillReport(start, base, states)
 	rep.Kill = &report

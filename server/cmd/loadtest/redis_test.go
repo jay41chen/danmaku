@@ -275,6 +275,46 @@ func TestResyncWhileFetchInFlight(t *testing.T) {
 	}
 }
 
+// resyncDelay 的值域：[min, min+max)；max <= 0 時固定是 min
+func TestResyncDelayRange(t *testing.T) {
+	min, max := 2500*time.Millisecond, 2*time.Second
+	for i := 0; i < 2000; i++ {
+		if d := resyncDelay(min, max); d < min || d >= min+max {
+			t.Fatalf("resyncDelay = %v, want in [%v, %v)", d, min, min+max)
+		}
+	}
+	if d := resyncDelay(min, 0); d != min {
+		t.Errorf("max 0: resyncDelay = %v, want %v", d, min)
+	}
+	if d := resyncDelay(0, 0); d != 0 {
+		t.Errorf("min 0 max 0: resyncDelay = %v, want 0", d)
+	}
+	f := newResyncFetcher(context.Background(), min, max, nil)
+	o := &redisObserver{resyncDelayMin: min, resyncDelayMax: max}
+	for i := 0; i < 200; i++ {
+		if d := f.nextDelay(); d < min || d >= min+max {
+			t.Fatalf("fetcher nextDelay = %v", d)
+		}
+		if d := o.nextDelay(); d < min || d >= min+max {
+			t.Fatalf("observer nextDelay = %v", d)
+		}
+	}
+}
+
+// 只有固定段（max = 0、min > 0）也要走去重路徑
+func TestResyncMinOnlyDedupes(t *testing.T) {
+	var calls atomic.Int32
+	o := newTestObserver(context.Background(), 0, 50*time.Millisecond, &calls)
+	o.resyncDelayMin = time.Second // delayFn 有注入，實際等待用注入值；這裡只驗證去重
+	v := &viewer{idx: 0, server: "http://s"}
+	o.onFrame(v, []byte(resyncFrame), time.Now())
+	o.onFrame(v, []byte(resyncFrame), time.Now())
+	o.fetchWG.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", calls.Load())
+	}
+}
+
 // resyncDelayMax > 0 但抽到的延遲剛好是 0：pending 仍要清掉，之後的 resync 才不會被永遠忽略
 func TestResyncDrawnDelayZeroClearsPending(t *testing.T) {
 	var calls atomic.Int32

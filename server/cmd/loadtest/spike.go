@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
@@ -20,7 +19,7 @@ import (
 // -scenario resync-spike：量 Redis 恢復時的「歷史 GET 尖峰」基準。
 // 每個房間 -spike-viewers-per-room 條 WS 觀眾（共 -spike-rooms 個房間），整個 run 以 -spike-room-rate × 房間數 的總速率發文；
 // Redis 被 deploy/fault/redis.sh 停掉時 publish 失敗，恢復後 server 對每個房間補送 resync frame，
-// 每條觀眾照 web client 的做法隨機等 [0, -redis-resync-delay-max) 再 GET /rooms/{id}/messages。
+// 每條觀眾照 web client 的做法等 -redis-resync-delay-min 加隨機 [0, -redis-resync-delay-max) 再 GET /rooms/{id}/messages。
 // 這裡只量基準（沒有任何快取），看 GET 在時間軸上擠成什麼樣、延遲與失敗長怎樣。
 
 // ---- 可重用元件：resyncFetcher ----
@@ -28,6 +27,12 @@ import (
 // 一次歷史 GET 的實際動作：回傳 HTTP status；傳輸失敗回 error（此時 status 沒有意義）。
 // 回應 body 的內容 fetcher 不關心
 type resyncFetchFunc func(ctx context.Context, server, room string) (status int, err error)
+
+// 某條觀眾收到 resync frame 的第一個與最後一個到達時間，以及收到的 resync 數（只收到一個時，First == Last、Count == 1）
+type resyncArrival struct {
+	First, Last time.Time
+	Count       int
+}
 
 // 一次 resync 補撈的紀錄
 type resyncFetch struct {
@@ -55,11 +60,12 @@ func (f resyncFetch) failKey() string {
 // 收到 resync frame 後的補撈排程器，跟情境無關：每條觀眾一個「補撈等待中」旗標，
 // 規則和 web client（client/src/realtime/connection.ts）與 redisViewerState.tryMarkPending 一致：
 // 已有等待中的補撈就忽略後來的 resync；補撈一開始（GET 發出前）旗標就清掉，所以之後再來的 resync 會另排一次。
-// 和 redisObserver 不同的是：delayMax = 0 時也照樣去重（延遲 0、立刻開始），不保留「不去重」的舊行為。
-// 同時記錄每條觀眾收到幾個 resync frame。所有方法都可以並行呼叫
+// 和 redisObserver 不同的是：delayMin / delayMax 都是 0 時也照樣去重（延遲 0、立刻開始），不保留「不去重」的舊行為。
+// 同時記錄每條觀眾收到幾個 resync frame，以及第一個與最後一個 resync frame 的到達時間（含被「補撈等待中」忽略的）。所有方法都可以並行呼叫
 type resyncFetcher struct {
 	ctx      context.Context
-	delayMax time.Duration // 延遲上限：每次補撈等 [0, delayMax)；<= 0 = 不等
+	delayMin time.Duration // 固定等待：每次補撈等 delayMin + [0, delayMax)
+	delayMax time.Duration // 隨機段上限；<= 0 = 沒有隨機段
 
 	// 測試用的注入點，nil 時用預設：均勻亂數延遲 / 真的等（ctx 取消回 false）/ 真的 GET（呼叫端提供）
 	delayFn func() time.Duration
@@ -70,12 +76,13 @@ type resyncFetcher struct {
 	mu      sync.Mutex
 	pending map[int]bool // viewer idx → 已排定、還沒開始的補撈
 	resyncs map[int]int  // viewer idx → 收到的 resync frame 數（room 相符的）
+	arrival map[int]resyncArrival
 	fetches []resyncFetch
 	wg      sync.WaitGroup
 }
 
-func newResyncFetcher(ctx context.Context, delayMax time.Duration, fetch resyncFetchFunc) *resyncFetcher {
-	return &resyncFetcher{ctx: ctx, delayMax: delayMax, fetchFn: fetch, pending: map[int]bool{}, resyncs: map[int]int{}}
+func newResyncFetcher(ctx context.Context, delayMin, delayMax time.Duration, fetch resyncFetchFunc) *resyncFetcher {
+	return &resyncFetcher{ctx: ctx, delayMin: delayMin, delayMax: delayMax, fetchFn: fetch, pending: map[int]bool{}, resyncs: map[int]int{}, arrival: map[int]resyncArrival{}}
 }
 
 // 判斷一個 WS frame 是不是 room 的 resync：{"type":"resync","payload":{"room":"<public id>"}}。
@@ -104,6 +111,13 @@ func (f *resyncFetcher) OnFrame(viewer int, server, room string, msg []byte, at 
 	}
 	f.mu.Lock()
 	f.resyncs[viewer]++
+	if a, ok := f.arrival[viewer]; ok {
+		a.Last = at
+		a.Count++
+		f.arrival[viewer] = a
+	} else {
+		f.arrival[viewer] = resyncArrival{First: at, Last: at, Count: 1}
+	}
 	if f.pending[viewer] {
 		f.mu.Unlock()
 		return
@@ -144,10 +158,7 @@ func (f *resyncFetcher) nextDelay() time.Duration {
 	if f.delayFn != nil {
 		return f.delayFn()
 	}
-	if f.delayMax <= 0 {
-		return 0
-	}
-	return rand.N(f.delayMax)
+	return resyncDelay(f.delayMin, f.delayMax)
 }
 
 func (f *resyncFetcher) sleep(d time.Duration) bool {
@@ -177,8 +188,8 @@ func (f *resyncFetcher) now() time.Time {
 // 等所有排定或進行中的補撈結束。要在關掉全部 viewer（不會再有 OnFrame）之後呼叫
 func (f *resyncFetcher) Wait() { f.wg.Wait() }
 
-// 目前的紀錄（依 Start 排序）與每條觀眾的 resync 數；都是複本。通常在 Wait 之後呼叫
-func (f *resyncFetcher) Snapshot() (fetches []resyncFetch, resyncs map[int]int) {
+// 目前的紀錄（依 Start 排序）、每條觀眾的 resync 數、每條觀眾第一／最後一個 resync 的到達時間；都是複本。通常在 Wait 之後呼叫
+func (f *resyncFetcher) Snapshot() (fetches []resyncFetch, resyncs map[int]int, arrivals map[int]resyncArrival) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	fetches = slices.Clone(f.fetches)
@@ -187,7 +198,8 @@ func (f *resyncFetcher) Snapshot() (fetches []resyncFetch, resyncs map[int]int) 
 	for k, v := range f.resyncs {
 		resyncs[k] = v
 	}
-	return fetches, resyncs
+	arrivals = maps.Clone(f.arrival)
+	return fetches, resyncs, arrivals
 }
 
 // 錯誤訊息當分類 key：net/http 的 *url.Error 訊息帶整個 URL（含房間 id，每個房間都不一樣），要拆掉內層錯誤才能歸成一類
@@ -234,6 +246,7 @@ type spikeConfigJSON struct {
 	ViewersTotal   int     `json:"viewers_total"`
 	RoomRate       float64 `json:"room_rate_msg_per_sec"`
 	TotalRate      float64 `json:"total_rate_msg_per_sec"`
+	ResyncDelayMin string  `json:"resync_delay_min"`
 	ResyncDelayMax string  `json:"resync_delay_max"`
 	DurationS      float64 `json:"duration_s"`
 }
@@ -268,6 +281,22 @@ type spikeDistribution struct {
 	Gets         map[int]int `json:"gets_to_viewers"`          // 做了幾次 GET → 有幾條觀眾（含 0）
 }
 
+// 一組時間的百分位摘要（毫秒）；n = 樣本數
+type spikeSpan struct {
+	N     int     `json:"n"`
+	P50Ms float64 `json:"p50_ms"`
+	P90Ms float64 `json:"p90_ms"`
+	P95Ms float64 `json:"p95_ms"`
+	MaxMs float64 `json:"max_ms"`
+}
+
+// resync 到達的散布：Spread = 每條（收到 >= 2 個 resync 的）觀眾的「最後 − 第一個」；
+// LastAfterFirst = 每條（收到 >= 1 個 resync 的）觀眾的最後一個 resync，相對於「任一觀眾收到的最早一個 resync」的到達時間
+type spikeResyncSpread struct {
+	Spread         spikeSpan `json:"spread"`
+	LastAfterFirst spikeSpan `json:"last_after_first"`
+}
+
 type spikeServerSummary struct {
 	Server             string          `json:"server"`
 	Viewers            int             `json:"viewers"`
@@ -280,12 +309,14 @@ type spikeServerSummary struct {
 }
 
 type spikeReport struct {
-	Start     string               `json:"start"` // t_s = 0：poster 的排程起點
-	Config    spikeConfigJSON      `json:"config"`
-	Gets      spikeGets            `json:"gets"`
-	Timeline  spikeTimeline        `json:"timeline"`
-	PerViewer spikeDistribution    `json:"per_viewer"`
-	Servers   []spikeServerSummary `json:"servers"`
+	Start     string            `json:"start"` // t_s = 0：poster 的排程起點
+	Config    spikeConfigJSON   `json:"config"`
+	Gets      spikeGets         `json:"gets"`
+	Timeline  spikeTimeline     `json:"timeline"`
+	PerViewer spikeDistribution `json:"per_viewer"`
+	// 見 spikeResyncSpread：用來決定 client 抖動補撈之前的固定合併等待時間
+	ResyncSpread spikeResyncSpread    `json:"resync_spread"`
+	Servers      []spikeServerSummary `json:"servers"`
 	// 非預期斷線的觀眾總數（每條觀眾最多算一次；收尾的 closeAll 不算）
 	Disconnects int    `json:"disconnects"`
 	Note        string `json:"note"`
@@ -324,9 +355,11 @@ type spikeInput struct {
 	Servers []string
 	Fetches []resyncFetch
 	Resyncs map[int]int
-	Posts   map[string]*redisPostStats // 依 server 的 POST 結果（可為 nil）
-	Samples []redisMetricSample
-	SampErr map[string]int
+	// 每條觀眾第一／最後一個 resync 的到達時間（可為 nil）
+	Arrivals map[int]resyncArrival
+	Posts    map[string]*redisPostStats // 依 server 的 POST 結果（可為 nil）
+	Samples  []redisMetricSample
+	SampErr  map[string]int
 	// 非預期斷線的觀眾 idx → 連的 server（可為 nil）
 	Disconnects map[int]string
 }
@@ -342,6 +375,37 @@ func summarizeSpikeLatency(durs []time.Duration) spikeLatency {
 		N: len(sorted), P50Ms: durMs(percentile(sorted, 50)), P90Ms: durMs(percentile(sorted, 90)),
 		P99Ms: durMs(percentile(sorted, 99)), MaxMs: durMs(sorted[len(sorted)-1]),
 	}
+}
+
+// 排序後取 p50/p90/p95/max（nearest-rank，用 percentile）；沒資料回零值
+func summarizeSpan(durs []time.Duration) spikeSpan {
+	if len(durs) == 0 {
+		return spikeSpan{}
+	}
+	sorted := slices.Clone(durs)
+	slices.Sort(sorted)
+	return spikeSpan{
+		N: len(sorted), P50Ms: durMs(percentile(sorted, 50)), P90Ms: durMs(percentile(sorted, 90)),
+		P95Ms: durMs(percentile(sorted, 95)), MaxMs: durMs(sorted[len(sorted)-1]),
+	}
+}
+
+// 算 resync 到達的散布（定義見 spikeResyncSpread）。沒有任何 resync 回零值
+func summarizeResyncSpread(arr map[int]resyncArrival) spikeResyncSpread {
+	var spreads, lasts []time.Duration
+	var earliest time.Time
+	for _, a := range arr {
+		if earliest.IsZero() || a.First.Before(earliest) {
+			earliest = a.First
+		}
+	}
+	for _, a := range arr {
+		lasts = append(lasts, a.Last.Sub(earliest))
+		if a.Count >= 2 { // 收到 >= 2 個 resync 才算 spread（兩個到達時間相同時差為 0）
+			spreads = append(spreads, a.Last.Sub(a.First))
+		}
+	}
+	return spikeResyncSpread{Spread: summarizeSpan(spreads), LastAfterFirst: summarizeSpan(lasts)}
 }
 
 // 把開始時間依 width 分桶，原點是最早的那一筆；回傳每桶的筆數（長度到最晚那筆所在的桶）。沒資料回 nil
@@ -425,6 +489,8 @@ func buildSpikeReport(in spikeInput) spikeReport {
 	}
 	rep.PerViewer = spikeDistribution{ResyncFrames: countDistribution(idxs, in.Resyncs), Gets: countDistribution(idxs, getsByViewer)}
 
+	rep.ResyncSpread = summarizeResyncSpread(in.Arrivals)
+
 	for _, s := range in.Servers {
 		ss := spikeServerSummary{Server: s, Posts: in.Posts[s], MetricSampleErrors: in.SampErr[s]}
 		for _, srv := range in.Viewers {
@@ -446,11 +512,13 @@ func buildSpikeReport(in spikeInput) spikeReport {
 		rep.Disconnects += ss.Disconnects
 		rep.Servers = append(rep.Servers, ss)
 	}
-	rep.Note = "gets = history GETs made after a resync frame (each viewer waits a random [0, resync_delay_max) first; a resync arriving while one is pending is ignored, one arriving after the GET started schedules another); latency_ok = GET start to body read, ok GETs only (status 200); failed_by key = HTTP status or err: <message>. " +
+	rep.Note = "gets = history GETs made after a resync frame (each viewer waits resync_delay_min + a random [0, resync_delay_max) first; a resync arriving while one is pending is ignored, one arriving after the GET started schedules another); latency_ok = GET start to body read, ok GETs only (status 200); failed_by key = HTTP status or err: <message>. " +
 		"gets_per_100ms is bucketed from the first GET start; first/last_get_start_s are relative to start (the poster's schedule origin); peak_per_100ms = max bucket, peak_per_1s = max sum of any 10 consecutive 100ms buckets. " +
 		"per_viewer maps a count to the number of viewers with that count (0 included). servers[].metric_*_delta = last minus first /metrics sample over the whole run; posts = POST outcomes by target server (all rooms). " +
 		"GET latency includes reading and JSON-decoding the response body (tool side, microseconds). GETs use the shared client timeout -post-timeout (default 10s); timed-out GETs appear only under failed_by, not in latency. " +
-		"disconnects = viewers whose WS closed unexpectedly during the run (the final closeAll is not counted, each viewer at most once, no reconnect); viewers with 0 resyncs / 0 GETs may be explained by a disconnect."
+		"disconnects = viewers whose WS closed unexpectedly during the run (the final closeAll is not counted, each viewer at most once, no reconnect); viewers with 0 resyncs / 0 GETs may be explained by a disconnect. " +
+		"resync_spread (purpose: choose the fixed coalescing wait before the client's jittered history fetch): spread = per viewer with >= 2 resync frames, last minus first resync arrival (n = such viewers; counts every resync frame for the viewer's room, including ones ignored because a fetch was pending); " +
+		"last_after_first = per viewer with >= 1 resync, arrival of its LAST resync relative to the earliest resync any viewer received, i.e. how long after recovery the last resync still lands."
 	return rep
 }
 
@@ -468,8 +536,8 @@ func samplesOfServer(samples []redisMetricSample, server string) []redisMetricSa
 // 給人看的摘要（完整資料在 JSON）
 func printSpike(w io.Writer, r *spikeReport) {
 	c := r.Config
-	fmt.Fprintf(w, "\nscenario=resync-spike  start=%s  rooms=%d viewers/room=%d viewers=%d  room_rate=%.1f msg/s (total %.0f)  resync_delay_max=%s  duration=%.0fs\n",
-		r.Start, c.Rooms, c.ViewersPerRoom, c.ViewersTotal, c.RoomRate, c.TotalRate, c.ResyncDelayMax, c.DurationS)
+	fmt.Fprintf(w, "\nscenario=resync-spike  start=%s  rooms=%d viewers/room=%d viewers=%d  room_rate=%.1f msg/s (total %.0f)  resync_delay_min=%s  resync_delay_max=%s  duration=%.0fs\n",
+		r.Start, c.Rooms, c.ViewersPerRoom, c.ViewersTotal, c.RoomRate, c.TotalRate, c.ResyncDelayMin, c.ResyncDelayMax, c.DurationS)
 	g := r.Gets
 	fmt.Fprintf(w, "gets: total=%d ok=%d failed=%d (%s)  latency_ok p50=%.1fms p90=%.1fms p99=%.1fms max=%.1fms\n",
 		g.Total, g.OK, g.Failed, formatReasons(g.FailedBy), g.Latency.P50Ms, g.Latency.P90Ms, g.Latency.P99Ms, g.Latency.MaxMs)
@@ -480,6 +548,9 @@ func printSpike(w io.Writer, r *spikeReport) {
 		fmt.Fprintf(w, "timeline: first_get=t+%.2fs last_get=t+%.2fs peak=%d/100ms %d/1s\n", *t.FirstGetStartS, *t.LastGetStartS, t.PeakPer100ms, t.PeakPer1s)
 	}
 	fmt.Fprintf(w, "per viewer: resync frames -> viewers: %s ; gets -> viewers: %s\n", formatDist(r.PerViewer.ResyncFrames), formatDist(r.PerViewer.Gets))
+	sp, la := r.ResyncSpread.Spread, r.ResyncSpread.LastAfterFirst
+	fmt.Fprintf(w, "resync_spread: viewers with >=2 resyncs=%d  spread(last-first) p50=%.1fms p90=%.1fms p95=%.1fms max=%.1fms\n", sp.N, sp.P50Ms, sp.P90Ms, sp.P95Ms, sp.MaxMs)
+	fmt.Fprintf(w, "resync_spread: last resync after earliest resync (viewers=%d) p50=%.1fms p90=%.1fms p95=%.1fms max=%.1fms\n", la.N, la.P50Ms, la.P90Ms, la.P95Ms, la.MaxMs)
 	for _, sv := range r.Servers {
 		fmt.Fprintf(w, "%s: viewers=%d metrics: resync_sent+%.0f publish_failed+%.0f", sv.Server, sv.Viewers, sv.ResyncSentDelta, sv.PublishFailedDelta)
 		if p := sv.Posts; p != nil {
@@ -519,7 +590,7 @@ func formatDist(m map[int]int) string {
 func runSpike(ctx context.Context, o *options, client *http.Client, servers []string, data *seeded, runTag string, rep *runReport) int {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
-	fetcher := newResyncFetcher(runCtx, o.redisResyncDelayMax, httpResyncFetch(client, runTag))
+	fetcher := newResyncFetcher(runCtx, o.redisResyncDelayMin, o.redisResyncDelayMax, httpResyncFetch(client, runTag))
 	disc := &spikeDisconnects{}
 	vp := newViewerPool(viewerConfig{
 		Servers: servers, Rooms: data.rooms, Run: runTag, RampRate: o.rampRate, JoinTimeout: 10 * time.Second, MaxDialing: 128,
@@ -549,7 +620,7 @@ func runSpike(ctx context.Context, o *options, client *http.Client, servers []st
 	samples, sampleErrs := stopSamplers()
 	vp.closeAll()  // 先關 reader（之後不會再 OnFrame），再等補撈
 	fetcher.Wait() // 進行中的補撈讓它跑完（client 有 timeout）
-	fetches, resyncs := fetcher.Snapshot()
+	fetches, resyncs, arrivals := fetcher.Snapshot()
 
 	viewers := map[int]string{}
 	for _, v := range vp.joinedViewers() {
@@ -559,9 +630,9 @@ func runSpike(ctx context.Context, o *options, client *http.Client, servers []st
 		Start: start,
 		Config: spikeConfigJSON{
 			Rooms: o.spikeRooms, ViewersPerRoom: o.spikeViewersPerRoom, ViewersTotal: total, RoomRate: o.spikeRoomRate,
-			TotalRate: rate, ResyncDelayMax: o.redisResyncDelayMax.String(), DurationS: o.duration.Seconds(),
+			TotalRate: rate, ResyncDelayMin: o.redisResyncDelayMin.String(), ResyncDelayMax: o.redisResyncDelayMax.String(), DurationS: o.duration.Seconds(),
 		},
-		Viewers: viewers, Servers: servers, Fetches: fetches, Resyncs: resyncs,
+		Viewers: viewers, Servers: servers, Fetches: fetches, Resyncs: resyncs, Arrivals: arrivals,
 		Posts:   buildPostStatsByServerRooms(loop, servers, len(data.rooms)),
 		Samples: samples, SampErr: sampleErrs, Disconnects: disc.snapshot(),
 	})

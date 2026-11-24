@@ -29,7 +29,7 @@ type spikeHarness struct {
 func newSpikeHarness(ctx context.Context) *spikeHarness {
 	h := &spikeHarness{sleeps: make(chan chan struct{}, 16), started: make(chan string, 16)}
 	h.fetchFn = func(string) (int, error) { return 200, nil }
-	h.f = newResyncFetcher(ctx, time.Second, func(ctx context.Context, server, room string) (int, error) {
+	h.f = newResyncFetcher(ctx, 0, time.Second, func(ctx context.Context, server, room string) (int, error) {
 		h.started <- server
 		if h.hold != nil {
 			<-h.hold
@@ -70,7 +70,7 @@ func TestResyncFetcherDedupesPending(t *testing.T) {
 	close(h.nextSleep(t))                                                        // 觀眾 7 與 8 各一個
 	close(h.nextSleep(t))
 	h.f.Wait()
-	fetches, resyncs := h.f.Snapshot()
+	fetches, resyncs, _ := h.f.Snapshot()
 	if len(fetches) != 2 {
 		t.Fatalf("fetches = %d, want 2", len(fetches))
 	}
@@ -94,7 +94,7 @@ func TestResyncFetcherNewFetchAfterStart(t *testing.T) {
 	<-h.started
 	close(h.hold)
 	h.f.Wait()
-	fetches, resyncs := h.f.Snapshot()
+	fetches, resyncs, _ := h.f.Snapshot()
 	if len(fetches) != 2 || resyncs[1] != 2 {
 		t.Errorf("fetches = %d resyncs = %v, want 2 and 2", len(fetches), resyncs)
 	}
@@ -112,7 +112,7 @@ func TestResyncFetcherIgnoresOtherFramesAndRooms(t *testing.T) {
 		h.f.OnFrame(1, "http://a", "r1", []byte(msg), time.Unix(1000, 0))
 	}
 	h.f.Wait()
-	fetches, resyncs := h.f.Snapshot()
+	fetches, resyncs, _ := h.f.Snapshot()
 	if len(h.sleeps) != 0 || len(fetches) != 0 || len(resyncs) != 0 {
 		t.Errorf("sleeps=%d fetches=%d resyncs=%v, want none", len(h.sleeps), len(fetches), resyncs)
 	}
@@ -138,7 +138,7 @@ func TestResyncFetcherRecordsResult(t *testing.T) {
 	h.f.OnFrame(1, "http://a", "r1", []byte(resyncR1), sched)
 	close(h.nextSleep(t))
 	h.f.Wait()
-	fetches, _ := h.f.Snapshot()
+	fetches, _, _ := h.f.Snapshot()
 	if len(fetches) != 2 {
 		t.Fatalf("fetches = %d", len(fetches))
 	}
@@ -161,7 +161,7 @@ func TestResyncFetcherCancelDropsPending(t *testing.T) {
 	h.nextSleep(t)
 	cancel()
 	h.f.Wait()
-	if fetches, _ := h.f.Snapshot(); len(fetches) != 0 {
+	if fetches, _, _ := h.f.Snapshot(); len(fetches) != 0 {
 		t.Errorf("a cancelled wait must not fetch: %v", fetches)
 	}
 	h.f.mu.Lock()
@@ -332,7 +332,7 @@ func TestBuildPostStatsByServerRooms(t *testing.T) {
 
 func TestSpikeFlagsAndValidation(t *testing.T) {
 	o, err := parseFlags([]string{"-scenario", "resync-spike"})
-	if err != nil || o.duration != 90*time.Second || o.spikeRooms != 100 || o.spikeViewersPerRoom != 10 || o.spikeRoomRate != 1 || o.redisResyncDelayMax != 2*time.Second {
+	if err != nil || o.duration != 90*time.Second || o.spikeRooms != 100 || o.spikeViewersPerRoom != 10 || o.spikeRoomRate != 1 || o.redisResyncDelayMin != 2500*time.Millisecond || o.redisResyncDelayMax != 2*time.Second {
 		t.Errorf("defaults: %+v err=%v", o, err)
 	}
 	if o, _ := parseFlags([]string{"-scenario", "resync-spike", "-duration", "40s"}); o.duration != 40*time.Second {
@@ -354,6 +354,7 @@ func TestSpikeFlagsAndValidation(t *testing.T) {
 		{spikeRooms: 1, spikeViewersPerRoom: 1, spikeRoomRate: 0},
 		{spikeRooms: 1, spikeViewersPerRoom: 1, spikeRoomRate: -1},
 		{spikeRooms: 1, spikeViewersPerRoom: 1, spikeRoomRate: 1, redisResyncDelayMax: -time.Second},
+		{spikeRooms: 1, spikeViewersPerRoom: 1, spikeRoomRate: 1, redisResyncDelayMin: -time.Second},
 	} {
 		bad.scenario = "resync-spike"
 		if _, err := buildSteps(&bad); err == nil {
@@ -381,5 +382,62 @@ func TestSpikeDisconnects(t *testing.T) {
 	})
 	if rep.Disconnects != 2 || rep.Servers[0].Disconnects != 1 || rep.Servers[1].Disconnects != 1 || rep.Servers[2].Disconnects != 0 {
 		t.Fatalf("disconnects = %d, servers = %+v", rep.Disconnects, rep.Servers)
+	}
+}
+
+func TestResyncFetcherTracksFirstAndLastArrival(t *testing.T) {
+	h := newSpikeHarness(context.Background())
+	t0 := time.Unix(1000, 0)
+	h.f.OnFrame(1, "http://a", "r1", []byte(resyncR1), t0)
+	h.f.OnFrame(1, "http://a", "r1", []byte(resyncR1), t0.Add(30*time.Millisecond)) // 還在等：被忽略，但到達時間仍要記
+	h.f.OnFrame(1, "http://a", "r1", []byte(resyncR1), t0.Add(80*time.Millisecond)) // 同上
+	h.f.OnFrame(2, "http://a", "r1", []byte(resyncR1), t0.Add(10*time.Millisecond)) // 只收到一個：First == Last
+	h.f.OnFrame(3, "http://a", "r1", []byte(resyncOther), t0)                       // 別的房間：不記
+	close(h.nextSleep(t))
+	close(h.nextSleep(t))
+	h.f.Wait()
+	_, _, arr := h.f.Snapshot()
+	if len(arr) != 2 {
+		t.Fatalf("arrivals = %v, want viewers 1 and 2 only", arr)
+	}
+	if a := arr[1]; !a.First.Equal(t0) || !a.Last.Equal(t0.Add(80*time.Millisecond)) || a.Count != 3 {
+		t.Errorf("viewer 1 = %+v", a)
+	}
+	if a := arr[2]; !a.First.Equal(t0.Add(10*time.Millisecond)) || !a.Last.Equal(a.First) || a.Count != 1 {
+		t.Errorf("viewer 2 = %+v", a)
+	}
+}
+
+func TestSummarizeResyncSpread(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	ms := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Millisecond) }
+	arr := map[int]resyncArrival{
+		1: {First: ms(100), Last: ms(100), Count: 1}, // 只有一個 resync：不算 spread，但算 last
+		2: {First: ms(0), Last: ms(40), Count: 2},    // 最早的 resync 在這裡
+		3: {First: ms(20), Last: ms(120), Count: 2},
+		4: {First: ms(50), Last: ms(250), Count: 3},
+		5: {First: ms(30), Last: ms(30), Count: 2}, // 兩個 resync 同時到：算 spread，差為 0
+	}
+	got := summarizeResyncSpread(arr)
+	// spread：0 40 100 200 → n=4，p50=40，p90/p95/max=200
+	if s := got.Spread; s.N != 4 || s.P50Ms != 40 || s.P90Ms != 200 || s.P95Ms != 200 || s.MaxMs != 200 {
+		t.Errorf("spread = %+v", s)
+	}
+	// last 相對最早（0ms）：100 40 120 250 30 → n=5，排序 30 40 100 120 250，p50=100，p95/max=250
+	if l := got.LastAfterFirst; l.N != 5 || l.P50Ms != 100 || l.P95Ms != 250 || l.MaxMs != 250 {
+		t.Errorf("last_after_first = %+v", l)
+	}
+	if empty := summarizeResyncSpread(nil); empty.Spread.N != 0 || empty.LastAfterFirst.N != 0 {
+		t.Errorf("empty = %+v", empty)
+	}
+
+	rep := buildSpikeReport(spikeInput{Start: t0, Viewers: map[int]string{1: "http://a"}, Servers: []string{"http://a"}, Arrivals: arr})
+	if rep.ResyncSpread != got {
+		t.Errorf("report spread = %+v, want %+v", rep.ResyncSpread, got)
+	}
+	var sb strings.Builder
+	printSpike(&sb, &rep)
+	if !strings.Contains(sb.String(), "resync_spread: viewers with >=2 resyncs=4") {
+		t.Errorf("printSpike missing resync_spread:\n%s", sb.String())
 	}
 }
