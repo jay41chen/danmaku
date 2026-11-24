@@ -43,7 +43,10 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://fault:fault@postgres:5432/danmaku_test?sslmode=disable
+      # pgxpool 從 URL 讀 pool_max_conns；未設時 server 用 pgx 預設 max(4, CPU 數)，本機 Docker VM 為 8，
+      # 所以預設 8 讓行為不變；要實驗其他池大小時用 `PG_POOL_MAX_CONNS=32 sh deploy/fault/up.sh`（M10d 池大小實驗）
+      # pool_min_conns 讓 pgxpool 啟動後在背景先把連線開到這個數（預設 0 與 pgx 預設相同）；M10d 用來測「量測開始時大量開新連線」是不是過載的觸發點，例如 `PG_POOL_MAX_CONNS=32 PG_POOL_MIN_CONNS=32 sh deploy/fault/up.sh`
+      DATABASE_URL: postgres://fault:fault@postgres:5432/danmaku_test?sslmode=disable&pool_max_conns=${PG_POOL_MAX_CONNS:-8}&pool_min_conns=${PG_POOL_MIN_CONNS:-0}
       REDIS_URL: redis://redis:6379/15
       JWT_SECRET: ${JWT_SECRET:?run up.sh}
       WS_MAX_CLIENTS: "6000"
@@ -60,7 +63,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://fault:fault@postgres:5432/danmaku_test?sslmode=disable
+      DATABASE_URL: postgres://fault:fault@postgres:5432/danmaku_test?sslmode=disable&pool_max_conns=${PG_POOL_MAX_CONNS:-8}&pool_min_conns=${PG_POOL_MIN_CONNS:-0}
       REDIS_URL: redis://redis:6379/15
       JWT_SECRET: ${JWT_SECRET:?run up.sh}
       WS_MAX_CLIENTS: "6000"
