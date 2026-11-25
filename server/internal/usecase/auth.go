@@ -87,26 +87,26 @@ func NewAuthUseCase(store authStore, limiter authLimiter, tokens tokenIssuer) *A
 
 // 註冊前先問這個 IP 的限流；被擋回 *model.RateLimitedError；limiter 壞掉且規則 fail closed 回 model.ErrRateLimiterUnavailable；否則 nil
 // 在 bcrypt 之前擋，不讓攻擊者讓 server 做白工；用途：POST /register 最前面（decode body 之前）
-func (this *AuthUseCase) CheckRegisterIP(ctx context.Context, ip string) error {
-	return this.checkIP(ctx, RegisterIPRule, ip)
+func (u *AuthUseCase) CheckRegisterIP(ctx context.Context, ip string) error {
+	return u.checkIP(ctx, RegisterIPRule, ip)
 }
 
 // 登入前先問這個 IP 的限流；被擋回 *model.RateLimitedError；limiter 壞掉且規則 fail closed 回 model.ErrRateLimiterUnavailable；否則 nil
 // 放在 decode body 之前：被擋的 IP 連 body 都不用 decode；格式錯誤的請求也算這個 IP 的一次失敗（不 Refund）
 // 用途：POST /login 最前面
-func (this *AuthUseCase) CheckLoginIP(ctx context.Context, ip string) error {
-	return this.checkIP(ctx, LoginIPRule, ip)
+func (u *AuthUseCase) CheckLoginIP(ctx context.Context, ip string) error {
+	return u.checkIP(ctx, LoginIPRule, ip)
 }
 
 // refresh 前先問這個 IP 的限流；被擋回 *model.RateLimitedError，否則 nil（refresh 規則 fail open：limiter 壞掉時放行，已登入的人不受 Redis 影響）
 // 放在 decode body 之前，理由同 CheckLoginIP；用途：POST /refresh 最前面
-func (this *AuthUseCase) CheckRefreshIP(ctx context.Context, ip string) error {
-	return this.checkIP(ctx, RefreshIPRule, ip)
+func (u *AuthUseCase) CheckRefreshIP(ctx context.Context, ip string) error {
+	return u.checkIP(ctx, RefreshIPRule, ip)
 }
 
 // 問 IP 規則放不放行（limiter 壞掉時照規則 fail open / fail closed，後者回 model.ErrRateLimiterUnavailable）；log 帶 client_ip（HTTP 層的 RemoteAddr 在 nginx 後面只會是 nginx 的 IP）
-func (this *AuthUseCase) checkIP(ctx context.Context, rule ratelimit.Rule, ip string) error {
-	allowed, retryAfter, err := ratelimit.Check(ctx, this.limiter, this.logger, rule, ip, "client_ip", ip)
+func (u *AuthUseCase) checkIP(ctx context.Context, rule ratelimit.Rule, ip string) error {
+	allowed, retryAfter, err := ratelimit.Check(ctx, u.limiter, u.logger, rule, ip, "client_ip", ip)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func (this *AuthUseCase) checkIP(ctx context.Context, rule ratelimit.Rule, ip st
 // 格式不合法回 *model.CodedError；帳號已存在回 model.ErrUsernameTaken；其他錯誤帶步驟名稱包起來
 // 不把 password 放進任何 error 或 log
 // 用途：POST /register
-func (this *AuthUseCase) Register(ctx context.Context, username, password string) (int64, error) {
+func (u *AuthUseCase) Register(ctx context.Context, username, password string) (int64, error) {
 	if err := auth.ValidateUsername(username); err != nil {
 		return 0, err
 	}
@@ -133,7 +133,7 @@ func (this *AuthUseCase) Register(ctx context.Context, username, password string
 		return 0, fmt.Errorf("hash password: %w", err)
 	}
 
-	id, err := this.store.CreateUser(ctx, username, hash)
+	id, err := u.store.CreateUser(ctx, username, hash)
 	// 已知的 sentinel 原樣回，handler 翻成 409；剩下的才是真的系統錯誤
 	if errors.Is(err, model.ErrUsernameTaken) {
 		return 0, err
@@ -148,7 +148,7 @@ func (this *AuthUseCase) Register(ctx context.Context, username, password string
 // 帳號格式不合法 / 不存在 / 密碼錯都回 model.ErrInvalidCredentials；被帳號限流擋住回 *model.RateLimitedError
 // 其他錯誤帶步驟名稱包起來；ip 用來退還 IP 限流額度（IP 本身的限流在 CheckLoginIP）
 // 用途：POST /login（CheckLoginIP 通過、decode body 之後）
-func (this *AuthUseCase) Login(ctx context.Context, ip, username, password string) (model.User, model.TokenPair, error) {
+func (u *AuthUseCase) Login(ctx context.Context, ip, username, password string) (model.User, model.TokenPair, error) {
 	// 格式規則是公開的（register 會回 400 告知），格式不合法的帳號不可能存在，所以直接回、不洩漏帳號是否存在
 	// 放在 username 限流之前：不讓超長字串變成 Redis key；也不跑 bcrypt、不查 DB
 	if err := auth.ValidateUsername(username); err != nil {
@@ -157,7 +157,7 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 
 	// 轉小寫：GetUser 不分大小寫，key 也要統一，不然換大小寫（Jay / JAY）就能多猜
 	lowerName := strings.ToLower(username)
-	allowed, retryAfter, err := ratelimit.Check(ctx, this.limiter, this.logger, LoginUsernameRule, lowerName, "client_ip", ip)
+	allowed, retryAfter, err := ratelimit.Check(ctx, u.limiter, u.logger, LoginUsernameRule, lowerName, "client_ip", ip)
 	if err != nil {
 		return model.User{}, model.TokenPair{}, err
 	}
@@ -165,11 +165,11 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 		return model.User{}, model.TokenPair{}, &model.RateLimitedError{RetryAfter: retryAfter}
 	}
 
-	user, err := this.store.GetUser(ctx, username)
+	user, err := u.store.GetUser(ctx, username)
 	if errors.Is(err, model.ErrUserNotFound) {
 		// 結果不重要，目的是花跟「密碼錯」一樣的時間
 		// 借以避免讓攻擊者知道錯誤
-		_, _ = this.checkPassword(dummyHash, password)
+		_, _ = u.checkPassword(dummyHash, password)
 		return model.User{}, model.TokenPair{}, model.ErrInvalidCredentials
 	}
 	if err != nil {
@@ -177,7 +177,7 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 	}
 
 	// 有user，檢查密碼是不是正確的
-	success, err := this.checkPassword(user.PasswordHash, password)
+	success, err := u.checkPassword(user.PasswordHash, password)
 	if err != nil {
 		return model.User{}, model.TokenPair{}, fmt.Errorf("check password: %w", err)
 	}
@@ -187,10 +187,10 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 
 	// 先簽 token：簽失敗是 server 的錯（500），這次不算「登入成功」，下面的 Reset / Refund 都不做
 	plain, hash := auth.NewRefreshToken()
-	if err := this.store.CreateRefreshToken(ctx, user.ID, hash, refreshTokenTTL); err != nil {
+	if err := u.store.CreateRefreshToken(ctx, user.ID, hash, refreshTokenTTL); err != nil {
 		return model.User{}, model.TokenPair{}, fmt.Errorf("create refresh token: %w", err)
 	}
-	accessToken, expiresIn, err := this.tokens.IssueAccessToken(user.ID)
+	accessToken, expiresIn, err := u.tokens.IssueAccessToken(user.ID)
 	if err != nil {
 		return model.User{}, model.TokenPair{}, fmt.Errorf("issue access token: %w", err)
 	}
@@ -200,10 +200,10 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 	// WithoutCancel：密碼是對的，這個事實不會因為 client 在收到回應前斷線而改變，計數照樣要清；
 	// ratelimit.Reset / Refund 自己有 200ms 的預算，不會因此卡住
 	cleanupCtx := context.WithoutCancel(ctx)
-	ratelimit.Reset(cleanupCtx, this.limiter, this.logger, LoginUsernameRule, lowerName)
+	ratelimit.Reset(cleanupCtx, u.limiter, u.logger, LoginUsernameRule, lowerName)
 	// IP 只退還這一次（-1），等於只數失敗：共用出口 IP 的人（公司 NAT）正常登入不會互相擋到
 	// 不 reset IP：否則攻擊者用自己的帳號登入一次，就能把 IP 計數歸零
-	ratelimit.Refund(cleanupCtx, this.limiter, this.logger, LoginIPRule, ip)
+	ratelimit.Refund(cleanupCtx, u.limiter, u.logger, LoginIPRule, ip)
 
 	return user, model.TokenPair{
 		AccessToken:  accessToken,
@@ -216,16 +216,16 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 // rotate 的錯誤帶步驟名稱包起來，errors.Is / As 仍可辨識 *model.RefreshTokenRevokedError、
 // *model.RefreshTokenDuplicateUseError、model.ErrRefreshTokenInvalid（handler 靠它們決定 401 和 log）
 // 不把 token 明文或 hash 放進任何 error 或 log；用途：POST /refresh（CheckRefreshIP 通過、decode body 之後）
-func (this *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (model.TokenPair, error) {
+func (u *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (model.TokenPair, error) {
 	newPlain, newHash := auth.NewRefreshToken()
-	userID, err := this.store.RotateRefreshToken(ctx,
+	userID, err := u.store.RotateRefreshToken(ctx,
 		auth.HashRefreshToken(refreshToken), newHash, refreshTokenTTL, refreshTokenGrace)
 	if err != nil {
 		return model.TokenPair{}, fmt.Errorf("rotate refresh token: %w", err)
 	}
 
 	// rotate 已經 Commit 了：這裡失敗的話 client 拿舊的重送，會落在 grace 內再換一次，不會被登出
-	accessToken, expiresIn, err := this.tokens.IssueAccessToken(userID)
+	accessToken, expiresIn, err := u.tokens.IssueAccessToken(userID)
 	if err != nil {
 		return model.TokenPair{}, fmt.Errorf("issue access token: %w", err)
 	}
@@ -239,8 +239,8 @@ func (this *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (mode
 // 只作廢這一個 refresh token（這台裝置登出）
 // 查不到 / 已經作廢都不算錯（idempotent）；DB 失敗帶步驟名稱包起來回傳，不吞掉
 // 不把 token 明文或 hash 放進任何 error 或 log；用途：POST /logout
-func (this *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
-	if err := this.store.RevokeRefreshToken(ctx, auth.HashRefreshToken(refreshToken)); err != nil {
+func (u *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
+	if err := u.store.RevokeRefreshToken(ctx, auth.HashRefreshToken(refreshToken)); err != nil {
 		return fmt.Errorf("revoke refresh token: %w", err)
 	}
 	return nil
@@ -248,6 +248,6 @@ func (this *AuthUseCase) Logout(ctx context.Context, refreshToken string) error 
 
 // 用 userID 查 user；查不到回 model.ErrUserNotFound（原樣回，不包）
 // 用途：GET /me 和 WS auth frame（token 已由 RequireAuth / WS handler 解析，這裡只做 userID → user）
-func (this *AuthUseCase) CurrentUser(ctx context.Context, userID int64) (model.User, error) {
-	return this.store.GetUserByID(ctx, userID)
+func (u *AuthUseCase) CurrentUser(ctx context.Context, userID int64) (model.User, error) {
+	return u.store.GetUserByID(ctx, userID)
 }

@@ -25,9 +25,9 @@ return {count, redis.call('PTTL', KEYS[1])}
 `)
 
 // allowed=false 時，retryAfter 是這個窗口還剩多久
-func (this *RedisStore) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
+func (s *RedisStore) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
 	// Run 先送 EVALSHA（只送 script 的 hash），Redis 沒快取過才退回 EVAL 送整段
-	result, err := allowScript.Run(ctx, this.client, []string{key}, window.Milliseconds()).Int64Slice()
+	result, err := allowScript.Run(ctx, s.client, []string{key}, window.Milliseconds()).Int64Slice()
 	if err != nil {
 		return false, 0, err
 	}
@@ -50,12 +50,12 @@ return 0
 `)
 
 // 退還這一次 Allow 用掉的額度（-1）；key 已經過期就什麼都不做
-func (this *RedisStore) Refund(ctx context.Context, key string) error {
-	return refundScript.Run(ctx, this.client, []string{key}).Err()
+func (s *RedisStore) Refund(ctx context.Context, key string) error {
+	return refundScript.Run(ctx, s.client, []string{key}).Err()
 }
 
 // 清掉 key 的計數（登入成功時用，避免使用者自己打錯幾次後被鎖）
-func (this *RedisStore) Reset(ctx context.Context, key string) error {
+func (s *RedisStore) Reset(ctx context.Context, key string) error {
 	// key 不存在時 DEL 回 0，不算錯誤
-	return this.client.Del(ctx, key).Err()
+	return s.client.Del(ctx, key).Err()
 }

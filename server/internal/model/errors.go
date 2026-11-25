@@ -98,8 +98,8 @@ type CodedError struct {
 }
 
 // 實作 error 介面（Go 只比對 method 名稱和簽名），讓它可以當一般 error 回傳，也能被 errors.Is / errors.As 比對
-func (this *CodedError) Error() string {
-	return this.Message
+func (e *CodedError) Error() string {
+	return e.Message
 }
 
 // 限流器（Redis）出錯或超時、而且這條規則是 fail closed 時，ratelimit.Check 回這個；handler 翻成 503
@@ -112,6 +112,6 @@ type RateLimitedError struct {
 	RetryAfter time.Duration
 }
 
-func (this *RateLimitedError) Error() string {
-	return fmt.Sprintf("rate limited, retry after %v", this.RetryAfter)
+func (e *RateLimitedError) Error() string {
+	return fmt.Sprintf("rate limited, retry after %v", e.RetryAfter)
 }

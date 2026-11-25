@@ -117,9 +117,9 @@ func newRoomSubscriptions(
 // 一條連線進入 roomID，回傳時 Redis 已經確認訂閱好了（join_ok 之後補撈歷史才補得到洞）
 // 回傳 error = 等確認 timeout（SUB 失敗也是表現成等不到確認：worker 在背景 backoff 重試），
 // 已經用 Leave 退回，呼叫端回 ws_join_unavailable
-func (this *roomSubscriptions) Join(ctx context.Context, roomID string) error {
+func (rs *roomSubscriptions) Join(ctx context.Context, roomID string) error {
 	// 鎖底下：改 viewers、必要時標 dirty，拿到這間房的 ready（SUBSCRIBE 由 worker 送）
-	ready, err := this.addViewer(roomID)
+	ready, err := rs.addViewer(roomID)
 	if err != nil {
 		return err
 	}
@@ -131,24 +131,24 @@ func (this *roomSubscriptions) Join(ctx context.Context, roomID string) error {
 	case <-ctx.Done():
 		// ctx 到期（ws.go 給的 200ms）或被取消，確認還沒回來：當作沒進房，把 addViewer 加的人退掉
 		// 確認之後才到也沒關係：confirmSubscribed 照樣 close ready，下一個進房的人就不用等
-		this.Leave(ctx, roomID)
+		rs.Leave(ctx, roomID)
 		return ctx.Err()
 	}
 }
 
 // Join 在鎖底下的那一半：只改記憶體，回傳這間房的 ready 給 Join 在鎖外等
 // 回傳 error 現在不會發生了（SUB 交給 worker），留著是為了不動 Join 的形狀；之後可以拿掉
-func (this *roomSubscriptions) addViewer(roomID string) (<-chan struct{}, error) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	entry := this.rooms[roomID]
+func (rs *roomSubscriptions) addViewer(roomID string) (<-chan struct{}, error) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	entry := rs.rooms[roomID]
 	if entry == nil {
 		// 新房間：只建 entry、標 dirty，不送 SUB（I/O 交給 worker，不在 mu 底下做）
 		// state 是 subIdle + viewers 1 → worker 的 nextAction 會決定送 SUB
 		// Join 拿到的 ready 要等 worker 送出 SUB、consumer 收到確認才會 close
 		newEntry := &roomSubscription{viewers: 1, ready: make(chan struct{}), state: subIdle}
-		this.rooms[roomID] = newEntry
-		this.markDirtyLocked(roomID)
+		rs.rooms[roomID] = newEntry
+		rs.markDirtyLocked(roomID)
 		// 讓最後的 return entry.ready 三個分支都能用
 		entry = newEntry
 	} else if entry.viewers == 0 {
@@ -164,7 +164,7 @@ func (this *roomSubscriptions) addViewer(roomID string) (<-chan struct{}, error)
 		entry.viewers += 1
 		// desired 可能從「不訂」變回「要訂」（expire 已跑過的情況）→ 一律標
 		// 多標只是多跑一次 reconcile（nextAction 回 actionNone），漏標房間會卡住
-		this.markDirtyLocked(roomID)
+		rs.markDirtyLocked(roomID)
 	} else {
 		// 本來就有人在看：desired 沒變，不用標
 		entry.viewers += 1
@@ -204,10 +204,10 @@ type confirmResult struct {
 // 不用先檢查 ready 是不是 close 過：只有 subSent → subConfirmed 這一步會 close，
 // 而要從 subConfirmed 再回到 subSent 一定要先經過「換新的 ready」——worker 決定 UNSUB，或 resetAfterRebuild（只換 subConfirmed 的）
 // → subSent 時 ready 一定還沒 close
-func (this *roomSubscriptions) confirmSubscribed(roomID string) confirmResult {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	entry := this.rooms[roomID]
+func (rs *roomSubscriptions) confirmSubscribed(roomID string) confirmResult {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	entry := rs.rooms[roomID]
 	if entry == nil {
 		// 確認晚到，entry 已經不在了（worker 已經 UNSUB 完並刪掉）：沒人在等，忽略
 		return confirmResult{}
@@ -243,10 +243,10 @@ func (this *roomSubscriptions) confirmSubscribed(roomID string) confirmResult {
 //   - 還有人在看的房間（viewers > 0）才記 resyncSince，確認回來時通知 client 補撈；
 //     debounce 中（viewers = 0、timer 還在）的不記：沒有人在房裡可通知，之後回來的人要等 ready，join_ok 後本來就會 GET 歷史
 //   - 標 dirty；不刪 entry：只有 worker 能刪，沒人要的房間 nextAction 會回 actionDelete，不會送 SUB
-func (this *roomSubscriptions) resetAfterRebuild(now time.Time) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	for roomID, entry := range this.rooms {
+func (rs *roomSubscriptions) resetAfterRebuild(now time.Time) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for roomID, entry := range rs.rooms {
 		if entry.state == subConfirmed {
 			entry.ready = make(chan struct{})
 		}
@@ -255,19 +255,19 @@ func (this *roomSubscriptions) resetAfterRebuild(now time.Time) {
 		if entry.viewers > 0 {
 			entry.resyncSince = now
 		}
-		this.markDirtyLocked(roomID)
+		rs.markDirtyLocked(roomID)
 	}
 }
 
 // 一條連線離開 roomID。不做 I/O：最後一個人離開只啟動 debounce timer
 // 不用標 dirty：timer != nil → desired 還是「要訂」，沒變；30 秒後 expire 才會標
-func (this *roomSubscriptions) Leave(ctx context.Context, roomID string) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	entry := this.rooms[roomID]
+func (rs *roomSubscriptions) Leave(ctx context.Context, roomID string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	entry := rs.rooms[roomID]
 	if entry == nil || entry.viewers == 0 {
 		// 沒 Join 過就 Leave（呼叫端的 bug）：記 log，不讓 viewers 變負的
-		this.logger.WarnContext(ctx, "leave room without join", "room", roomID)
+		rs.logger.WarnContext(ctx, "leave room without join", "room", roomID)
 		return
 	} else if entry.viewers == 1 {
 		entry.viewers = 0
@@ -276,8 +276,8 @@ func (this *roomSubscriptions) Leave(ctx context.Context, roomID string) {
 		gen := entry.gen
 		// 啟動 debounce timer，30 秒後 expire
 		entry.timer =
-			this.afterFunc(unsubscribeDelay, func() {
-				this.expire(roomID, gen)
+			rs.afterFunc(unsubscribeDelay, func() {
+				rs.expire(roomID, gen)
 			})
 	} else {
 		entry.viewers -= 1
@@ -286,11 +286,11 @@ func (this *roomSubscriptions) Leave(ctx context.Context, roomID string) {
 
 // debounce 到期（gen = 這個 timer 出生時的編號）
 // timer = nil → desired 變成「不訂」（viewers 已經是 0）；送 UNSUB、刪 entry 都交給 worker，這裡不做 I/O、不刪
-func (this *roomSubscriptions) expire(roomID string, gen uint64) {
+func (rs *roomSubscriptions) expire(roomID string, gen uint64) {
 	// timer 觸發：在另一個 goroutine 執行（time.AfterFunc 的規則），所以一定要先拿鎖
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	entry := this.rooms[roomID]
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	entry := rs.rooms[roomID]
 	if entry == nil || entry.gen != gen || entry.viewers > 0 {
 		//	以下任一成立就 return（什麼都不做）：
 		//      - 沒有 entry
@@ -299,17 +299,17 @@ func (this *roomSubscriptions) expire(roomID string, gen uint64) {
 		return
 	}
 	entry.timer = nil
-	this.markDirtyLocked(roomID)
+	rs.markDirtyLocked(roomID)
 }
 
 // 在 mu 底下呼叫：標記 + 非阻塞叫醒（wake 已經有訊號就不用再送）
-func (this *roomSubscriptions) markDirtyLocked(roomID string) {
+func (rs *roomSubscriptions) markDirtyLocked(roomID string) {
 	// Kotlin：dirty[roomID] = Unit（struct{}{} ≈ Unit，map 的 value 不存東西 = 當 set 用）
-	this.dirty[roomID] = struct{}{}
+	rs.dirty[roomID] = struct{}{}
 	// Kotlin：wake.trySend(Unit)（Go 沒有 trySend，select + 空 default 是固定寫法）
 	select {
 	// trySend 成功：ch <- v 是「送進」，被選中時已經送完了，body 不用再做事
-	case this.wake <- struct{}{}:
+	case rs.wake <- struct{}{}:
 	// trySend 失敗（buffer 滿）：已經有一個訊號 = worker 醒來一定會看到這次標的，不用再送
 	// 不能拿掉 default：沒有它就會卡在這裡等，而且是拿著 mu 卡住
 	default:

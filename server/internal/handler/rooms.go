@@ -80,8 +80,8 @@ type roomListResponse struct {
 // 解析 body
 // 交給 use case（房名驗證 + 額度檢查都在裡面；房名不合規範 → 400 + 該 error 的 code）
 // 回 201
-func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
-	userID, ok := requireUserID(w, r, this.logger)
+func (h *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
@@ -92,11 +92,11 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	room, err := this.rooms.CreateRoom(r.Context(), userID, req.RoomName)
+	room, err := h.rooms.CreateRoom(r.Context(), userID, req.RoomName)
 	var coded *model.CodedError
 	if errors.As(err, &coded) {
 		// 房名驗證沒過：code 和 message 直接回給 client
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, coded)
+		httpx.WriteCodedError(w, r, h.logger, http.StatusBadRequest, coded)
 		return
 	}
 	if errors.Is(err, model.ErrRoomLimitReached) {
@@ -112,64 +112,64 @@ func (this *RoomHandler) HandleCreateRoom(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "create room failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "create room failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
-	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, room)
+	httpx.WriteJSON(w, r, h.logger, http.StatusCreated, room)
 }
 
 // 公開：知道 public_id 的人都能查
-func (this *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
-	room, err := this.rooms.GetRoom(r.Context(), r.PathValue("public_id"))
+func (h *RoomHandler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
+	room, err := h.rooms.GetRoom(r.Context(), r.PathValue("public_id"))
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404、不是 410：不讓外人知道「這個房間曾經存在過」
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
 	}
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "get room failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "get room failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, room)
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, room)
 }
 
 // GET /rooms：公開，列出所有人的房間
 // ?sort=viewers → 依目前人數的前 N 名（listPopularRooms）；其他值 400；沒帶 = 預設列表
 // 驗證順序：sort → limit → page_token；任何一個不合格都不碰 use case
-func (this *RoomHandler) HandleListRooms(w http.ResponseWriter, r *http.Request) {
+func (h *RoomHandler) HandleListRooms(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Query().Get("sort") {
 	case "":
-		this.listRooms(w, r, nil)
+		h.listRooms(w, r, nil)
 	case sortViewers:
-		this.listPopularRooms(w, r)
+		h.listPopularRooms(w, r)
 	default:
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errInvalidSort)
+		httpx.WriteCodedError(w, r, h.logger, http.StatusBadRequest, errInvalidSort)
 	}
 }
 
 // sort=viewers：limit 規則同預設列表；不支援 page_token（帶了就 400）
-func (this *RoomHandler) listPopularRooms(w http.ResponseWriter, r *http.Request) {
+func (h *RoomHandler) listPopularRooms(w http.ResponseWriter, r *http.Request) {
 	limit, ok := parseListLimit(w, r)
 	if !ok {
 		return
 	}
 	if r.URL.Query().Get("page_token") != "" {
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errPageTokenNotSupported)
+		httpx.WriteCodedError(w, r, h.logger, http.StatusBadRequest, errPageTokenNotSupported)
 		return
 	}
 
-	rooms, err := this.rooms.ListPopularRooms(r.Context(), limit)
+	rooms, err := h.rooms.ListPopularRooms(r.Context(), limit)
 	if errors.Is(err, model.ErrViewerRankingUnavailable) {
-		this.logger.ErrorContext(r.Context(), "viewer ranking unavailable", "error", err)
+		h.logger.ErrorContext(r.Context(), "viewer ranking unavailable", "error", err)
 		httpx.WriteError(w, http.StatusServiceUnavailable, "viewer_ranking_unavailable", "viewer ranking unavailable")
 		return
 	}
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "list popular rooms failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "list popular rooms failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
@@ -179,25 +179,25 @@ func (this *RoomHandler) listPopularRooms(w http.ResponseWriter, r *http.Request
 	for _, pr := range rooms {
 		resp.Rooms = append(resp.Rooms, popularRoomItem{RoomName: pr.Room.Name, PublicID: pr.Room.PublicID, ViewerCount: pr.ViewerCount})
 	}
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, resp)
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, resp)
 }
 
 // GET /me/rooms：要登入，只列出自己的房間
-func (this *RoomHandler) HandleListMyRooms(w http.ResponseWriter, r *http.Request) {
+func (h *RoomHandler) HandleListMyRooms(w http.ResponseWriter, r *http.Request) {
 	// 跟 HandleMe 一樣：回應看是誰在問，所以 CDN / 瀏覽器都不能存
 	// 放在最前面：錯誤回應也不該被快取
 	w.Header().Set("Cache-Control", "no-store")
 
-	userID, ok := requireUserID(w, r, this.logger)
+	userID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
-	this.listRooms(w, r, &userID)
+	h.listRooms(w, r, &userID)
 }
 
 // 兩個列表 endpoint 共用；userID 為 nil = 不限 owner
 // 驗證順序：先 limit、再 page_token；任何一個不合格都不碰 DB
-func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userID *int64) {
+func (h *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userID *int64) {
 	query := r.URL.Query()
 
 	limit, ok := parseListLimit(w, r)
@@ -211,15 +211,15 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 		cursor, err := decodePageToken(raw)
 		if err != nil {
 			// 不說是哪一項壞掉
-			httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errInvalidPageToken)
+			httpx.WriteCodedError(w, r, h.logger, http.StatusBadRequest, errInvalidPageToken)
 			return
 		}
 		after = &cursor
 	}
 
-	rooms, next, err := this.rooms.ListRooms(r.Context(), userID, after, limit)
+	rooms, next, err := h.rooms.ListRooms(r.Context(), userID, after, limit)
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "list rooms failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "list rooms failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
@@ -232,14 +232,14 @@ func (this *RoomHandler) listRooms(w http.ResponseWriter, r *http.Request, userI
 	if next != nil {
 		token, err := encodePageToken(*next)
 		if err != nil {
-			this.logger.ErrorContext(r.Context(), "encode page token failed", "error", err)
+			h.logger.ErrorContext(r.Context(), "encode page token failed", "error", err)
 			httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 		resp.NextPageToken = token
 	}
 
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, resp)
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, resp)
 }
 
 // 列表 endpoint 共用：解析 query 的 limit（房間列表、角色名單都用）

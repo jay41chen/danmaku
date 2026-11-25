@@ -38,48 +38,48 @@ var (
 	errFakeUnsubscribe = errors.New("fake unsubscribe failed")
 )
 
-func (this *fakePubSub) subscribe(ctx context.Context, roomID string) error {
-	if this.beforeSub != nil {
-		this.beforeSub(roomID)
+func (p *fakePubSub) subscribe(ctx context.Context, roomID string) error {
+	if p.beforeSub != nil {
+		p.beforeSub(roomID)
 	}
-	this.mu.Lock()
-	this.calls = append(this.calls, "sub "+roomID)
-	fail, manual := this.failSub, this.manualConfirm
-	this.mu.Unlock()
+	p.mu.Lock()
+	p.calls = append(p.calls, "sub "+roomID)
+	fail, manual := p.failSub, p.manualConfirm
+	p.mu.Unlock()
 	if fail {
 		return errFakeSubscribe
 	}
 	if !manual {
 		// 放掉 fake.mu 再確認：confirmSubscribed 要拿 subs.mu，不要兩把鎖疊在一起
-		this.confirm(roomID)
+		p.confirm(roomID)
 	}
 	return nil
 }
 
-func (this *fakePubSub) unsubscribe(ctx context.Context, roomID string) error {
-	if this.beforeUnsub != nil {
-		this.beforeUnsub(roomID)
+func (p *fakePubSub) unsubscribe(ctx context.Context, roomID string) error {
+	if p.beforeUnsub != nil {
+		p.beforeUnsub(roomID)
 	}
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	this.calls = append(this.calls, "unsub "+roomID)
-	if this.failUnsub {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "unsub "+roomID)
+	if p.failUnsub {
 		return errFakeUnsubscribe
 	}
 	return nil
 }
 
 // 背景 worker 還在跑時也能安全讀
-func (this *fakePubSub) snapshot() []string {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	return slices.Clone(this.calls)
+func (p *fakePubSub) snapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.calls)
 }
 
-func (this *fakePubSub) setFailSub(fail bool) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	this.failSub = fail
+func (p *fakePubSub) setFailSub(fail bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failSub = fail
 }
 
 // 假的 time.AfterFunc：不會自己觸發，test 決定什麼時候「時間到」
@@ -99,41 +99,41 @@ type fakeTimer struct {
 }
 
 // 跟 *time.Timer.Stop 一樣：已經停過或已經觸發就回 false
-func (this *fakeTimer) Stop() bool {
-	if this.stopped || this.fired {
+func (t *fakeTimer) Stop() bool {
+	if t.stopped || t.fired {
 		return false
 	}
-	this.stopped = true
+	t.stopped = true
 	return true
 }
 
-func (this *fakeClock) afterFunc(d time.Duration, f func()) stopper {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+func (c *fakeClock) afterFunc(d time.Duration, f func()) stopper {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	t := &fakeTimer{d: d, f: f}
-	this.timers = append(this.timers, t)
+	c.timers = append(c.timers, t)
 	return t
 }
 
 // 最近一次建立的 timer（情境 test 用）
-func (this *fakeClock) last() *fakeTimer {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	return this.timers[len(this.timers)-1]
+func (c *fakeClock) last() *fakeTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.timers[len(c.timers)-1]
 }
 
 // 時間到了，但 callback 還沒跑（還在等鎖）：之後 Stop() 會回 false
-func (this *fakeTimer) trigger() { this.fired = true }
+func (t *fakeTimer) trigger() { t.fired = true }
 
 // callback 終於拿到 CPU / 鎖
-func (this *fakeTimer) run() { this.f() }
+func (t *fakeTimer) run() { t.f() }
 
 // 還沒停、還沒觸發的 timer；d = 0 表示不分種類
-func (this *fakeClock) pending(d time.Duration) []*fakeTimer {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+func (c *fakeClock) pending(d time.Duration) []*fakeTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var out []*fakeTimer
-	for _, t := range this.timers {
+	for _, t := range c.timers {
 		if !t.stopped && !t.fired && (d == 0 || t.d == d) {
 			out = append(out, t)
 		}
@@ -141,10 +141,10 @@ func (this *fakeClock) pending(d time.Duration) []*fakeTimer {
 	return out
 }
 
-func (this *fakeClock) fireAll() { this.fire(0) }
+func (c *fakeClock) fireAll() { c.fire(0) }
 
-func (this *fakeClock) fire(d time.Duration) {
-	for _, t := range this.pending(d) {
+func (c *fakeClock) fire(d time.Duration) {
+	for _, t := range c.pending(d) {
 		t.trigger()
 		t.run()
 	}

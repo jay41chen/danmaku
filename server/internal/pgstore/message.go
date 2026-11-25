@@ -14,11 +14,11 @@ import (
 // 房間用 public_id 指定：「房間存在且未刪除」和 INSERT 合成同一句 statement（INSERT ... SELECT FROM rooms）
 // 第二個回傳值 = 作者此刻在這間房是否被 ban（同一句 statement 查，不多一次來回）：
 // 被 ban 的訊息照常存，只是 handler 不廣播（shadow ban）
-func (this *DBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, bool, error) {
+func (s *DBStore) CreateMessage(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, bool, error) {
 	var msg model.Message
 	var banned bool
 	// 一個 statement 同時 INSERT 和 JOIN users 取 username，不用兩次來回
-	err := this.dbPool.QueryRow(ctx,
+	err := s.dbPool.QueryRow(ctx,
 		`
 			WITH m AS (
 				INSERT INTO messages(room_id, user_id, content)
@@ -63,10 +63,10 @@ func (this *DBStore) CreateMessage(ctx context.Context, roomPublicID string, use
 // 一定要 NOT EXISTS：NOT IN / <> ALL 遇到 NULL（user_id 為 NULL 的舊訊息、已刪除的發送者）會變成 unknown，整批訊息消失
 // 過濾在 LIMIT 之前，所以仍會回傳最多 limit 則「看得到的」訊息
 // 索引 (room_id, id) 讓 WHERE room_id ... ORDER BY id DESC LIMIT 直接走索引
-func (this *DBStore) QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error) {
+func (s *DBStore) QueryMessage(ctx context.Context, roomID int64, limit int) ([]model.Message, error) {
 	// LEFT JOIN：舊資料和發送者已被刪除的訊息 user_id 是 NULL，INNER JOIN 會把這些列整個丟掉
 	// 所以 Message.Username / UserID 是指標：NULL 掃不進 string / int64，只能掃進 *string / *int64
-	rows, err := this.dbPool.Query(ctx,
+	rows, err := s.dbPool.Query(ctx,
 		`
 			SELECT m.id, m.user_id, u.username, m.content, m.created_at
 			FROM messages m

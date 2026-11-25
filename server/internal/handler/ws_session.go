@@ -147,11 +147,11 @@ func newFrameRateLimiter() *frameRateLimiter {
 }
 
 // 回傳 false = 這個 frame 超過限流，要丟掉
-func (this *frameRateLimiter) allow(now time.Time) bool {
-	if now.Sub(this.windowStart) > time.Second {
-		this.msgCount = 0
-		this.windowStart = now
+func (l *frameRateLimiter) allow(now time.Time) bool {
+	if now.Sub(l.windowStart) > time.Second {
+		l.msgCount = 0
+		l.windowStart = now
 	}
-	this.msgCount++
-	return this.msgCount <= rateLimit
+	l.msgCount++
+	return l.msgCount <= rateLimit
 }

@@ -85,20 +85,20 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	}
 	logger.Info("connected")
 
-	this := &RedisStore{
+	s := &RedisStore{
 		client: client,
 		// 8 bytes 隨機：只要不同 server 不撞名就好（撞名的話 A 會收到 B 的心跳，聾掉就偵測不到）
 		heartbeat: heartbeatChannel(randx.URLText(8)),
 		logger:    logger,
 	}
-	this.watchdog = newPubsubWatchdog(this.publishHeartbeat, this.rebuildPubSub, logger)
-	this.pubsub.Store(client.Subscribe(ctx, this.heartbeat))
-	this.rooms = newRoomSubscriptions(
+	s.watchdog = newPubsubWatchdog(s.publishHeartbeat, s.rebuildPubSub, logger)
+	s.pubsub.Store(client.Subscribe(ctx, s.heartbeat))
+	s.rooms = newRoomSubscriptions(
 		func(ctx context.Context, roomID string) error {
-			return this.pubsub.Load().Subscribe(ctx, roomChannel(roomID))
+			return s.pubsub.Load().Subscribe(ctx, roomChannel(roomID))
 		},
 		func(ctx context.Context, roomID string) error {
-			return this.pubsub.Load().Unsubscribe(ctx, roomChannel(roomID))
+			return s.pubsub.Load().Unsubscribe(ctx, roomChannel(roomID))
 		},
 		// room_subscriptions 的 debounce / retry / confirm timer：callback 跑在 runtime 建的 goroutine，
 		// 直接 panic 會讓 process 掛掉但沒有 log / metric；Escalate 結果一樣（process 掛掉），只是先記錄下來（ADR 0023）
@@ -115,7 +115,7 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	// supervise.Escalate（第一次 panic 就讓 process 掛掉，ADR 0023）：不能原地重啟。desired / actual 雖然存在 rooms 裡，
 	// 但 run 每一輪會把 dirty 整包取出到區域變數，reconcile 到一半 panic 的話，同一批還沒處理的房間就沒人會再標 dirty；
 	// panic 那間的 state 已經改成 subSent、確認 timer 卻沒啟動，之後每次 Join 都會 timeout，要等所有人離開才恢復
-	go supervise.Escalate(ctx, logger, "redis_rooms", this.rooms.run)
+	go supervise.Escalate(ctx, logger, "redis_rooms", s.rooms.run)
 
 	// watchdog 同理：跟 process 一樣久，不能等 Subscribe 啟動（心跳是 Subscribe 的 consumer 收到才算數，但發送和判定不依賴它啟動順序）
 	// ticker 在這裡建、傳進去：run 不自己建 ticker，test 才能用手動的 tick channel
@@ -127,24 +127,24 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	go supervise.Restart(ctx, logger, "redis_watchdog", func(ctx context.Context) {
 		tick := time.NewTicker(heartbeatInterval)
 		defer tick.Stop()
-		this.watchdog.run(ctx, tick.C)
+		s.watchdog.run(ctx, tick.C)
 	})
 
-	return this, nil
+	return s, nil
 }
 
-func (this *RedisStore) CheckHealth(ctx context.Context) error {
-	return this.client.Ping(ctx).Err()
+func (s *RedisStore) CheckHealth(ctx context.Context) error {
+	return s.client.Ping(ctx).Err()
 }
 
 // 發一則心跳到自己的 heartbeat channel
 // 開了 ContextTimeoutEnabled，500ms 的 ctx 會套到 socket 的讀寫上：Redis 卡住時這一輪最多約 500ms 就返回，
 // 15 秒的間隔容得下，watchdog 不會卡死
 // 這不算「廣播 Publish 失敗」，不 Inc 那個 metric
-func (this *RedisStore) publishHeartbeat(ctx context.Context) error {
+func (s *RedisStore) publishHeartbeat(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, redisCommandTimeout)
 	defer cancel()
-	return this.client.Publish(ctx, this.heartbeat, "ping").Err()
+	return s.client.Publish(ctx, s.heartbeat, "ping").Err()
 }
 
 // watchdog 判定 PubSub 聾掉（連線還在、但收不到任何東西）時呼叫：換一個全新的 PubSub
@@ -153,11 +153,11 @@ func (this *RedisStore) publishHeartbeat(ctx context.Context) error {
 // 而 consumer 看到舊 channel 關閉時，要靠「指標已經不是 ps」判斷這是重建造成的關閉（見 Subscribe）
 //
 // 不在這裡重設房間（resetAfterRebuild）：一定要等 consumer 把舊 channel 收完才重設，理由見 Subscribe
-func (this *RedisStore) rebuildPubSub(ctx context.Context) {
+func (s *RedisStore) rebuildPubSub(ctx context.Context) {
 	prom.PubSubDeaf()
-	this.logger.WarnContext(ctx, "pubsub judged deaf, rebuilding")
-	fresh := this.client.Subscribe(ctx, this.heartbeat)
-	old := this.pubsub.Swap(fresh)
+	s.logger.WarnContext(ctx, "pubsub judged deaf, rebuilding")
+	fresh := s.client.Subscribe(ctx, s.heartbeat)
+	old := s.pubsub.Swap(fresh)
 	// Swap = Store 新的 + 回傳舊的，是同一個原子操作
 	old.Close()
 }

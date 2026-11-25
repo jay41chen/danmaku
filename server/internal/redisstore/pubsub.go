@@ -22,18 +22,18 @@ func heartbeatChannel(id string) string {
 }
 
 // 發到 roomChannel(roomID)
-func (this *RedisStore) Publish(ctx context.Context, roomID, msg string) error {
-	return this.client.Publish(ctx, roomChannel(roomID), msg).Err()
+func (s *RedisStore) Publish(ctx context.Context, roomID, msg string) error {
+	return s.client.Publish(ctx, roomChannel(roomID), msg).Err()
 }
 
 // 委派給 roomSubscriptions.Join
-func (this *RedisStore) JoinRoom(ctx context.Context, roomID string) error {
-	return this.rooms.Join(ctx, roomID)
+func (s *RedisStore) JoinRoom(ctx context.Context, roomID string) error {
+	return s.rooms.Join(ctx, roomID)
 }
 
 // 委派給 roomSubscriptions.Leave
-func (this *RedisStore) LeaveRoom(ctx context.Context, roomID string) {
-	this.rooms.Leave(ctx, roomID)
+func (s *RedisStore) LeaveRoom(ctx context.Context, roomID string) {
+	s.rooms.Leave(ctx, roomID)
 }
 
 // 用 ChannelWithSubscriptions 不用 Channel()：Channel() 會把 Redis 對 SUBSCRIBE 的確認（*Subscription）丟掉
@@ -62,9 +62,9 @@ func (this *RedisStore) LeaveRoom(ctx context.Context, roomID string) {
 //     worker 重送時 conn() 先重新訂閱所有已知 channel 再訂閱這間房，同一間房可能收到兩次確認（第二次是 reconfirm；
 //     要求重送時 go-redis 的連線仍是 nil，若 receive loop 已先重連，較早的確認在 subRetry 期間被忽略，只剩一次）。
 //     都是接受的誤報（每個 viewer 多撈一次歷史）；重建之後遇到 (c)，同一間房可能一次重建路徑 resync 加一次 reconfirm resync
-func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg string), onResync func(roomID string)) error {
+func (s *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg string), onResync func(roomID string)) error {
 	for {
-		ps := this.pubsub.Load()
+		ps := s.pubsub.Load()
 		// m 是 interface{}（any）：這條 channel 會送兩種型別（*Subscription / *Message），Go 沒有 sealed class，只能用 any 裝
 		// switch msg := m.(type) 是 Go 標準的 type switch（≈ Kotlin 的 when (m) { is X -> ... }）：
 		// 每個 case 裡的 msg 已經是那個 case 的型別，可以直接用欄位；沒對到的型別直接略過
@@ -72,16 +72,16 @@ func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg 
 			switch msg := m.(type) {
 			case *redis.Subscription:
 				// 心跳 channel 的訂閱確認：沒有房間在等，也不能走 roomIDOf（每次都會記 warning）
-				if msg.Channel == this.heartbeat {
+				if msg.Channel == s.heartbeat {
 					continue
 				}
-				this.handleSubscription(ctx, msg, onResync)
+				s.handleSubscription(ctx, msg, onResync)
 			case *redis.Message:
-				if msg.Channel == this.heartbeat {
-					this.watchdog.beat()
+				if msg.Channel == s.heartbeat {
+					s.watchdog.beat()
 					continue
 				}
-				roomID, ok := this.roomIDOf(ctx, msg.Channel)
+				roomID, ok := s.roomIDOf(ctx, msg.Channel)
 				if !ok {
 					continue
 				}
@@ -92,11 +92,11 @@ func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg 
 		if ctx.Err() != nil {
 			return nil
 		}
-		if this.pubsub.Load() == ps {
+		if s.pubsub.Load() == ps {
 			// 不是重建造成的關閉
 			return nil
 		}
-		this.rooms.resetAfterRebuild(time.Now())
+		s.rooms.resetAfterRebuild(time.Now())
 	}
 }
 
@@ -116,15 +116,15 @@ func (this *RedisStore) Subscribe(ctx context.Context, handler func(roomID, msg 
 //     重複確認的來源有三：(a) go-redis 重連重新 SUBSCRIBE 所有已知 channel；(b) 確認 timer 到期、worker 重送 SUBSCRIBE；
 //     (c) SUBSCRIBE 寫入失敗後 worker 重送，go-redis 的 conn() 先重新訂閱所有已知 channel（含這間房）再訂一次，可能收到兩次確認（要求重送時 go-redis 的連線仍是 nil；若 receive loop 已先重連，較早的確認在 subRetry 期間被忽略，只剩一次）。
 //     都是接受的誤報；重建之後遇到 (c)，同一間房可能一次重建路徑 resync 加一次 reconfirm resync
-func (this *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subscription, onResync func(roomID string)) {
+func (s *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subscription, onResync func(roomID string)) {
 	if msg.Kind != "subscribe" {
 		return
 	}
-	roomID, ok := this.roomIDOf(ctx, msg.Channel)
+	roomID, ok := s.roomIDOf(ctx, msg.Channel)
 	if !ok {
 		return
 	}
-	result := this.rooms.confirmSubscribed(roomID)
+	result := s.rooms.confirmSubscribed(roomID)
 	if result.reconfirm {
 		// 已確認的房間又收到確認：go-redis 重連（或確認 timer 重送）。不記恢復時間，那是重建路徑的指標
 		prom.PubSubReconfirmed()
@@ -138,10 +138,10 @@ func (this *RedisStore) handleSubscription(ctx context.Context, msg *redis.Subsc
 
 // roomChannel 的反向：去掉 "room:" 前綴拿回 roomID；不是房間的 channel 記 log、回 false 讓呼叫端跳過
 // 回傳 ok 而不是自己 continue / return：要不要跳過交給呼叫端決定
-func (this *RedisStore) roomIDOf(ctx context.Context, channel string) (string, bool) {
+func (s *RedisStore) roomIDOf(ctx context.Context, channel string) (string, bool) {
 	roomID, ok := strings.CutPrefix(channel, roomChannel(""))
 	if !ok {
-		this.logger.WarnContext(ctx, "unexpected channel, skipped", "channel", channel)
+		s.logger.WarnContext(ctx, "unexpected channel, skipped", "channel", channel)
 	}
 	return roomID, ok
 }

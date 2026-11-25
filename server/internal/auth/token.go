@@ -29,11 +29,11 @@ func NewTokenIssuer(secret string, ttl time.Duration) (*TokenIssuer, error) {
 }
 
 // 一起回傳效期：「簽進 exp 的」跟「告訴 client 的 expires_in」保證是同一次呼叫的結果
-func (this *TokenIssuer) IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error) {
+func (ti *TokenIssuer) IssueAccessToken(userID int64) (token string, expiresIn time.Duration, err error) {
 	sub := strconv.FormatInt(userID, 10)
 	now := time.Now()
 	iat := jwt.NewNumericDate(now)
-	exp := jwt.NewNumericDate(now.Add(this.ttl))
+	exp := jwt.NewNumericDate(now.Add(ti.ttl))
 	// 包裝進jwt
 	claims := jwt.RegisteredClaims{
 		Subject:   sub,
@@ -41,27 +41,27 @@ func (this *TokenIssuer) IssueAccessToken(userID int64) (token string, expiresIn
 		ExpiresAt: exp,
 	}
 	//用 HS256 + secret 簽成字串
-	token, err = jwt.NewWithClaims(signingMethod, claims).SignedString(this.secret)
+	token, err = jwt.NewWithClaims(signingMethod, claims).SignedString(ti.secret)
 	if err != nil {
 		return "", 0, err
 	}
-	return token, this.ttl, nil
+	return token, ti.ttl, nil
 }
 
-func (this *TokenIssuer) ParseAccessToken(token string) (int64, error) {
-	id, _, err := this.ParseAccessTokenClaims(token)
+func (ti *TokenIssuer) ParseAccessToken(token string) (int64, error) {
+	id, _, err := ti.ParseAccessTokenClaims(token)
 	return id, err
 }
 
 // 除了 user id 也回傳 exp：WS 連線要靠 exp 決定什麼時候把身分降回訪客
 // exp 是 JWT 的秒精度（NumericDate），不是簽發當下的 time.Now()
-func (this *TokenIssuer) ParseAccessTokenClaims(token string) (userID int64, expiresAt time.Time, err error) {
+func (ti *TokenIssuer) ParseAccessTokenClaims(token string) (userID int64, expiresAt time.Time, err error) {
 	var claims jwt.RegisteredClaims
 	// 傳address進去，套件解析後會把 payload 填進 `claims`
 	_, err = jwt.ParseWithClaims(token, &claims,
 		func(t *jwt.Token) (any, error) {
 			// keyFunc：要用哪把 key 驗證
-			return this.secret, nil
+			return ti.secret, nil
 		},
 		jwt.WithValidMethods([]string{signingMethod.Alg()}), // 演算法的「名稱字串」
 		jwt.WithExpirationRequired(),

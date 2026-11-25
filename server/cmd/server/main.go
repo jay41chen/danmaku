@@ -254,27 +254,27 @@ type routes struct {
 	auth func(http.Handler) http.Handler
 }
 
-func (this *routes) get(path string, h http.Handler) { this.handle(http.MethodGet, path, this.auth(h)) }
-func (this *routes) post(path string, h http.Handler) {
-	this.handle(http.MethodPost, path, this.auth(h))
+func (rt *routes) get(path string, h http.Handler) { rt.handle(http.MethodGet, path, rt.auth(h)) }
+func (rt *routes) post(path string, h http.Handler) {
+	rt.handle(http.MethodPost, path, rt.auth(h))
 }
-func (this *routes) put(path string, h http.Handler) { this.handle(http.MethodPut, path, this.auth(h)) }
-func (this *routes) delete(path string, h http.Handler) {
-	this.handle(http.MethodDelete, path, this.auth(h))
+func (rt *routes) put(path string, h http.Handler) { rt.handle(http.MethodPut, path, rt.auth(h)) }
+func (rt *routes) delete(path string, h http.Handler) {
+	rt.handle(http.MethodDelete, path, rt.auth(h))
 }
-func (this *routes) publicGet(path string, h http.Handler) {
-	this.handle(http.MethodGet, path, h)
+func (rt *routes) publicGet(path string, h http.Handler) {
+	rt.handle(http.MethodGet, path, h)
 }
-func (this *routes) publicPost(path string, h http.Handler) {
-	this.handle(http.MethodPost, path, h)
+func (rt *routes) publicPost(path string, h http.Handler) {
+	rt.handle(http.MethodPost, path, h)
 }
 
 // 已移除的 route：任何 method 都回 410 Gone + 指路到 replacement
 // 刻意不收 handler：只能拿來下架，沒辦法被拿去開「公開、不分 method」的 API（繞過上面的 fail closed）
 // 公開：不讀不寫任何資料；如果要登入，沒帶 token 的舊 client 只會拿到 401、以為要去 /refresh，永遠不知道 API 沒了
 // pattern 不帶 METHOD，所有 method 都比對得到（CORS preflight 一樣先被外層 CORS middleware 回掉）
-func (this *routes) removed(path, replacement string) {
-	this.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (rt *routes) removed(path, replacement string) {
+	rt.mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusGone, "gone", "gone: use "+replacement)
 	}))
 }
@@ -283,8 +283,8 @@ func (this *routes) removed(path, replacement string) {
 // handler 裡不用再各自檢查 method
 // 注意 "GET /x" 也會比對 HEAD（healthcheck 原本就是 GET + HEAD 都允許，行為不變）
 // CORS preflight（OPTIONS）不會走到這裡：CORS middleware 包在 mux 外面，會先回 204
-func (this *routes) handle(method, path string, h http.Handler) {
-	this.mux.Handle(method+" "+path, h)
+func (rt *routes) handle(method, path string, h http.Handler) {
+	rt.mux.Handle(method+" "+path, h)
 }
 
 func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h appHandlers) {

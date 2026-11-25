@@ -17,9 +17,9 @@ const (
 )
 
 // 所有「讀房間」的路徑都要經過這類 method，deleted_at IS NULL 的條件才不會被漏掉
-func (this *DBStore) GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error) {
+func (s *DBStore) GetRoomByPublicID(ctx context.Context, publicID string) (model.Room, error) {
 	var room model.Room
-	err := this.dbPool.QueryRow(ctx,
+	err := s.dbPool.QueryRow(ctx,
 		`
 			SELECT r.id, r.public_id, r.owner_id, u.username, r.room_name, r.created_at
 			FROM rooms r
@@ -93,8 +93,8 @@ func insertRoom(ctx context.Context, tx pgx.Tx, ownerID int64, name string) (mod
 
 // 建房間：lock user → 數未刪除的房間 → insert，全在同一個 transaction 裡
 // maxRooms 是這個 user 最多同時擁有的（未刪除）房間數，由呼叫端（use case）決定；已經 >= maxRooms 回 ErrRoomLimitReached
-func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
-	tx, err := this.dbPool.Begin(ctx)
+func (s *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
+	tx, err := s.dbPool.Begin(ctx)
 	if err != nil {
 		return model.Room{}, err
 	}
@@ -133,7 +133,7 @@ func (this *DBStore) CreateRoom(ctx context.Context, ownerID int64, name string,
 // after == nil → 第一頁；不是 nil → 從 after 之後開始
 // 回傳的 cursor == nil 代表沒有下一頁
 // 回傳的 Room 沒有 OwnerUsername（沒 JOIN users）：handler 要用只含 room_name / public_id 的 DTO 回傳
-func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error) {
+func (s *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *model.RoomCursor, limit int) ([]model.Room, *model.RoomCursor, error) {
 	// handler 應該已經驗證過；store 再擋一次：limit = 0 時下面的 rooms[limit-1] 會 panic，
 	// 負數會讓 SQL 變成 LIMIT 負數，Postgres 直接報錯
 	if limit > model.MaxRoomListLimit || limit <= 0 {
@@ -148,9 +148,9 @@ func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *mod
 	// 列出未刪除的房間，排序 created_at DESC, public_id DESC
 	// 注意這邊要傳入limit+1，用來[確定是否還有下一頁]
 	if userID == nil {
-		rooms, err = this.getPublicRoomLists(ctx, after, limit+1)
+		rooms, err = s.getPublicRoomLists(ctx, after, limit+1)
 	} else {
-		rooms, err = this.getUserRoomLists(ctx, *userID, after, limit+1)
+		rooms, err = s.getUserRoomLists(ctx, *userID, after, limit+1)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -174,7 +174,7 @@ func (this *DBStore) GetRoomLists(ctx context.Context, userID *int64, after *mod
 
 // GET /rooms 用：所有人的未刪除房間
 // n 是要撈幾筆；翻頁規則（+1、算 cursor）由 GetRoomLists 處理，這裡不用知道
-func (this *DBStore) getPublicRoomLists(ctx context.Context, after *model.RoomCursor, n int) ([]model.Room, error) {
+func (s *DBStore) getPublicRoomLists(ctx context.Context, after *model.RoomCursor, n int) ([]model.Room, error) {
 	var (
 		sql  string
 		args []any
@@ -201,11 +201,11 @@ func (this *DBStore) getPublicRoomLists(ctx context.Context, after *model.RoomCu
 		args = append(args, n, after.CreatedAt, after.PublicID)
 	}
 
-	return this.queryRooms(ctx, sql, args...)
+	return s.queryRooms(ctx, sql, args...)
 }
 
 // GET /me/rooms 用：只看 ownerID 的未刪除房間
-func (this *DBStore) getUserRoomLists(ctx context.Context, ownerID int64, after *model.RoomCursor, n int) ([]model.Room, error) {
+func (s *DBStore) getUserRoomLists(ctx context.Context, ownerID int64, after *model.RoomCursor, n int) ([]model.Room, error) {
 	var (
 		sql  string
 		args []any
@@ -234,14 +234,14 @@ func (this *DBStore) getUserRoomLists(ctx context.Context, ownerID int64, after 
 		args = append(args, ownerID, n, after.CreatedAt, after.PublicID)
 	}
 
-	return this.queryRooms(ctx, sql, args...)
+	return s.queryRooms(ctx, sql, args...)
 }
 
 // 三個 caller 共用（GET /rooms 與 GET /me/rooms 兩個列表，以及 GetRoomsByPublicIDs）：執行查詢，把結果掃成 []model.Room
 // SELECT 的欄位跟順序要一致：id, public_id, owner_id, room_name, created_at
-func (this *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([]model.Room, error) {
+func (s *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([]model.Room, error) {
 	// 特別注意這邊要傳入的是`args...`而不是`args`
-	rows, err := this.dbPool.Query(ctx, sql, args...)
+	rows, err := s.dbPool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -264,11 +264,11 @@ func (this *DBStore) queryRooms(ctx context.Context, sql string, args ...any) ([
 // 用多個 public_id 撈未刪除的房間（GET /rooms?sort=viewers 用）；回傳順序不保證，由呼叫端自己排
 // 已刪除或不存在的 id 直接不會出現在結果裡；ids 為空不查 DB
 // 回傳的 Room 沒有 OwnerUsername（沒 JOIN users）
-func (this *DBStore) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
+func (s *DBStore) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
 	if len(publicIDs) == 0 {
 		return []model.Room{}, nil
 	}
-	return this.queryRooms(ctx, `
+	return s.queryRooms(ctx, `
 		SELECT id, public_id, owner_id, room_name, created_at
 		FROM rooms
 		WHERE public_id = ANY($1)

@@ -61,13 +61,13 @@ func NewMessageNotifier(pub messagePublisher) *RoomNotifier {
 // 不該因為發起的人走了就停，否則房間內的觀眾要到重連才看得到這則
 // WithoutCancel 會連 deadline 一起拿掉 → publishEnvelope 自己加 publishTimeout，Redis 卡住時不會無限等
 // （client 在等 201，最多多等 500ms）；WithoutCancel 保留 ctx 的 value（request_id 等），log 仍串得起來
-func (this *RoomNotifier) NotifyMessage(ctx context.Context, roomPublicID string, msg model.Message) {
-	publishEnvelope(ctx, this.logger, this.pub, roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
+func (n *RoomNotifier) NotifyMessage(ctx context.Context, roomPublicID string, msg model.Message) {
+	publishEnvelope(ctx, n.logger, n.pub, roomPublicID, wsEnvelope{Type: wsTypeMessage, Payload: msg})
 }
 
 // 廣播 user_hidden；失敗只記 log（publishEnvelope），不重試，也不影響已 commit 的角色變更
-func (this *RoomNotifier) NotifyUserHidden(ctx context.Context, roomPublicID string, userID int64) {
-	publishEnvelope(ctx, this.logger, this.pub, roomPublicID, userHiddenEnvelope(userID))
+func (n *RoomNotifier) NotifyUserHidden(ctx context.Context, roomPublicID string, userID int64) {
+	publishEnvelope(ctx, n.logger, n.pub, roomPublicID, userHiddenEnvelope(userID))
 }
 
 // PUT /rooms/{public_id}/roles/{user_id} 的 request body
@@ -98,8 +98,8 @@ type myRoleResponse struct {
 
 // PUT /rooms/{public_id}/roles/{user_id}：指派房管或 ban（冪等，成功回 204）
 // flow：取 user id → 解析 path 的 user_id → 解析 body → 檢查 role → 交給 use case
-func (this *RoleHandler) HandleSetRole(w http.ResponseWriter, r *http.Request) {
-	actorID, ok := requireUserID(w, r, this.logger)
+func (h *RoleHandler) HandleSetRole(w http.ResponseWriter, r *http.Request) {
+	actorID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
@@ -117,21 +117,21 @@ func (this *RoleHandler) HandleSetRole(w http.ResponseWriter, r *http.Request) {
 	// API 合約：PUT 只收這兩個值，移除角色要用 DELETE（use case 本身也接受 viewer，所以要在這裡擋）
 	role := model.RoomRole(req.Role)
 	if role != model.RoomRoleModerator && role != model.RoomRoleBanned {
-		this.writeRoleError(w, r, model.ErrInvalidRole, "change room role failed")
+		h.writeRoleError(w, r, model.ErrInvalidRole, "change room role failed")
 		return
 	}
 
-	err := this.roles.ChangeRole(r.Context(), r.PathValue("public_id"), actorID, targetID, role)
+	err := h.roles.ChangeRole(r.Context(), r.PathValue("public_id"), actorID, targetID, role)
 	if err != nil {
-		this.writeRoleError(w, r, err, "change room role failed")
+		h.writeRoleError(w, r, err, "change room role failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // DELETE /rooms/{public_id}/roles/{user_id}：移除對象的角色（撤銷房管或解除 ban），成功回 204
-func (this *RoleHandler) HandleDeleteRole(w http.ResponseWriter, r *http.Request) {
-	actorID, ok := requireUserID(w, r, this.logger)
+func (h *RoleHandler) HandleDeleteRole(w http.ResponseWriter, r *http.Request) {
+	actorID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
@@ -140,9 +140,9 @@ func (this *RoleHandler) HandleDeleteRole(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	err := this.roles.ChangeRole(r.Context(), r.PathValue("public_id"), actorID, targetID, model.RoomRoleViewer)
+	err := h.roles.ChangeRole(r.Context(), r.PathValue("public_id"), actorID, targetID, model.RoomRoleViewer)
 	if err != nil {
-		this.writeRoleError(w, r, err, "change room role failed")
+		h.writeRoleError(w, r, err, "change room role failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -161,7 +161,7 @@ func parseTargetUserID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 
 // 把 use case 回的 error 翻成 HTTP 回應；不認得的一律記 log 回 500
 // code 是 API 合約，不能改名
-func (this *RoleHandler) writeRoleError(w http.ResponseWriter, r *http.Request, err error, logMsg string) {
+func (h *RoleHandler) writeRoleError(w http.ResponseWriter, r *http.Request, err error, logMsg string) {
 	switch {
 	case errors.Is(err, model.ErrRoomNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
@@ -176,31 +176,31 @@ func (this *RoleHandler) writeRoleError(w http.ResponseWriter, r *http.Request, 
 	case errors.Is(err, model.ErrInvalidRole):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_role", "invalid role")
 	default:
-		this.logger.ErrorContext(r.Context(), logMsg, "error", err)
+		h.logger.ErrorContext(r.Context(), logMsg, "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 	}
 }
 
 // GET /rooms/{public_id}/me：我在這間房的角色（owner / moderator / viewer）
 // 回應看是誰在問，所以 no-store（放最前面，錯誤回應也不該被快取）
-func (this *RoleHandler) HandleMyRole(w http.ResponseWriter, r *http.Request) {
+func (h *RoleHandler) HandleMyRole(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	userID, ok := requireUserID(w, r, this.logger)
+	userID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
-	role, err := this.roles.MyRole(r.Context(), r.PathValue("public_id"), userID)
+	role, err := h.roles.MyRole(r.Context(), r.PathValue("public_id"), userID)
 	if err != nil {
-		this.writeRoleError(w, r, err, "get room role failed")
+		h.writeRoleError(w, r, err, "get room role failed")
 		return
 	}
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, myRoleResponse{Role: string(role)})
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, myRoleResponse{Role: string(role)})
 }
 
 // GET /rooms/{public_id}/roles：角色名單，只有房主和房管看得到
-func (this *RoleHandler) HandleListRoles(w http.ResponseWriter, r *http.Request) {
+func (h *RoleHandler) HandleListRoles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	userID, ok := requireUserID(w, r, this.logger)
+	userID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
@@ -213,15 +213,15 @@ func (this *RoleHandler) HandleListRoles(w http.ResponseWriter, r *http.Request)
 	if raw := r.URL.Query().Get("page_token"); raw != "" {
 		cursor, err := decodeRoleToken(raw)
 		if err != nil {
-			httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, errInvalidPageToken)
+			httpx.WriteCodedError(w, r, h.logger, http.StatusBadRequest, errInvalidPageToken)
 			return
 		}
 		after = &cursor
 	}
 
-	entries, next, err := this.roles.ListRoles(r.Context(), r.PathValue("public_id"), userID, after, limit)
+	entries, next, err := h.roles.ListRoles(r.Context(), r.PathValue("public_id"), userID, after, limit)
 	if err != nil {
-		this.writeRoleError(w, r, err, "list room roles failed")
+		h.writeRoleError(w, r, err, "list room roles failed")
 		return
 	}
 
@@ -240,11 +240,11 @@ func (this *RoleHandler) HandleListRoles(w http.ResponseWriter, r *http.Request)
 	if next != nil {
 		token, err := encodeRoleToken(*next)
 		if err != nil {
-			this.logger.ErrorContext(r.Context(), "encode page token failed", "error", err)
+			h.logger.ErrorContext(r.Context(), "encode page token failed", "error", err)
 			httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 		resp.NextPageToken = token
 	}
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, resp)
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, resp)
 }

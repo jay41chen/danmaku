@@ -32,11 +32,11 @@ func NewDBStore(ctx context.Context, urlString string) (*DBStore, error) {
 	return &DBStore{dbPool: pool, logger: logger}, nil
 }
 
-func (this *DBStore) CheckHealth(ctx context.Context) error {
-	return this.dbPool.Ping(ctx)
+func (s *DBStore) CheckHealth(ctx context.Context) error {
+	return s.dbPool.Ping(ctx)
 }
 
 // 壓測計時用（internal/loadtiming）：pool 當下的統計快照；沒有人呼叫時不產生任何額外工作
-func (this *DBStore) PoolStat() *pgxpool.Stat {
-	return this.dbPool.Stat()
+func (s *DBStore) PoolStat() *pgxpool.Stat {
+	return s.dbPool.Stat()
 }

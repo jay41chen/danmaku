@@ -34,7 +34,7 @@ func NewHealthHandler(db healthChecker, redis healthChecker) *HealthHandler {
 }
 
 // check server is alive
-func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
+func (h *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	// method 由 router 限定（main.go 的 publicGet）；Go 1.22 的 "GET /x" 也會比對 HEAD，
 	// 所以跟原本手寫的 GET + HEAD 行為一樣
 	/// no need check cors since its just a health check api
@@ -50,11 +50,11 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		dbError = this.checkSafely(ctx, "db", func() error { return this.db.CheckHealth(ctx) })
+		dbError = h.checkSafely(ctx, "db", func() error { return h.db.CheckHealth(ctx) })
 	}()
 	go func() {
 		defer wg.Done()
-		redisError = this.checkSafely(ctx, "redis", func() error { return this.redis.CheckHealth(ctx) })
+		redisError = h.checkSafely(ctx, "redis", func() error { return h.redis.CheckHealth(ctx) })
 	}()
 	wg.Wait()
 
@@ -66,12 +66,12 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 		if redisError != nil {
 			errorMsg["redis"] = "error"
 		}
-		this.logger.ErrorContext(r.Context(), "health check failed", "dbError", dbError, "redisError", redisError)
-		httpx.WriteJSON(w, r, this.logger, http.StatusInternalServerError, errorMsg)
+		h.logger.ErrorContext(r.Context(), "health check failed", "dbError", dbError, "redisError", redisError)
+		httpx.WriteJSON(w, r, h.logger, http.StatusInternalServerError, errorMsg)
 		return
 	}
 
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, map[string]string{"status": "ok"})
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // 呼叫 check，panic 時轉成 error 回傳（health check 不能因為某個依賴的 client panic 就讓 process 掛掉）
@@ -80,12 +80,12 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 // err 用具名回傳值：panic 後 return check() 跑不到，只能靠 defer 改 err
 // 同時把 stacktrace 記進 log；回傳的 error 保持簡短，因為呼叫端會再 log 一次
 // （TestHealthCheckPanicBecomesError）
-func (this *HealthHandler) checkSafely(ctx context.Context, name string, check func() error) (err error) {
+func (h *HealthHandler) checkSafely(ctx context.Context, name string, check func() error) (err error) {
 	defer func() {
 		rec := recover()
 		switch {
 		case rec != nil:
-			this.logger.ErrorContext(ctx, "health check panic recovered", "check", name, "panic", rec, "stacktrace", string(debug.Stack()))
+			h.logger.ErrorContext(ctx, "health check panic recovered", "check", name, "panic", rec, "stacktrace", string(debug.Stack()))
 			err = fmt.Errorf("%s health check panicked: %v", name, rec)
 		}
 	}()

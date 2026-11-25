@@ -137,7 +137,7 @@ func NewWebsocketHandler(redis wsPubSub, rooms wsRoomUseCase, users wsUserUseCas
 //
 // 鎖規則見 ws.Hub：Hub 底下絕不做 I/O —— JoinRoom / LeaveRoom（Redis）、DB 都在 Hub 外做完，再呼叫 Hub 更新狀態、排 frame
 // 在 listenConnection 之前 return 會跳過 Unregister → Hub 裡留一筆，不要這樣寫
-func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
+func (h *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// WebSocket 連線的起點其實是一個普通的 HTTP request。
 	// 瀏覽器先發一個 HTTP request 說「我想升級成 WebSocket」，
 	// server 同意後才切換協定。
@@ -157,26 +157,26 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	// Sec-WebSocket-Extensions 會讓 gorilla 直接回 500
 	conn, err := upgrader.Upgrade(w, r, w.Header())
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "ws upgrade failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "ws upgrade failed", "error", err)
 		return
 	}
-	client := ws.NewClient(conn, this.pingPeriod, this.pongWait)
+	client := ws.NewClient(conn, h.pingPeriod, h.pongWait)
 	// 不管從哪裡 return 都要關：close(done) 讓 PingLoop、WriteLoop 結束，再關 conn
 	// 已經被別人 Close 過（被踢、寫入失敗）也沒關係，Close 可以重複呼叫；早退（連線數滿）時 done 沒人在聽，無所謂
 	defer client.Close()
 
-	if !this.hub.Register(r.Context(), client) {
+	if !h.hub.Register(r.Context(), client) {
 		return
 	}
 	go client.HandlePingLoop(r.Context())
 	go client.HandleWriteLoop(r.Context())
 
-	this.listenConnection(r.Context(), client)
+	h.listenConnection(r.Context(), client)
 }
 
 // 讀取迴圈：跑在 HandleWebsocket 的 goroutine 上，連線活著的期間都在這裡；結束時把連線從 Hub 移除
-func (this *WebsocketHandler) listenConnection(ctx context.Context, client *ws.Client) {
-	session := newWsSession(this, client)
+func (h *WebsocketHandler) listenConnection(ctx context.Context, client *ws.Client) {
+	session := newWsSession(h, client)
 	// 清理寫成 defer、而且要在 ReadLoop 之前登記：處理訊息時 panic 也會跑（panic 會跳過後面的程式碼，只有已登記的 defer 會跑）
 	// 不 recover：panic 繼續往外走，由 RecoverPanic 印 stacktrace；這裡只負責「一定要做」的清理
 	// 少了它，連線會變成 Hub 裡的幽靈：一直算在房間人數裡、佔 maxClients 名額、房間沒人也不 UNSUB
@@ -184,26 +184,26 @@ func (this *WebsocketHandler) listenConnection(ctx context.Context, client *ws.C
 	defer func() {
 		// ReadMessage 失敗（conn遇到錯誤）或 panic：把該連線從 Hub 移除
 		// 還在房間裡就要 LeaveRoom（Hub 外做）；被踢（outbox 滿）、WriteLoop / PingLoop 寫失敗也都是 Close 之後走到這裡清理
-		if room := this.hub.Unregister(ctx, client); room != "" {
-			this.leaveRoom(ctx, room)
+		if room := h.hub.Unregister(ctx, client); room != "" {
+			h.leaveRoom(ctx, room)
 		}
 	}()
 	client.ReadLoop(ctx, func(msg []byte) { session.onMessage(ctx, msg) })
 }
 
 // 編碼一個 envelope 成要送出的 frame；失敗只記 log 並回傳 nil（Hub 的方法收到 nil = 只改狀態、不送 frame）
-func (this *WebsocketHandler) encodeEnvelope(ctx context.Context, env wsEnvelope) []byte {
+func (h *WebsocketHandler) encodeEnvelope(ctx context.Context, env wsEnvelope) []byte {
 	msg, err := json.Marshal(env)
 	if err != nil {
-		this.logger.ErrorContext(ctx, "marshal ws envelope failed", "type", env.Type, "error", err)
+		h.logger.ErrorContext(ctx, "marshal ws envelope failed", "type", env.Type, "error", err)
 		return nil
 	}
 	return msg
 }
 
 // error envelope 的 frame
-func (this *WebsocketHandler) errorFrame(ctx context.Context, code, message string) []byte {
-	return this.encodeEnvelope(ctx, wsEnvelope{
+func (h *WebsocketHandler) errorFrame(ctx context.Context, code, message string) []byte {
+	return h.encodeEnvelope(ctx, wsEnvelope{
 		Type:    wsTypeError,
 		Payload: httpx.ErrorDetail{Code: code, Message: message},
 	})
@@ -211,98 +211,98 @@ func (this *WebsocketHandler) errorFrame(ctx context.Context, code, message stri
 
 // 解析 payload、確認房間存在、向 Redis JoinRoom。不碰鎖。
 // 成功回傳 room 的 public_id；失敗回傳要給 client 的 error（nil = 成功）
-func (this *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage) (string, *httpx.ErrorDetail) {
+func (h *WebsocketHandler) enterRoom(ctx context.Context, raw json.RawMessage) (string, *httpx.ErrorDetail) {
 	var p wsRoomPayload
 	if err := json.Unmarshal(raw, &p); err != nil || p.Room == "" {
-		this.logger.InfoContext(ctx, "ws join rejected", "reason", "malformed payload")
+		h.logger.InfoContext(ctx, "ws join rejected", "reason", "malformed payload")
 		return "", &httpx.ErrorDetail{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
 	}
-	if wsErr := this.lookupRoom(ctx, p.Room); wsErr != nil {
+	if wsErr := h.lookupRoom(ctx, p.Room); wsErr != nil {
 		return "", wsErr
 	}
-	if wsErr := this.subscribeRoom(ctx, p.Room); wsErr != nil {
+	if wsErr := h.subscribeRoom(ctx, p.Room); wsErr != nil {
 		return "", wsErr
 	}
 	return p.Room, nil
 }
 
 // 經 room use case 確認房間存在，包 wsJoinTimeout。不碰鎖。nil = 房間存在
-func (this *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
+func (h *WebsocketHandler) lookupRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
 	dbCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
-	if _, err := this.rooms.GetRoom(dbCtx, roomID); err != nil {
+	if _, err := h.rooms.GetRoom(dbCtx, roomID); err != nil {
 		if errors.Is(err, model.ErrRoomNotFound) {
-			this.logger.InfoContext(ctx, "ws join rejected", "reason", "room not found", "room", roomID)
+			h.logger.InfoContext(ctx, "ws join rejected", "reason", "room not found", "room", roomID)
 			return &httpx.ErrorDetail{Code: wsCodeRoomNotFound, Message: wsMsgRoomNotFound}
 		}
-		this.logger.ErrorContext(ctx, "ws join get room failed", "error", err, "room", roomID)
+		h.logger.ErrorContext(ctx, "ws join get room failed", "error", err, "room", roomID)
 		return &httpx.ErrorDetail{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
 	}
 	return nil
 }
 
 // 對 Redis 做 JoinRoom，包 wsJoinTimeout。不碰鎖。nil = 成功
-func (this *WebsocketHandler) subscribeRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
+func (h *WebsocketHandler) subscribeRoom(ctx context.Context, roomID string) *httpx.ErrorDetail {
 	joinCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
-	if err := this.redis.JoinRoom(joinCtx, roomID); err != nil {
-		this.logger.ErrorContext(ctx, "ws join room failed", "error", err, "room", roomID)
+	if err := h.redis.JoinRoom(joinCtx, roomID); err != nil {
+		h.logger.ErrorContext(ctx, "ws join room failed", "error", err, "room", roomID)
 		return &httpx.ErrorDetail{Code: wsCodeJoinUnavailable, Message: wsMsgJoinUnavailable}
 	}
 	return nil
 }
 
 // 對 Redis 做 LeaveRoom（絕不能在 Hub 的鎖裡呼叫），包 wsJoinTimeout
-func (this *WebsocketHandler) leaveRoom(ctx context.Context, roomID string) {
+func (h *WebsocketHandler) leaveRoom(ctx context.Context, roomID string) {
 	leaveCtx, cancel := context.WithTimeout(ctx, wsJoinTimeout)
 	defer cancel()
-	this.redis.LeaveRoom(leaveCtx, roomID)
+	h.redis.LeaveRoom(leaveCtx, roomID)
 }
 
 // 解析 payload、驗 token、確認 user 還在。不碰 Hub。
 // 失敗原因只記 log（不帶 token），回給 client 的一律是同一個 ws_auth_failed
-func (this *WebsocketHandler) verifyAuthPayload(ctx context.Context, raw json.RawMessage) (model.User, time.Time, bool) {
+func (h *WebsocketHandler) verifyAuthPayload(ctx context.Context, raw json.RawMessage) (model.User, time.Time, bool) {
 	var p wsAuthPayload
 	if err := json.Unmarshal(raw, &p); err != nil || p.Token == "" {
-		this.logger.InfoContext(ctx, "ws auth rejected", "reason", "malformed payload")
+		h.logger.InfoContext(ctx, "ws auth rejected", "reason", "malformed payload")
 		return model.User{}, time.Time{}, false
 	}
-	userID, exp, err := this.tokens.ParseAccessTokenClaims(p.Token)
+	userID, exp, err := h.tokens.ParseAccessTokenClaims(p.Token)
 	if err != nil {
-		this.logger.InfoContext(ctx, "ws auth rejected", "reason", "invalid token")
+		h.logger.InfoContext(ctx, "ws auth rejected", "reason", "invalid token")
 		return model.User{}, time.Time{}, false
 	}
 	dbCtx, cancel := context.WithTimeout(ctx, wsAuthDBTimeout)
 	defer cancel()
-	user, err := this.users.CurrentUser(dbCtx, userID)
+	user, err := h.users.CurrentUser(dbCtx, userID)
 	if err != nil {
 		if errors.Is(err, model.ErrUserNotFound) {
 			// user 已被刪除，但 token 還沒過期（stateless，撤不掉）
-			this.logger.InfoContext(ctx, "ws auth rejected", "reason", "user not found", "user_id", userID)
+			h.logger.InfoContext(ctx, "ws auth rejected", "reason", "user not found", "user_id", userID)
 		} else {
-			this.logger.ErrorContext(ctx, "ws auth get user failed", "error", err, "user_id", userID)
+			h.logger.ErrorContext(ctx, "ws auth get user failed", "error", err, "user_id", userID)
 		}
 		return model.User{}, time.Time{}, false
 	}
 	return user, exp, true
 }
 
-func (this *WebsocketHandler) StartBroadcast() {
+func (h *WebsocketHandler) StartBroadcast() {
 	// Redis subscribe 是 server 層級的長期任務，不屬於任何 request
 	// 所以要用context.Background()
-	this.redis.Subscribe(context.Background(), func(roomID, msg string) {
+	h.redis.Subscribe(context.Background(), func(roomID, msg string) {
 		// 同一個 room channel 上有兩種 payload：訊息（原樣轉給房內所有人）和 user_hidden
 		// （轉給房內「不是這個 user」的連線；本人不能知道自己被 ban，所以由 server 過濾，不交給 client）
 		// 前綴對得上卻解析失敗的 payload 直接丟掉：fall through 的話會被當訊息廣播給所有人（包括本人）
 		if userID, isHidden, valid := parseUserHidden(msg); isHidden {
 			if valid {
-				this.hub.BroadcastExceptUser(context.Background(), roomID, userID, []byte(msg))
+				h.hub.BroadcastExceptUser(context.Background(), roomID, userID, []byte(msg))
 			} else {
-				this.logger.Warn("malformed user_hidden payload dropped", "room", roomID)
+				h.logger.Warn("malformed user_hidden payload dropped", "room", roomID)
 			}
 			return
 		}
-		this.hub.Broadcast(context.Background(), roomID, []byte(msg))
+		h.hub.Broadcast(context.Background(), roomID, []byte(msg))
 	}, func(roomID string) {
 		// PubSub 重建後這間房重新訂閱好了，或 go-redis 重連後房間又收到訂閱確認（reconfirm）：中間發的訊息不會再推來，叫房內的 client 自己重新撈歷史
 		frame := encodeResync(roomID)
@@ -312,16 +312,16 @@ func (this *WebsocketHandler) StartBroadcast() {
 			return
 		}
 		prom.WSResync()
-		this.hub.Broadcast(context.Background(), roomID, frame)
+		h.hub.Broadcast(context.Background(), roomID, frame)
 	})
 }
 
-func (this *WebsocketHandler) StartPresence(store wsPresence) {
+func (h *WebsocketHandler) StartPresence(store wsPresence) {
 	// Presence也是Server level的任務，所以一樣用context.Background()
 	renew := time.NewTicker(10 * time.Second)
 	defer renew.Stop()
 	count := time.NewTicker(5 * time.Second)
 	defer count.Stop()
-	worker := newPresenceWorker(this.hub, store, this.logger)
-	worker.run(context.Background(), this.hub.PresenceChanged(), renew.C, count.C)
+	worker := newPresenceWorker(h.hub, store, h.logger)
+	worker.run(context.Background(), h.hub.PresenceChanged(), renew.C, count.C)
 }

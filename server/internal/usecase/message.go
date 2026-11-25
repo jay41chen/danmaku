@@ -66,7 +66,7 @@ func NewMessageUseCase(store messageStore, notifier messageNotifier, limiter mes
 // 發一則訊息：檢查內容 → 限流 → 存 DB → 廣播
 // 內容不合法回 *model.CodedError；被限流回 *model.RateLimitedError；限流查不到結果且規則是 fail closed 回 model.ErrRateLimiterUnavailable；其他 store 的 error 原樣回傳
 // 用途：POST /rooms/{public_id}/messages
-func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
+func (u *MessageUseCase) Post(ctx context.Context, roomPublicID string, userID int64, content string) (model.Message, error) {
 	// client 也會檢查，但那只是 UX；server 才是防線（curl 可以繞過 client）
 	// 只檢查、不改寫：存的是原始 content（不 trim、不正規化）
 	if err := textrule.MessageContent(content); err != nil {
@@ -77,8 +77,8 @@ func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userI
 	// 兩條規則都要問（不是第一條擋住就停）：被擋時 Retry-After 要給比較長的那個，
 	// 只回短的 client 馬上重試又會被另一條擋
 	value := strconv.FormatInt(userID, 10)
-	burstOK, burstRetry, burstErr := ratelimit.Check(ctx, this.limiter, this.logger, MessageBurstRule, value)
-	sustainOK, sustainRetry, sustainErr := ratelimit.Check(ctx, this.limiter, this.logger, MessageSustainRule, value)
+	burstOK, burstRetry, burstErr := ratelimit.Check(ctx, u.limiter, u.logger, MessageBurstRule, value)
+	sustainOK, sustainRetry, sustainErr := ratelimit.Check(ctx, u.limiter, u.logger, MessageSustainRule, value)
 	// 只有 FailClosed 的規則會回 err（現在訊息的規則都是 fail open，所以不會發生）；
 	// 原樣往上回，handler 翻成 503，不要被當成 429
 	if burstErr != nil {
@@ -91,7 +91,7 @@ func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userI
 		return model.Message{}, &model.RateLimitedError{RetryAfter: max(burstRetry, sustainRetry)}
 	}
 
-	msg, banned, err := this.store.CreateMessage(ctx, roomPublicID, userID, content)
+	msg, banned, err := u.store.CreateMessage(ctx, roomPublicID, userID, content)
 	if err != nil {
 		return model.Message{}, err
 	}
@@ -100,7 +100,7 @@ func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userI
 	// 沒收到即時廣播的人下次載入歷史訊息時還是看得到
 	// 被 ban（shadow ban）的作者：訊息已存，照常回成功，但不廣播，別人看不到；對他自己看不出任何差別
 	if !banned {
-		this.notifier.NotifyMessage(ctx, roomPublicID, msg)
+		u.notifier.NotifyMessage(ctx, roomPublicID, msg)
 	}
 	return msg, nil
 }
@@ -108,15 +108,15 @@ func (this *MessageUseCase) Post(ctx context.Context, roomPublicID string, userI
 // 讀房間的歷史訊息（舊到新，最多 HistoryLimit 則）；公開，不用登入
 // error 帶步驟名稱（get room / query messages），房間不存在時 errors.Is(err, model.ErrRoomNotFound) 仍成立
 // 用途：GET /rooms/{public_id}/messages
-func (this *MessageUseCase) History(ctx context.Context, roomPublicID string) ([]model.Message, error) {
+func (u *MessageUseCase) History(ctx context.Context, roomPublicID string) ([]model.Message, error) {
 	// GET 分兩步：先用 public id 查房間拿內部 id，再查訊息（POST 則是 CreateMessage 內一次做完）
 	// 因為這個 API 每次進房才打一次；兩步之間房間剛好被刪的 race，
 	// 只會多回一次剛刪房間的歷史訊息，無害
-	room, err := this.store.GetRoomByPublicID(ctx, roomPublicID)
+	room, err := u.store.GetRoomByPublicID(ctx, roomPublicID)
 	if err != nil {
 		return nil, fmt.Errorf("get room: %w", err)
 	}
-	msgs, err := this.store.QueryMessage(ctx, room.ID, HistoryLimit)
+	msgs, err := u.store.QueryMessage(ctx, room.ID, HistoryLimit)
 	if err != nil {
 		return nil, fmt.Errorf("query messages: %w", err)
 	}

@@ -74,7 +74,7 @@ return 0
 // 一次 round trip 寫入：add = 加入 / 續期，remove = 移除
 // 兩個都是空就不呼叫 Redis
 // ARGV 最後一個放 TTL 秒數（避免 script 裡寫死 30）
-func (this *RedisStore) SyncPresence(ctx context.Context, add, remove []model.PresenceEntry) error {
+func (s *RedisStore) SyncPresence(ctx context.Context, add, remove []model.PresenceEntry) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
 	}
@@ -90,7 +90,7 @@ func (this *RedisStore) SyncPresence(ctx context.Context, add, remove []model.Pr
 		args = append(args, presenceMember(e))
 	}
 	args = append(args, int(presenceTTL/time.Second))
-	return syncPresenceScript.Run(ctx, this.client, keys, args...).Err()
+	return syncPresenceScript.Run(ctx, s.client, keys, args...).Err()
 }
 
 // KEYS = 要算的房間 key；ARGV[1] = TTL 秒數
@@ -108,7 +108,7 @@ return result
 
 // 一次 round trip 算出每間房的人數；結果一定包含每個傳進來的房間（沒人 = 0）
 // 去重：登入的人（user_id != 0）同一個 user 只算 1（多分頁、多台 server）；匿名每條連線各算 1
-func (this *RedisStore) CountPresence(ctx context.Context, rooms []string) (map[string]int, error) {
+func (s *RedisStore) CountPresence(ctx context.Context, rooms []string) (map[string]int, error) {
 	counts := make(map[string]int, len(rooms))
 	if len(rooms) == 0 {
 		return counts, nil
@@ -117,7 +117,7 @@ func (this *RedisStore) CountPresence(ctx context.Context, rooms []string) (map[
 	for i, r := range rooms {
 		keys[i] = presenceKey(r)
 	}
-	raw, err := countPresenceScript.Run(ctx, this.client, keys, int(presenceTTL/time.Second)).Slice()
+	raw, err := countPresenceScript.Run(ctx, s.client, keys, int(presenceTTL/time.Second)).Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func (this *RedisStore) CountPresence(ctx context.Context, rooms []string) (map[
 // 把這一輪算出的人數寫進排行：count > 0 → ZADD，count == 0 → ZREM
 // 一個 pipeline（一次 round trip）送出一個 ZADD（多個 member）+ 一個 ZREM；空 map 不呼叫 Redis
 // 用途：presenceWorker 每次 CountPresence 之後
-func (this *RedisStore) UpdateViewerRanking(ctx context.Context, counts map[string]int) error {
+func (s *RedisStore) UpdateViewerRanking(ctx context.Context, counts map[string]int) error {
 	if len(counts) == 0 {
 		return nil
 	}
@@ -165,7 +165,7 @@ func (this *RedisStore) UpdateViewerRanking(ctx context.Context, counts map[stri
 			rems = append(rems, room)
 		}
 	}
-	_, err := this.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+	_, err := s.client.Pipelined(ctx, func(p redis.Pipeliner) error {
 		if len(adds) > 0 {
 			p.ZAdd(ctx, viewerRankingKey, adds...)
 		}
@@ -189,7 +189,7 @@ func (this *RedisStore) UpdateViewerRanking(ctx context.Context, counts map[stri
 // 跳過的房間 5 秒內會自我修正（下次呼叫就會正常出現）。
 // 去重用線性搜尋而不是 map：n 最多 model.MaxRoomListLimit（50），O(n²) 也只有幾千次比較，比 map 好讀；
 // 若放寬上限就改用 map
-func (this *RedisStore) TopRooms(ctx context.Context, n int) ([]model.RoomViewers, error) {
+func (s *RedisStore) TopRooms(ctx context.Context, n int) ([]model.RoomViewers, error) {
 	result := []model.RoomViewers{}
 	if n <= 0 {
 		return result, nil
@@ -198,14 +198,14 @@ func (this *RedisStore) TopRooms(ctx context.Context, n int) ([]model.RoomViewer
 	// start 只隨「留下來的」前進：被 ZREM 的會讓後面的往前補位，不用跳過
 	var start int64
 	for round := 0; round < topRoomsMaxRounds && len(result) < n; round++ {
-		batch, err := this.client.ZRevRangeWithScores(ctx, viewerRankingKey, start, start+batchSize-1).Result()
+		batch, err := s.client.ZRevRangeWithScores(ctx, viewerRankingKey, start, start+batchSize-1).Result()
 		if err != nil {
 			return nil, err
 		}
 		if len(batch) == 0 {
 			break
 		}
-		cmds, err := this.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+		cmds, err := s.client.Pipelined(ctx, func(p redis.Pipeliner) error {
 			for _, z := range batch {
 				p.Exists(ctx, presenceKey(z.Member.(string)))
 			}
@@ -232,7 +232,7 @@ func (this *RedisStore) TopRooms(ctx context.Context, n int) ([]model.RoomViewer
 			}
 		}
 		if len(stale) > 0 {
-			if err := this.client.ZRem(ctx, viewerRankingKey, stale...).Err(); err != nil {
+			if err := s.client.ZRem(ctx, viewerRankingKey, stale...).Err(); err != nil {
 				return nil, err
 			}
 		}

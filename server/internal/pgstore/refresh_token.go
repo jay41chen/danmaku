@@ -32,8 +32,8 @@ func createRefreshToken(ctx context.Context, db interface {
 }
 
 // login 成功時呼叫：不在 transaction 裡，用 pool
-func (this *DBStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
-	return createRefreshToken(ctx, this.dbPool, userID, tokenHash, ttl)
+func (s *DBStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+	return createRefreshToken(ctx, s.dbPool, userID, tokenHash, ttl)
 }
 
 // refresh token 的狀態（設計工具：DB 沒有 state 欄位，狀態是從欄位 + 現在時間推出來的）
@@ -210,8 +210,8 @@ func revokedByCredentialState(ctx context.Context, tx pgx.Tx, oldHash string) (b
 //	已作廢 > grace   → 寫入 valid_after（撤銷全部）         → *model.RefreshTokenDuplicateUseError（errors.Is model.ErrRefreshTokenDuplicateUse）
 //	被 valid_after 撤銷 → 不撤銷、不寫任何東西                → *model.RefreshTokenRevokedError（errors.Is model.ErrRefreshTokenInvalid）
 //	查不到 / 已過期   →                                      model.ErrRefreshTokenInvalid
-func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error) {
-	tx, err := this.dbPool.Begin(ctx)
+func (s *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash string, ttl, grace time.Duration) (int64, error) {
+	tx, err := s.dbPool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -280,8 +280,8 @@ func (this *DBStore) RotateRefreshToken(ctx context.Context, oldHash, newHash st
 
 // /logout：只作廢這一個；查不到或已作廢都不算錯（logout 本來就該 idempotent）
 // 而且這是user intent behavior，所以要特別記下revoked_reason
-func (this *DBStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
-	_, err := this.dbPool.Exec(ctx,
+func (s *DBStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	_, err := s.dbPool.Exec(ctx,
 		`
 			UPDATE refresh_tokens
 			SET revoked_at = now(), revoked_reason = 'logout'

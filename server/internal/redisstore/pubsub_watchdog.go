@@ -38,16 +38,16 @@ func newPubsubWatchdog(
 
 // consumer 收到心跳時呼叫：非阻塞送（跟 markDirtyLocked 一樣）
 // 已經有一個訊號在 buffer 裡就不用再送；阻塞的話會卡住整個 Subscribe 的消費迴圈，所有房間的訊息跟著停
-func (this *pubsubWatchdog) beat() {
+func (w *pubsubWatchdog) beat() {
 	select {
-	case this.received <- struct{}{}:
+	case w.received <- struct{}{}:
 	default:
 	}
 }
 
 // 定期檢查 PubSub 連線還收不收得到訊息，連續收不到就重建；生命週期跟著 application server
 // 用途：偵測連線沒斷、但已經收不到任何訊息的情況（half-open）
-func (this *pubsubWatchdog) run(ctx context.Context, tick <-chan time.Time) {
+func (w *pubsubWatchdog) run(ctx context.Context, tick <-chan time.Time) {
 	missCount := 0
 	published := false
 	for {
@@ -56,7 +56,7 @@ func (this *pubsubWatchdog) run(ctx context.Context, tick <-chan time.Time) {
 		case <-tick:
 			got := false
 			select {
-			case <-this.received:
+			case <-w.received:
 				got = true
 			default:
 			}
@@ -70,14 +70,14 @@ func (this *pubsubWatchdog) run(ctx context.Context, tick <-chan time.Time) {
 			if missCount >= heartbeatMissLimit {
 				// 多次都沒收到，判定死亡
 				// 重新建立再開始跑
-				this.rebuild(ctx)
+				w.rebuild(ctx)
 				missCount = 0
 			}
 			// 開始發送下一輪
-			err := this.publish(ctx)
+			err := w.publish(ctx)
 			published = err == nil
 			if err != nil {
-				this.logger.WarnContext(ctx, "publish heartbeat failed", "error", err)
+				w.logger.WarnContext(ctx, "publish heartbeat failed", "error", err)
 			}
 
 		case <-ctx.Done():

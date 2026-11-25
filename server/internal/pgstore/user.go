@@ -10,10 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func (this *DBStore) CreateUser(ctx context.Context, username string, passwordHash string) (int64, error) {
+func (s *DBStore) CreateUser(ctx context.Context, username string, passwordHash string) (int64, error) {
 	var id int64
 	// 用 Exec 還是 Query的取捨：=> 是否需要 DB 回傳資料列。
-	err := this.dbPool.QueryRow(ctx,
+	err := s.dbPool.QueryRow(ctx,
 		`
 			INSERT INTO users(username, password_hash)
 			VALUES($1, $2)
@@ -46,9 +46,9 @@ func (this *DBStore) CreateUser(ctx context.Context, username string, passwordHa
 	return id, nil
 }
 
-func (this *DBStore) GetUser(ctx context.Context, username string) (model.User, error) {
+func (s *DBStore) GetUser(ctx context.Context, username string) (model.User, error) {
 	var user model.User
-	err := this.dbPool.QueryRow(ctx,
+	err := s.dbPool.QueryRow(ctx,
 		`
 			SELECT id, username, password_hash, created_at
 			FROM users
@@ -64,9 +64,9 @@ func (this *DBStore) GetUser(ctx context.Context, username string) (model.User, 
 }
 
 // 用 id 查 user：WS auth 拿到 token 裡的 user id 後，確認這個 user 還在、並取得 username
-func (this *DBStore) GetUserByID(ctx context.Context, id int64) (model.User, error) {
+func (s *DBStore) GetUserByID(ctx context.Context, id int64) (model.User, error) {
 	var user model.User
-	err := this.dbPool.QueryRow(ctx,
+	err := s.dbPool.QueryRow(ctx,
 		`
 			SELECT id, username, password_hash, created_at
 			FROM users

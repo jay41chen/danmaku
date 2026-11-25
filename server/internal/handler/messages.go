@@ -47,20 +47,20 @@ type createMessageRequest struct {
 }
 
 // 公開：讀歷史訊息不用登入，知道 public_id 的人都能讀
-func (this *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) {
-	this.getMessages(w, r, r.PathValue("public_id"))
+func (h *MessageHandler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) {
+	h.getMessages(w, r, r.PathValue("public_id"))
 }
 
 // 讀歷史訊息；use case 回的 error 翻成 404 / 500
-func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, roomPublicID string) {
-	msgs, err := this.messages.History(r.Context(), roomPublicID)
+func (h *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, roomPublicID string) {
+	msgs, err := h.messages.History(r.Context(), roomPublicID)
 	if errors.Is(err, model.ErrRoomNotFound) {
 		// 已刪除的房間也回 404（跟 HandleGetRoom 一樣）
 		httpx.WriteError(w, http.StatusNotFound, "room_not_found", "room not found")
 		return
 	}
 	if err != nil {
-		this.logger.ErrorContext(r.Context(), "get messages failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "get messages failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
@@ -72,12 +72,12 @@ func (this *MessageHandler) getMessages(w http.ResponseWriter, r *http.Request, 
 	// 之後前面放 CDN 或 nginx 時：要避免快取到期瞬間全部回源，要開 stale-while-updating 類設定
 	// （實測 nginx 只開 proxy_cache_lock 時，EXPIRED 的 1000 個併發全部回源；加上 proxy_cache_use_stale updating 後最多 1 個）
 	w.Header().Set("Cache-Control", "public, s-maxage=1")
-	httpx.WriteJSON(w, r, this.logger, http.StatusOK, msgs)
+	httpx.WriteJSON(w, r, h.logger, http.StatusOK, msgs)
 }
 
 // 要登入（RequireAuth）；訊息存進 path 指定的房間
-func (this *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *http.Request) {
-	this.createMessage(w, r, r.PathValue("public_id"))
+func (h *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *http.Request) {
+	h.createMessage(w, r, r.PathValue("public_id"))
 }
 
 // flow:
@@ -85,8 +85,8 @@ func (this *MessageHandler) HandleCreateRoomMessage(w http.ResponseWriter, r *ht
 // 解析 body
 // 交給 use case（檢查內容、限流、存 DB、廣播）
 // 回 201
-func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request, roomPublicID string) {
-	userID, ok := requireUserID(w, r, this.logger)
+func (h *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request, roomPublicID string) {
+	userID, ok := requireUserID(w, r, h.logger)
 	if !ok {
 		return
 	}
@@ -97,14 +97,14 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	msg, err := this.messages.Post(r.Context(), roomPublicID, userID, req.Content)
+	msg, err := h.messages.Post(r.Context(), roomPublicID, userID, req.Content)
 	if writeIfRateLimited(w, err) {
 		return
 	}
 	var coded *model.CodedError
 	switch {
 	case errors.As(err, &coded):
-		httpx.WriteCodedError(w, r, this.logger, http.StatusBadRequest, coded)
+		httpx.WriteCodedError(w, r, h.logger, http.StatusBadRequest, coded)
 		return
 	case errors.Is(err, model.ErrRoomNotFound):
 		// 房間不存在或已刪除（兩者都不讓外人分辨）
@@ -116,13 +116,13 @@ func (this *MessageHandler) createMessage(w http.ResponseWriter, r *http.Request
 		httpx.WriteUnauthorized(w)
 		return
 	case err != nil:
-		this.logger.ErrorContext(r.Context(), "create message failed", "error", err)
+		h.logger.ErrorContext(r.Context(), "create message failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
 	// body 是 msg 本身，不是 envelope：envelope 是 WS 的格式
-	httpx.WriteJSON(w, r, this.logger, http.StatusCreated, msg)
+	httpx.WriteJSON(w, r, h.logger, http.StatusCreated, msg)
 }
 
 // 把 envelope 編碼後發到房間的 Redis channel；失敗只記 log 並計數、不回傳 error（呼叫端的 DB 已經 commit，沒有補救的辦法）

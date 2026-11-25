@@ -13,10 +13,10 @@ import (
 // 讀某個 user 在某間房的角色（房主 / 房管 / 被 ban / 一般觀眾）
 // 房間不存在或已刪除 → model.ErrRoomNotFound；user 不存在不會報錯，一樣算一般觀眾
 // 被 ban 的人這裡回 RoomRoleBanned：「對外要說成 viewer」是 use case 的事，store 如實回報
-func (this *DBStore) GetUserRoomRole(ctx context.Context, roomPublicID string, userID int64) (model.RoomRole, error) {
+func (s *DBStore) GetUserRoomRole(ctx context.Context, roomPublicID string, userID int64) (model.RoomRole, error) {
 	var ownerID int64
 	var role *string
-	err := this.dbPool.QueryRow(ctx,
+	err := s.dbPool.QueryRow(ctx,
 		`
 			SELECT r.owner_id, rr.role
 			FROM rooms r
@@ -56,8 +56,8 @@ func roleOf(userID, ownerID int64, stored *string) model.RoomRole {
 //
 // 鎖用 FOR NO KEY UPDATE 而不是 FOR UPDATE：同房間的角色變更排隊，但不擋 messages INSERT 對 rooms 的 FK 檢查
 // （FK 檢查拿 FOR KEY SHARE，跟 NO KEY UPDATE 不衝突，跟 FOR UPDATE 會衝突）
-func (this *DBStore) ChangeRoomRole(ctx context.Context, roomPublicID string, actorID, targetID int64, desired model.RoomRole, decide model.RoleDecider) (model.RoleChangeResult, error) {
-	tx, err := this.dbPool.Begin(ctx)
+func (s *DBStore) ChangeRoomRole(ctx context.Context, roomPublicID string, actorID, targetID int64, desired model.RoomRole, decide model.RoleDecider) (model.RoleChangeResult, error) {
+	tx, err := s.dbPool.Begin(ctx)
 	if err != nil {
 		return model.RoleChangeResult{}, err
 	}
@@ -158,7 +158,7 @@ func roleInRoom(ctx context.Context, tx pgx.Tx, roomID, ownerID, userID int64) (
 // 列出房間的角色名單（不含房主），最新的在前：created_at DESC, user_id DESC
 // after == nil → 第一頁；回傳的 cursor == nil 代表沒有下一頁（同 GetRoomLists：多撈一筆判斷）
 // 房間不存在或已刪除 → 空名單（use case 先用 GetUserRoomRole 確認過房間）
-func (this *DBStore) ListRoomRoles(ctx context.Context, roomPublicID string, after *model.RoleCursor, limit int) ([]model.RoomRoleEntry, *model.RoleCursor, error) {
+func (s *DBStore) ListRoomRoles(ctx context.Context, roomPublicID string, after *model.RoleCursor, limit int) ([]model.RoomRoleEntry, *model.RoleCursor, error) {
 	if limit > model.MaxRoomListLimit || limit <= 0 {
 		return nil, nil, model.ErrInvalidLimit
 	}
@@ -178,7 +178,7 @@ func (this *DBStore) ListRoomRoles(ctx context.Context, roomPublicID string, aft
 	}
 	sql += ` ORDER BY rr.created_at DESC, rr.user_id DESC LIMIT $2`
 
-	rows, err := this.dbPool.Query(ctx, sql, args...)
+	rows, err := s.dbPool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, nil, err
 	}
