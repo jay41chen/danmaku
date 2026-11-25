@@ -309,8 +309,8 @@
   - 補限流擋不到的兩個洞：攻擊者分散到大量 IP（每個 IP 都低於上限、credential stuffing 每個帳號只試一次）；per-username 限流可被拿來故意鎖別人的帳號（DoS）
   - 失敗超過門檻時改成要求驗證，而不是直接 429：真人解完照樣登入，bot 每次嘗試都要付成本
 - [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
-- [ ] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
-  - 2026-11-25：`dummyHash` 改成 init 時 panic、`WithGroup` 照 slog handler 指南重寫（`request_id` 留在最上層）、`UserIDFromContext` 簡化，都已完成；剩 `this` receiver rename
+- [x] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
+  - 2026-11-25：`dummyHash` 改成 init 時 panic、`WithGroup` 照 slog handler 指南重寫（`request_id` 留在最上層）、`UserIDFromContext` 簡化，都已完成；`this` receiver 改成短名稱（每個型別一個，AST 檢查沒有遮蔽）也完成；`ContextHandler` 沒開 group 時不重建 record
   - `ContextHandler` 已知限制（Judge 觀察，low）：group 裡只有 key 為空字串的 attr 時，stdlib JSONHandler 會輸出少逗號的 JSON（stdlib 本身的 bug，原本轉給 inner 的路徑不會觸發）；repo 目前沒用 group，要修就在包 group 前濾掉空 key 的 attr
 - [ ] 密碼外洩檢查：register 時查 HIBP Pwned Passwords API（取代 / 補強 W4-3 embed 的常見密碼清單）
   - k-anonymity：只送 SHA-1 前 5 碼，比對在本機做，原密碼與完整 hash 都不離開 server
