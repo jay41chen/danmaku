@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -48,11 +49,11 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		dbError = this.db.CheckHealth(ctx)
+		dbError = checkSafely("db", func() error { return this.db.CheckHealth(ctx) })
 	}()
 	go func() {
 		defer wg.Done()
-		redisError = this.redis.CheckHealth(ctx)
+		redisError = checkSafely("redis", func() error { return this.redis.CheckHealth(ctx) })
 	}()
 	wg.Wait()
 
@@ -70,4 +71,20 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 	}
 
 	httpx.WriteJSON(w, r, this.logger, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// 呼叫 check，panic 時轉成 error 回傳（health check 不能因為某個依賴的 client panic 就讓 process 掛掉）
+// 為什麼需要：check 跑在 HandleHealthCheck 自己開的 goroutine 上，RecoverPanic 接不到（recover 只對同一個 goroutine 有效）
+// 同步函式、不開 goroutine：go 和 wg.Done() 留在呼叫端，賦值完成才會 Done，不用排 defer 的順序
+// err 用具名回傳值：panic 後 return check() 跑不到，只能靠 defer 改 err（見 go-notes 1.27）
+// （TestHealthCheckPanicBecomesError）
+func checkSafely(name string, check func() error) (err error) {
+	defer func() {
+		rec := recover()
+		switch {
+		case rec != nil:
+			err = fmt.Errorf("%s health check panicked: %v", name, rec)
+		}
+	}()
+	return check()
 }
