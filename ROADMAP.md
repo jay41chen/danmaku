@@ -133,7 +133,7 @@
       - 之後：`lockUser` 用 `FOR UPDATE` 會擋住這個 user 的 FK INSERT（登入、發彈幕）幾 ms，可改 `FOR NO KEY UPDATE`；token family（RFC 9700：只撤銷同一次登入衍生的那串，不踢掉其他裝置）
     - [x] 補 mutation 沒擋住的 test：WS 過期 timer 拿鎖後重查 exp（ws.go）、`handleLeave` 清 `c.room`（leave 後不再收到廣播）、未知帳號的 dummy bcrypt（timing 防列舉；`AuthHandler.checkPassword` 可替換成 spy）
     - [x] `Publish` 改用 `context.WithoutCancel(r.Context())` + 短 timeout：INSERT 成功後 client 斷線 → 已存 DB 但沒廣播。只改 `broadcast()`（`publishTimeout` 500ms），INSERT 維持 request ctx（INSERT 前 / 中取消 = 沒存也沒廣播，一致）
-      - 同類（低優先，未修）：login 的 `CreateRefreshToken` commit 之後，`limiter.Reset` / `Refund` 還用 `r.Context()` → client 中途斷線時失敗計數沒 reset、IP 沒退還（client 沒拿到 token，說得過去）
+      - [x] 同類：login 的 `CreateRefreshToken` commit 之後，`limiter.Reset` / `Refund` 還用 `r.Context()` → client 中途斷線時失敗計數沒 reset、IP 沒退還（✅ 2026-11-24，Q641 A：改用 `context.WithoutCancel` + 200 ms；密碼打對不會因為回應沒送到就變成假的，[ADR 0020](docs/design/0020-redis-blackhole-gray-failure.md) Fix 4）
       - Known issue：D1 test 靠 100ms token + 250ms sleep 的時序（沿用既有 race test），CI 很慢時可能誤報失敗（不會假通過）；真的 flaky 再放寬
     - [x] Redis 出狀況時不要拖垮整台 server（2026-11-02，`roomSubscriptions` 改成 reconciliation loop，見 go-notes 3.32）
       - 做法：事件端（Join / Leave / expire / confirmSubscribed）在 `mu` 底下只改記憶體、標 dirty；整台 server 一個 worker goroutine 比對 desired（`viewers > 0 || timer != nil`）/ actual（`state`），在鎖外送 SUB / UNSUB。`room_subscriptions.go`（事件端）+ `room_subscriptions_worker.go`（worker）
@@ -279,7 +279,9 @@
 - [x] 延後補發 resync（✅ 2026-11-23，ADR 0020 Fix 2）：server-2 觀眾永久缺 770 → 530、每人補回 46，5 人都收到 resync
 - [ ] `resync` 帶起始時間、client 撈那段期間的歷史（2026-11-23，Q555 A，ADR 0020 Fix 2）：現在只補最新 100 則（`HistoryLimit`），黑洞 60 秒時每人還缺約 106 則，而且已收到的訊息會佔掉這 100 則的額度。**目前只補最新 100 則是刻意的**：彈幕送達本來就是盡力而為（ADR 0018），幾秒前飛過去的彈幕價值很低，觀眾不需要每一則。旗標裡本來就記著第一次失敗的時間，所以做得到；代價是改 API 和 client、GET 尖峰變大。產品定位變了（例如要當聊天記錄）再做
 - [ ] `user_hidden` 漏送時，已顯示的彈幕不會被移除（2026-11-23，Q552 A，延後補發 resync 的 Judge 觀察）：`user_hidden` publish 失敗時，延後補發的 resync 會讓 client 重撈歷史，但 client 合併歷史只加不刪 → 被 ban 者已經在畫面上的彈幕留著。既有 resync 語意本來就這樣、不是退步；ban 很少、又要剛好碰上 Redis 失敗。要修的話：client 重撈後以歷史為準取代（不是合併），或 resync 時另外帶被隱藏的 user
-- [ ] 其他沒設期限的 Redis 呼叫（2026-11-20，Q536 A，ADR 0020）：`TopRooms`、login 的 `Refund` / `Reset` 用 request ctx，黑洞時會卡約 55 秒。檢查所有 Redis 呼叫都有期限；為什麼剛好約 55 秒（read timeout + 重試只解釋約 20 秒）沒查
+- [x] 其他沒設期限的 Redis 呼叫（✅ 2026-11-24，Q630–Q645，[ADR 0020](docs/design/0020-redis-blackhole-gray-failure.md) Fix 4；2026-11-20，Q536 A）：`TopRooms`、login 的 `Refund` / `Reset` 用 request ctx，黑洞時會卡約 55 秒。55 秒的來源：go-redis 預設每次撥號內建重撥 5 次（`DialerRetries`），一次撥號就 25 秒；沒期限的呼叫卡多久看連線池狀態，探針實測 20 / 56 / 81 / 100+ 秒。修法：(1) 改 client 預設（URL 沒指定時 `ReadTimeout` 1 s、`DialTimeout` 1 s、`DialerRetries` 1）→ 沒期限的呼叫最壞約 4 秒，探針實測 3.1～4.1 秒；(2) `TopRooms` 500 ms、`ratelimit.Reset` / `Refund` 200 ms + `WithoutCancel`。end-to-end：黑洞時 `GET /rooms?sort=viewers` 81 秒 / 超過 100 秒 → 0.51 秒 503。副作用：`PoolTimeout` 6 → 2 秒；啟動時等 Redis 的緩衝變短（見下一項）
+- [ ] 啟動時 Redis 還沒好就直接退出（2026-11-24，ADR 0020 Fix 4 Judge J5）：`DialerRetries` 改成 1 之後，啟動的 `Ping` 在幾百 ms 內就放棄、`os.Exit(1)`（以前約 2 秒緩衝）。有 healthcheck / `depends_on` 的環境不受影響；部署平台決定後（Q612）再看要不要讓啟動流程等 Redis，或靠平台重啟
+- [ ] Redis 指令延遲與錯誤的 metric + alert（2026-11-24，Q640 A，ADR 0020 Fix 4）：現在看不到 1 秒 timeout 還剩多少餘裕。用 go-redis hook（不用加套件）記 `redis_command_duration_seconds{cmd}` 和 `redis_command_errors_total{cmd,kind}`；alert 例如錯誤率 5 分鐘 > 1%、p99 10 分鐘 > 250 ms（timeout 的 1/4）、`redis_pubsub_deaf_total` 有增加。alert 規則要等部署平台（Q612）決定有沒有 Prometheus / Alertmanager
 
 - [x] `resync` 的 GET 尖峰（✅ 2026-11-24，[ADR 0021](docs/design/0021-resync-get-spike-and-pool-size.md)：不加快取 / singleflight，改成合併 resync；2026-11-17，Q501 A）：Redis 回來後，所有房間的所有 viewer 在 2 秒內各打一次 GET（client 有 0～2 秒 jitter）。目前 server 內沒有 singleflight / 快取，前面也沒有 CDN / nginx（`s-maxage=1` 沒作用）。M10d 用 1,000 viewer 量：沒有快取 / nginx 快取（`proxy_cache_lock` + `proxy_cache_use_stale updating`）/ server 內 singleflight（`golang.org/x/sync` 已是間接依賴，改直接依賴要先問）。注意 micro-cache 會給舊最多 1 秒的快照，跟 resync 要最新的衝突
 

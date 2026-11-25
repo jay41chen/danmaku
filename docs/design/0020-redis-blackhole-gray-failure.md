@@ -1,6 +1,7 @@
 # 0020 — One server loses Redis silently: a gray failure that health checks can't see
 
-**Status**: Accepted (2026-11-18). Fixes 1 and 3 done on 2026-11-20, fix 2 (deferred `resync`) on 2026-11-23 (see
+**Status**: Accepted (2026-11-18). Fixes 1 and 3 done on 2026-11-20, fix 2 (deferred `resync`) on 2026-11-23, fix 4
+(client defaults, the remaining calls without a deadline, and where the 55 s came from) on 2026-11-24 (see
 [Fixes](#fixes)).
 
 ## Context
@@ -134,7 +135,7 @@ Redis calls had no deadline. The first call after the blackhole began hung for a
 behind it: no renewals, no counts pushed, no log. That is the same 55 s after which the POSTs in the first run
 turned fast. **A Redis call without a deadline hangs in a blackhole until go-redis' pool starts returning the last
 dial error.** Why it takes 55 s exactly was not investigated; read timeout and retries alone account for about
-20 s. Each of the worker's three calls now gets its own 1 s.
+20 s. (Explained in Fix 4 below.) Each of the worker's three calls now gets its own 1 s.
 
 **Reruns**, one each, blackhole 60 s. Runs 3 and 4 observed for 180 s, because the `resync` comes 32–38 s after the
 blackhole ends and run 2's 120 s just missed it.
@@ -208,6 +209,63 @@ didn't see the deferred `resync`: their own subscription was still cut until the
 and a viewer doesn't need every message. The flag already holds the time of the first failure, so `resync` could
 carry it and the client could fetch history since then. That changes the API and the client, and makes the GET
 spike larger; it is in the backlog.
+
+**Fix 4: client defaults, and the last calls without a deadline (2026-11-24).** Two request paths still called
+Redis on the request context, which has no deadline (the HTTP server sets no timeouts): `TopRooms` for
+`GET /rooms?sort=viewers`, and the `Reset` / `Refund` after a successful login.
+
+**Where the 55 s came from.** Read from the go-redis v9.23 source, then measured. The defaults are `ReadTimeout`
+5 s, `DialTimeout` 5 s, `MaxRetries` 3 (4 attempts) and `DialerRetries` 5: every *dial* retries itself 5 times, so
+one dial in a blackhole takes 5 × 5 s + 4 × 100 ms ≈ 25.4 s. That inner retry is what the 20 s estimate above
+missed. An attempt that finds an idle connection in the pool waits `ReadTimeout`; one that doesn't has to dial.
+After `PoolSize` failed dials in total, the pool stops dialing and returns the last dial error at once.
+
+So how long a call without a deadline hangs depends on the state of the pool, not on a fixed number. A throwaway
+probe (go-redis in a container on the fault network, dropping its own packets to Redis, not part of the repo;
+`PoolSize` 80, pool warmed with 50 connections; one run each):
+
+| Calls without a deadline | go-redis defaults | Why |
+|---|---|---|
+| 1 call, pool has idle connections | **20.1 s** | 4 attempts, each takes another dead idle connection: 4 × 5 s |
+| 50 at once | **55.9 s** | read 5 s, then 2 dials of 25.4 s; by then 100 dials have failed (≥ 80), so attempt 4 fails at once. This is the 55 s of run 1 |
+| `server-1`, `GET /rooms?sort=viewers` 1 s into the blackhole | **81.4 s** (503) | little traffic, one idle connection: 5 s + 3 × 25.4 s |
+| same, 30 s in | **> 100 s** (curl gave up) | no idle connection left: 4 × 25.4 s |
+
+**Decision**
+- **Our own client defaults**, applied in `redisstore` after `ParseURL`, only where the URL left a field unset:
+  `ReadTimeout` 1 s, `DialTimeout` 1 s, `DialerRetries` 1; `MaxRetries` stays 3. A read and a dial now both cost
+  at most 1 s, so a call without a deadline gives up after about 4 s whatever the pool looks like. Probe, same
+  setup: 1 call **4.1 s**, 50 at once **3.1 s** (attempt 4 hits the failed-dial limit).
+- The defaults are a **safety net for calls that forgot a deadline**, not a budget. A call that must be fast still
+  passes its own context deadline, and go-redis uses whichever comes first. They are seconds rather than 100 ms on
+  purpose: healthy Redis can be slow for hundreds of ms (our own overloaded server, as in
+  [ADR 0021](0021-resync-get-spike-and-pool-size.md); a slow command; a fork), and a timeout that fires on a
+  healthy Redis turns slowness into errors and retries.
+- **`TopRooms` gets 500 ms** in the use case, only for that call, not for the database query after it. A timeout
+  becomes the existing 503 `viewer_ranking_unavailable`.
+- **`Reset` / `Refund` go through new `ratelimit.Reset` / `ratelimit.Refund` helpers** with the limiter's 200 ms,
+  on `context.WithoutCancel`: the password was right even if the client left before reading the response, and the
+  200 ms keeps that from hanging. Same pattern as `Publish` after a message is stored.
+
+**End-to-end**, fault environment, blackhole on `server-1`, one run: `GET /rooms?sort=viewers` 1 s and 30 s into
+the blackhole went from 81.4 s and > 100 s to **0.51 s** (503) both times. The login path was covered by unit
+tests only: in a blackhole, login fails closed at the limiter ([ADR 0022](0022-auth-limiter-fails-closed.md))
+before it reaches `Reset`.
+
+**Consequences**
+- `PoolTimeout` follows `ReadTimeout` + 1 s, so it drops from 6 s to 2 s: when the pool is exhausted under load,
+  a call without a deadline gets a pool timeout sooner (and retries it).
+- The ~4 s holds when packets are dropped. If TCP connects but Redis doesn't answer, each new connection also waits
+  up to 1 s for the handshake, so up to about 8 s.
+- PubSub receiving has no socket timeout and is unaffected. go-redis' own PubSub health ping only writes, now with
+  a 1 s write deadline instead of 5 s.
+- **Startup is less patient.** With one dial per attempt, the startup `Ping` gives up within a few hundred ms if
+  Redis isn't accepting connections yet, and the server exits; before, the dial retries gave it about 2 s.
+  Environments that wait for a healthy Redis are unaffected. Deferred to the deployment decision.
+- Still without a deadline, by choice: the PubSub rebuild (its own goroutine; a rebuild can't succeed while Redis
+  is unreachable anyway) and the startup `Ping`. Both are now bounded by the new defaults.
+- Nothing shows yet how much of the 1 s is in use. A latency and error metric per Redis command (a go-redis hook)
+  and alerts are in the backlog, waiting for a place to run them.
 
 ## Consequences
 
