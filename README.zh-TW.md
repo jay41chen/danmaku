@@ -402,6 +402,8 @@ server 只依賴 Dockerfile、env、Postgres / Redis 標準協定，沒有平台
 1. **建 service**：從 `server/Dockerfile` build（build context 是 `server/`），image 入口 `/server`、會讀平台給的 `PORT`。平台必須支援 WebSocket；health check 設 `/healthcheck`。
 2. **Postgres**：開新的空 DB 即可，server 啟動時會自動套 migration。要保留資料時用 `pg_dump --no-owner --no-acl` 匯出再匯入。託管服務常要求 TLS，`DATABASE_URL` 加 `sslmode=require`；`pool_max_conns` 在新主機上重新決定（[ADR 0021](docs/design/0021-resync-get-spike-and-pool-size.md)）。
 3. **Redis**：**不用搬資料**（只放 Pub/Sub 和限流計數，都是暫時的），開一個新的即可。
+   - 託管的可能是 Redis 也可能是 Valkey（Redis 改授權後的 fork，協定相容，用到的指令兩邊都有），server 不用改；本機 `docker-compose.yml` 和 `deploy/fault/` 的 image 改成跟 prod 同一個，故障實驗的結果才有參考價值。
+   - 啟動時 Redis 要已經能連：連不上時 server 幾百 ms 內就放棄並退出（[ADR 0020](docs/design/0020-redis-blackhole-gray-failure.md) Fix 4）。確認平台會自動重啟，或 Redis 先起來再起 server。
 4. **env**：照下方 [Environment Variables](#environment-variables) 填 `DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、`CORS_ORIGINS`、`CLIENT_IP_HEADER`。`JWT_SECRET` 沿用舊值，已登入的使用者就不會被登出；換新值也只是大家要重新登入。
 5. **`CLIENT_IP_HEADER`（最容易錯，而且設錯不會報錯）**：查新平台的 proxy 會**覆蓋**哪個 header，而且值要是**單一 IP**。目前程式只接受單一 IP；值是 `X-Forwarded-For` 那種逗號分隔的清單時會解析失敗、退回 RemoteAddr，所有人共用同一個限流計數；設錯時 log 會出現一筆 `client ip header unusable` 開頭的 warn（每個 process 一次），`/metrics` 的 `client_ip_fallback_total` 也會增加。
 6. **前端**：改 GitHub Secrets 的 `VITE_API_URL`、`VITE_WS_URL`（`wss://`），在 Actions 手動跑 Deploy Frontend（`workflow_dispatch`）。新的 API 位址要在 `CORS_ORIGINS` 允許的前端 origin 下測。
