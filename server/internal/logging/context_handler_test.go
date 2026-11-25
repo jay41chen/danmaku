@@ -101,6 +101,23 @@ func TestContextHandlerWithGroupKeepsRequestIDTopLevel(t *testing.T) {
 	}
 }
 
+// 沒開 group（走快速路徑）：component、record attrs、request_id 都在最上層
+func TestContextHandlerNoGroupAllTopLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewContextHandler(slog.NewJSONHandler(&buf, nil))).With("component", "api")
+
+	logger.InfoContext(ctxWithRequestID(t, "abc"), "m", "y", 2)
+
+	got := decodeLog(t, &buf)
+	delete(got, "time")
+	delete(got, "level")
+	delete(got, "msg")
+	want := map[string]any{"component": "api", "y": float64(2), "request_id": "abc"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("log = %v, want %v", got, want)
+	}
+}
+
 func TestContextHandlerNestedGroups(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(NewContextHandler(slog.NewJSONHandler(&buf, nil))).

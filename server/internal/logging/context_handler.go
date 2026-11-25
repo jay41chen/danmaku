@@ -34,6 +34,15 @@ func (h ContextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h ContextHandler) Handle(ctx context.Context, r slog.Record) error {
+	// 沒開過 group 時，record 的 attrs 本來就在最上層，不用重建，只補 request_id 就好
+	// （r 是 slog 傳進來的副本，AddAttrs 不會動到別人的 record）
+	if len(h.chain) == 0 {
+		if requestID := middleware.RequestIDFromContext(ctx); requestID != "" {
+			r.AddAttrs(slog.String("request_id", requestID))
+		}
+		return h.inner.Handle(ctx, r)
+	}
+
 	attrs := make([]slog.Attr, 0, r.NumAttrs())
 	r.Attrs(func(a slog.Attr) bool {
 		attrs = append(attrs, a)
