@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ApiError, apiFetch } from "../api/client";
+import { ApiError, ApiTimeoutError, apiFetch } from "../api/client";
 import { ROOM_MESSAGES_PATH } from "../config";
 import { useSession } from "../hooks/useSession";
 import * as danmaku from "../realtime/danmaku";
@@ -42,7 +42,11 @@ export function Composer() {
       }
       setInput("");
     } catch (e) {
-      if (e instanceof ApiError) {
+      // 逾時不代表 server 沒收到（訊息可能已寫入並廣播）；
+      // 目前沒有 idempotency key，所以不自動重送，請使用者確認後再決定
+      if (e instanceof ApiTimeoutError) {
+        setError("連線逾時，訊息可能已送出，請確認後再重送");
+      } else if (e instanceof ApiError) {
         if (e.status === 401) setError("登入已過期，請重新登入");
         else if (e.status === 404) setError("房間不存在");
         else if (e.status === 429)
