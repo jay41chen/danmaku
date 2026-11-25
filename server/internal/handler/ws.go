@@ -125,22 +125,32 @@ func NewWebsocketHandler(redis wsPubSub, rooms wsRoomUseCase, users wsUserUseCas
 	}
 }
 
-// 一條連線的生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
+// WebSocket 的入口：一條連線從 HTTP upgrade 到斷線清理，整個生命週期都在這個 function 裡（同一個 goroutine）
+//
+// 生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
 //
 //	各種原因 → ReadMessage 失敗 → ReadLoop return（或處理訊息時 panic）→ hub.Unregister + LeaveRoom（defer）→ HandleWebsocket return
-//	                                                                          └ defer client.Close() → close(done)（PingLoop、WriteLoop 結束）+ conn.Close()（已經被 Close 過就什麼都不做）
+//	  → defer client.Close()：close(done)（PingLoop、WriteLoop 結束）+ conn.Close()（已經被 Close 過就什麼都不做）
+//	  → defer untrack()：Hub 的連線計數 -1（關機時 Hub.CloseAll 在等它歸零）
 //
 // 其他人發現連線壞了只 Close() 叫醒讀取迴圈，不自己 Unregister / LeaveRoom：
 //   - PingLoop：送 ping 失敗
 //   - WriteLoop：寫 frame 失敗
 //   - Hub.enqueueLocked（透過 client.Close）：outbox 滿了（慢 client，廣播或回覆都可能觸發）
+//   - Hub.CloseAll（關機）：等不到 client 回 close frame、ctx 到期時強制 Close
 //
 // 鎖規則見 ws.Hub：Hub 底下絕不做 I/O —— JoinRoom / LeaveRoom（Redis）、DB 都在 Hub 外做完，再呼叫 Hub 更新狀態、排 frame
 // 在 listenConnection 之前 return 會跳過 Unregister → Hub 裡留一筆，不要這樣寫
 func (h *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
-	// WebSocket 連線的起點其實是一個普通的 HTTP request。
-	// 瀏覽器先發一個 HTTP request 說「我想升級成 WebSocket」，
-	// server 同意後才切換協定。
+	// 1. 關機追蹤：Hub.CloseAll 要等每條連線的 HandleWebsocket 跑完（含 Unregister 之後的 leaveRoom）
+	//   - 放在 Upgrade 之前：這時還是普通 HTTP request，server.Shutdown 一定會等它；
+	//     Upgrade（hijack）之後 Shutdown 就不管這條連線了，晚一步 +1 的話 CloseAll 可能已經開始、漏等這條
+	//   - 最先 defer → 最後執行：-1 時這條連線的清理（leaveRoom、Close）都已經做完
+	//   - Upgrade 失敗直接 return 時 defer 照樣 -1，不會漏扣
+	untrack := h.hub.TrackConn() // +1，拿到結束用的函式
+	defer untrack()              // return 時 -1
+
+	// 2. HTTP → WebSocket：起點是一個普通的 HTTP request（「我想升級成 WebSocket」），server 同意後才切換協定
 	//
 	// r.Context() 的生命週期：Hijack 之後 net/http 不再監看這條連線，
 	// 所以 client 斷線時 ctx 不會被取消，要等這個 function return 才會取消
@@ -160,17 +170,22 @@ func (h *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Reques
 		h.logger.ErrorContext(r.Context(), "ws upgrade failed", "error", err)
 		return
 	}
+
+	// 3. 建 Client，登記關閉：不管從哪裡 return 都要關，close(done) 讓 PingLoop、WriteLoop 結束，再關 conn
+	// 已經被別人 Close 過（被踢、寫入失敗、關機強制關）也沒關係，Close 可以重複呼叫；早退（連線數滿）時 done 沒人在聽，無所謂
 	client := ws.NewClient(conn, h.pingPeriod, h.pongWait)
-	// 不管從哪裡 return 都要關：close(done) 讓 PingLoop、WriteLoop 結束，再關 conn
-	// 已經被別人 Close 過（被踢、寫入失敗）也沒關係，Close 可以重複呼叫；早退（連線數滿）時 done 沒人在聽，無所謂
 	defer client.Close()
 
+	// 4. 加進 Hub：連線數滿了就直接結束（defer 會關連線、-1）
 	if !h.hub.Register(r.Context(), client) {
 		return
 	}
+
+	// 5. 背景 loop：PingLoop 定期送 ping、WriteLoop 把 outbox 裡排好的 frame 寫進 conn
 	go client.HandlePingLoop(r.Context())
 	go client.HandleWriteLoop(r.Context())
 
+	// 6. 讀取迴圈：連線活著的期間都卡在這裡，結束時負責 Unregister + LeaveRoom
 	h.listenConnection(r.Context(), client)
 }
 

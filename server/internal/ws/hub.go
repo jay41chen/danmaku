@@ -52,6 +52,7 @@ type Hub struct {
 	logger     *slog.Logger
 	// presence 快照可能變了的通知（buffer 1，非阻塞送）：worker 醒來後自己呼叫 PresenceSnapshot 取最新的
 	presenceWake chan struct{}
+	wg           sync.WaitGroup
 }
 
 // 一條連線的狀態，全部由 Hub.mu 保護。userID == 0 代表匿名（users.id 是 IDENTITY，從 1 開始，不會有 0）
@@ -74,6 +75,15 @@ func NewHub(maxClients int) *Hub {
 		presenceWake: make(chan struct{}, 1),
 		logger:       slog.Default().With("component", "websocket"),
 	}
+}
+
+// 連線生命週期追蹤（給 CloseAll 等所有連線結束用）：HandleWebsocket 一開始呼叫，把回傳的函式交給 defer
+// 跟 Register / Unregister 的差別：那組只管「在不在 Hub 的 map 裡」；這組涵蓋整個 HandleWebsocket，包括 Unregister 之後的 leaveRoom
+// 回傳函式而不是另開 UntrackConn：-1 只能從 +1 拿到，外面沒辦法單獨亂扣
+// release：回傳值的名字，只是說明用途（呼叫它 = 計數 -1），呼叫端可以取任何名字接
+func (h *Hub) TrackConn() (release func()) {
+	h.wg.Add(1)
+	return h.wg.Done // 沒有 ()：交出 Done 這個函式本身，不是現在呼叫
 }
 
 // 新連線一律是匿名：這裡只加進 clients、總連線數 +1，refcount 不動（Authenticate 成功才 memberJoinedLocked）
@@ -309,13 +319,43 @@ func (h *Hub) clientsSnapshot() []*Client {
 	return snapshot
 }
 
-// 關機時呼叫（server.Shutdown 之後）：對每一條連線送 1001 Going Away 再關閉，瀏覽器才看得出是 server 下線而不是異常斷線（1006）
-// 寫網路在 lock 外做：慢 client 的 WriteControl 最多卡 writeWait，拿著 h.mu 的話整個 Hub（Unregister、Broadcast…）都會跟著卡住
+// 關機時呼叫（server.Shutdown 之後）：對每一條連線送 1001 Going Away，等 client 回 close frame、讀取迴圈自己收尾（含 leaveRoom），
+// client 看到的是 1001 且完整走完 close handshake（瀏覽器的 wasClean=true），而不是異常斷線（1006）；ctx 到期還沒結束的連線強制 Close
+// 寫網路在 lock 外做：慢 client 的 WriteControl 最多卡到寫入期限，拿著 h.mu 的話整個 Hub（Unregister、Broadcast…）都會跟著卡住
+// 每條連線各開 goroutine 送 1001：一個慢 client 不會拖到其他人收不到、也不會吃掉等待階段的時間
+// ctx 必須有期限（或會被 cancel）：沒有的話，只要一個 client 不回 close frame，這裡就會永遠等下去
 func (h *Hub) CloseAll(ctx context.Context) {
 	clients := h.clientsSnapshot()
 	for _, c := range clients {
-		c.emitCloseSignal(ctx)
+		go c.emitCloseSignal(ctx)
+	}
+
+	if successfulShutdown := h.waitAllConnectionClosed(ctx); successfulShutdown {
+		return
+	}
+
+	remaining := h.clientsSnapshot()
+	h.logger.WarnContext(ctx, "shutdown timeout, force closing ws clients", "remaining", len(remaining))
+	for _, c := range remaining {
 		c.Close()
+	}
+}
+
+// 等所有連線的 HandleWebsocket 跑完（wg 歸零），最多等到 ctx 到期
+// 回傳 true = 全部正常結束；false = ctx 到期，還有連線沒結束
+// wg.Wait() 會卡住、不能放進 select → 開背景 goroutine 替我們卡著，等到了就 close channel 通知
+func (h *Hub) waitAllConnectionClosed(ctx context.Context) bool {
+	allConnsClosed := make(chan struct{})
+	go func() {
+		h.wg.Wait()
+		close(allConnsClosed)
+	}()
+
+	select {
+	case <-allConnsClosed:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

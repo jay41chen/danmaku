@@ -43,6 +43,9 @@ func newHubServer(t *testing.T, room string) *hubServer {
 		}
 		ctx := context.Background()
 		c := NewClient(conn, time.Hour, time.Hour)
+		// 跟 handler.HandleWebsocket 一樣：CloseAll 要等這條連線的清理（含 Unregister、送 closed）全部跑完
+		stopTracking := s.hub.TrackConn()
+		defer stopTracking()
 		defer c.Close()
 		if !s.hub.Register(ctx, c) {
 			return
@@ -252,23 +255,71 @@ func TestSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
 	}
 }
 
-// 關機：CloseAll 之後每一條連線都要收到 1001 Going Away（不是直接斷線的 1006），server 端也要清理完
-func TestCloseAllSendsGoingAway(t *testing.T) {
+// 關機（正常 client）：每一條連線都收到 1001 Going Away（不是直接斷線的 1006），
+// 而且 CloseAll 要等到 close handshake 完成、server 端清理完才 return，不是靠 ctx 到期強制關
+//
+// client 一定要在 CloseAll 執行期間讀：gorilla 的 client 是在 ReadMessage 裡收到 close frame 時才自動回 close frame，
+// 先呼叫 CloseAll 再讀的話，沒有人回覆 → CloseAll 只能等到 ctx 到期
+func TestCloseAllWaitsForCloseHandshake(t *testing.T) {
 	s := newHubServer(t, "a")
 	connA, _ := s.dial(t)
 	connB, _ := s.dial(t)
 
-	s.hub.CloseAll(context.Background())
-
+	type readResult struct {
+		name string
+		err  error
+	}
+	results := make(chan readResult, 2)
 	for name, conn := range map[string]*websocket.Conn{"a": connA, "b": connB} {
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, _, err := conn.ReadMessage()
-		if !websocket.IsCloseError(err, websocket.CloseGoingAway) {
-			t.Errorf("client %s read err = %v, want close 1001 (going away)", name, err)
-		}
+		go func() {
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, _, err := conn.ReadMessage()
+			results <- readResult{name, err}
+		}()
 	}
 
-	// server 端兩條都走完清理（ReadLoop 醒來 → Unregister）
-	s.waitClosed(t, 2*time.Second)
-	s.waitClosed(t, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.hub.CloseAll(ctx)
+
+	// 正常結束的路徑：return 時 ctx 還沒到期（到期 = 走了強制 Close 的路徑）
+	if err := ctx.Err(); err != nil {
+		t.Errorf("CloseAll returned after ctx expired (%v), want it to return as soon as every connection finished", err)
+	}
+	// 「等」的證據：CloseAll return 時兩條連線的清理都已經跑完，closed 裡已經有兩筆，不用再等
+	for i := 0; i < 2; i++ {
+		select {
+		case <-s.closed:
+		default:
+			t.Fatalf("only %d connection(s) cleaned up when CloseAll returned, want 2 (CloseAll must wait for them)", i)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if !websocket.IsCloseError(r.err, websocket.CloseGoingAway) {
+			t.Errorf("client %s read err = %v, want close 1001 (going away)", r.name, r.err)
+		}
+	}
+}
+
+// 關機（不回覆的 client，例如網路斷了、筆電蓋上）：CloseAll 不能無限等，ctx 到期就強制 Close，
+// server 端的讀取迴圈被叫醒、照樣清理（Unregister）
+func TestCloseAllForceClosesUnresponsiveClient(t *testing.T) {
+	s := newHubServer(t, "a")
+	_, c := s.dial(t) // client 端從不讀 → 不會回 close frame
+
+	const timeout = 300 * time.Millisecond
+	start := time.Now() // 在 WithTimeout 之前取：期限從建立 ctx 時開始算，晚取的話 elapsed 可能比 timeout 少幾 µs
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	s.hub.CloseAll(ctx)
+
+	if elapsed := time.Since(start); elapsed < timeout {
+		t.Errorf("CloseAll returned after %v, want it to wait until ctx expires (%v)", elapsed, timeout)
+	}
+	// 沒有強制 Close 的話，讀取迴圈要等到 pongWait（測試裡是 1 小時）才會醒
+	cc := s.waitClosed(t, 2*time.Second)
+	if cc.client != c || cc.room != "a" {
+		t.Errorf("cleaned up = %+v, want the unresponsive client in room a", cc)
+	}
 }

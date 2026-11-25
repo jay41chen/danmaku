@@ -253,11 +253,24 @@ func (c *Client) Close() {
 
 // 送 1001 Going Away 的 close frame，只送不關：關閉連線由呼叫端決定（Hub.CloseAll）
 // gorilla 的 conn.Close() 只關 TCP、不送 close frame，要自己用 WriteControl 送
-// 送失敗（連線本來就壞了、或慢 client 卡到 writeWait）只記 log
+// 送失敗（連線本來就壞了、或慢 client 卡到寫入期限）只記 log；ctx 已經到期就不記：
+// 那時每條連線都會失敗、一次噴出 N 行，CloseAll 強制 Close 時會記一行帶剩餘數量的 Warn，夠用
 func (c *Client) emitCloseSignal(ctx context.Context) {
 	// 組 payload：前 2 byte 是 code 1001，後面是原因文字
 	msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
-	if err := c.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(writeWait)); err != nil {
+	// 寫入期限：now + writeWait 和 ctx 期限取早的
+	deadline := writeDeadlineWithin(ctx)
+	if err := c.conn.WriteControl(websocket.CloseMessage, msg, deadline); err != nil && ctx.Err() == nil {
 		c.logger.WarnContext(ctx, "send going away failed", "error", err)
 	}
+}
+
+// 寫入期限：平常是 now + writeWait；ctx 有期限而且比較早的話，改用 ctx 的期限
+// 用途：關機時 ctx 只剩幾秒，寫網路不能卡超過 ctx，不然後面的步驟（等連線結束、強制 Close）沒時間跑
+func writeDeadlineWithin(ctx context.Context) time.Time {
+	limit := time.Now().Add(writeWait)
+	if ctxDeadline, hasDeadline := ctx.Deadline(); hasDeadline && ctxDeadline.Before(limit) {
+		return ctxDeadline
+	}
+	return limit
 }
