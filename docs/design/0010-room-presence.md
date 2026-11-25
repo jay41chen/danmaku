@@ -93,6 +93,9 @@ previous value, so doing it several times is harmless and there is no leader to 
   expired, so the displayed count went 3 → 4 → 3 and was correct again at 35 s. Logged-in viewers don't
   inflate it, since they collapse by `user_id`. Shutdown doesn't remove members either, so a restart should
   look the same, although only `kill -9` was tested. Accepted: the number is display-only and corrects itself.
+  (Update 2026-11-25: since [0024](0024-websocket-graceful-shutdown.md), a graceful shutdown waits for each
+  connection's cleanup, which removes its member. Only connections force-closed at the shutdown deadline, or a
+  killed process, still leave members until they expire.)
 - A new viewer sees no count until the next push, up to 5 s.
 - Counting reads every member of a room, so the cost grows with room size. A very large room would need a
   different structure.
