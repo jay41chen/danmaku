@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -49,11 +50,11 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		dbError = checkSafely("db", func() error { return this.db.CheckHealth(ctx) })
+		dbError = this.checkSafely(ctx, "db", func() error { return this.db.CheckHealth(ctx) })
 	}()
 	go func() {
 		defer wg.Done()
-		redisError = checkSafely("redis", func() error { return this.redis.CheckHealth(ctx) })
+		redisError = this.checkSafely(ctx, "redis", func() error { return this.redis.CheckHealth(ctx) })
 	}()
 	wg.Wait()
 
@@ -76,13 +77,15 @@ func (this *HealthHandler) HandleHealthCheck(w http.ResponseWriter, r *http.Requ
 // 呼叫 check，panic 時轉成 error 回傳（health check 不能因為某個依賴的 client panic 就讓 process 掛掉）
 // 為什麼需要：check 跑在 HandleHealthCheck 自己開的 goroutine 上，RecoverPanic 接不到（recover 只對同一個 goroutine 有效）
 // 同步函式、不開 goroutine：go 和 wg.Done() 留在呼叫端，賦值完成才會 Done，不用排 defer 的順序
-// err 用具名回傳值：panic 後 return check() 跑不到，只能靠 defer 改 err（見 go-notes 1.27）
+// err 用具名回傳值：panic 後 return check() 跑不到，只能靠 defer 改 err
+// 同時把 stacktrace 記進 log；回傳的 error 保持簡短，因為呼叫端會再 log 一次
 // （TestHealthCheckPanicBecomesError）
-func checkSafely(name string, check func() error) (err error) {
+func (this *HealthHandler) checkSafely(ctx context.Context, name string, check func() error) (err error) {
 	defer func() {
 		rec := recover()
 		switch {
 		case rec != nil:
+			this.logger.ErrorContext(ctx, "health check panic recovered", "check", name, "panic", rec, "stacktrace", string(debug.Stack()))
 			err = fmt.Errorf("%s health check panicked: %v", name, rec)
 		}
 	}()

@@ -35,7 +35,7 @@ var (
 		},
 		[]string{"rule"},
 	)
-	// 全站共用的背景 worker panic 後被接住、原地重啟的次數（supervise.Run）；alert 條件：有增加
+	// 全站共用的背景 worker panic 的次數（supervise.Restart / Escalate，不論之後原地重啟還是讓 process 掛掉）；alert 條件：有增加
 	// label 是程式碼裡寫死的 worker 名稱（broadcast、presence…），值的數量固定
 	workerPanicsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

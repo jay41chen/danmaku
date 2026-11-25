@@ -89,3 +89,45 @@ func TestWriteHeaderAfterHijack(t *testing.T) {
 		t.Errorf("expected recorded status %d, got %d", http.StatusSwitchingProtocols, rec.StatusCode())
 	}
 }
+
+// Hijack 後連線已交給 handler，Committed 要回報 true（RecoverPanic 靠它決定要不要再寫 500）
+func TestCommittedAfterHijack(t *testing.T) {
+	fake := &hijackableWriter{ResponseRecorder: httptest.NewRecorder()}
+	rec := NewStatusCodeRecorder(fake)
+
+	if rec.Committed() {
+		t.Error("expected Committed() == false before hijack")
+	}
+	if _, _, err := rec.Hijack(); err != nil {
+		t.Fatalf("hijack failed: %v", err)
+	}
+	if !rec.Committed() {
+		t.Error("expected Committed() == true after hijack")
+	}
+}
+
+// WriteHeader 或 Write（隱含 200）之後 Committed 為 true，之前為 false
+func TestCommitted(t *testing.T) {
+	t.Run("fresh recorder", func(t *testing.T) {
+		rec := NewStatusCodeRecorder(httptest.NewRecorder())
+		if rec.Committed() {
+			t.Error("expected Committed() == false")
+		}
+	})
+	t.Run("after WriteHeader", func(t *testing.T) {
+		rec := NewStatusCodeRecorder(httptest.NewRecorder())
+		rec.WriteHeader(http.StatusNoContent)
+		if !rec.Committed() {
+			t.Error("expected Committed() == true")
+		}
+	})
+	t.Run("after Write without WriteHeader", func(t *testing.T) {
+		rec := NewStatusCodeRecorder(httptest.NewRecorder())
+		if _, err := rec.Write([]byte("x")); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if !rec.Committed() {
+			t.Error("expected Committed() == true")
+		}
+	})
+}

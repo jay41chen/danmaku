@@ -106,13 +106,19 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	// 送 SUB / UNSUB 的 worker：整台 server 一個，跟 process 活一樣久（main 傳進來的是 context.Background()）
 	// 不能等到 Subscribe 才啟動：Subscribe 是 ws.go 另外起的 goroutine，順序不保證，
 	// 第一個 Join 可能比它早到，標了 dirty 卻沒人處理
-	// supervise.Run：panic 時原地重啟（desired / actual 存在 rooms 裡，重啟後照樣比對），1 分鐘內第 3 次就讓 process 掛掉
-	go supervise.Run(ctx, logger, "redis_rooms", this.rooms.run)
+	// supervise.Escalate（第一次 panic 就讓 process 掛掉，ADR 0023）：不能原地重啟。desired / actual 雖然存在 rooms 裡，
+	// 但 run 每一輪會把 dirty 整包取出到區域變數，reconcile 到一半 panic 的話，同一批還沒處理的房間就沒人會再標 dirty；
+	// panic 那間的 state 已經改成 subSent、確認 timer 卻沒啟動，之後每次 Join 都會 timeout，要等所有人離開才恢復
+	go supervise.Escalate(ctx, logger, "redis_rooms", this.rooms.run)
 
 	// watchdog 同理：跟 process 一樣久，不能等 Subscribe 啟動（心跳是 Subscribe 的 consumer 收到才算數，但發送和判定不依賴它啟動順序）
 	// ticker 在這裡建、傳進去：run 不自己建 ticker，test 才能用手動的 tick channel
 	// Stop 放在 goroutine 裡：NewRedisStore return 後 ticker 還要繼續用，不能 defer 在這個函式；重啟時每次重建一個
-	go supervise.Run(ctx, logger, "redis_watchdog", func(ctx context.Context) {
+	// supervise.Restart：判斷邏輯和發心跳的 panic 重啟就好（missCount 歸零，偵測晚一輪約 15 秒）
+	// 接受的例外（ADR 0023）：rebuildPubSub 裡 go-redis 的 old.Close() 本身 panic 的話，舊的 PubSub 沒關掉，
+	// consumer 會一直卡在聽不到的舊連線上，重啟 watchdog 修不好（之後的重建只會換掉上一輪新建的那個）。
+	// 只有 go-redis 內部 panic 才會發生；發生時 worker_panics_total{worker="redis_watchdog"} 和 pubsub_deaf 都會增加，靠 alert 叫人重啟
+	go supervise.Restart(ctx, logger, "redis_watchdog", func(ctx context.Context) {
 		tick := time.NewTicker(heartbeatInterval)
 		defer tick.Stop()
 		this.watchdog.run(ctx, tick.C)

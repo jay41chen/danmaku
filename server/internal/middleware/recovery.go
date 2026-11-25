@@ -27,6 +27,10 @@ func RecoverPanic(next http.Handler) http.Handler {
 				case rec != nil:
 					// 印出stacktrace方便查bug
 					slog.ErrorContext(r.Context(), "panic recovered", "panic", rec, "method", r.Method, "path", r.URL.Path, "stacktrace", string(debug.Stack()))
+					// 取捨：一般（非 WebSocket）response 如果已經送出一部分，這裡只記 log；
+					// net/http 之後會把 response 正常收尾，client 可能收到 200 但 body 被截斷，看起來像成功。
+					// 另一種做法是 re-panic http.ErrAbortHandler 讓 net/http 中斷連線，但這樣外層的 Logging / HttpMetrics
+					// 就記不到這個 request；加上這裡的 handler 都是一次呼叫就寫完整個 response，所以這種情況很少見，沒採用
 					if !writer.Committed() {
 						// 如果response還沒寫入才要寫進去
 						// 已送出時 status 改不了，再寫只會讓 net/http 印 "superfluous WriteHeader"；

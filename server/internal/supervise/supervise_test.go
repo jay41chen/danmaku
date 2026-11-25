@@ -38,16 +38,95 @@ func (w *scriptedWorker) run(ctx context.Context) {
 	panic("injected by test")
 }
 
-// 跑 run，回傳它最後有沒有重新 panic（放棄）
+// 用 Restart 的設定跑 run，回傳它最後有沒有重新 panic（放棄）
 func runAndCatch(t *testing.T, name string, w *scriptedWorker) (gaveUp bool) {
+	t.Helper()
+	return runAndCatchWith(t, name, w, restartMaxPanics)
+}
+
+// 同 runAndCatch，但可以指定第幾次放棄（Escalate 是 1）
+func runAndCatchWith(t *testing.T, name string, w *scriptedWorker, max int) (gaveUp bool) {
 	t.Helper()
 	defer func() {
 		if rec := recover(); rec != nil {
 			gaveUp = true
 		}
 	}()
-	run(context.Background(), discardLogger, name, w.run, w.now)
+	run(context.Background(), discardLogger, name, w.run, w.now, max)
 	return false
+}
+
+// Escalate 的設定（maxPanics = 1）：第一次 panic 就放棄，不會再跑第二次；放棄前一樣記 metric
+func TestEscalateGivesUpOnFirstPanic(t *testing.T) {
+	const name = "test_escalate"
+	w := newScriptedWorker(0, time.Hour) // 就算下一次隔很久也不能再跑
+	before := promtest.WorkerPanicCount(name)
+
+	if !runAndCatchWith(t, name, w, 1) {
+		t.Fatal("run returned normally, want it to give up on the first panic")
+	}
+	if w.calls != 1 {
+		t.Errorf("worker calls = %d, want 1 (no restart)", w.calls)
+	}
+	if got := promtest.WorkerPanicCount(name) - before; got != 1 {
+		t.Errorf("worker_panics_total += %v, want 1", got)
+	}
+}
+
+// 透過對外的 Restart 跑：worker 前 panicTimes 次 panic、之後正常 return；回傳 Restart 有沒有放棄、worker 被呼叫幾次
+func restartAndCatch(panicTimes int, opts ...RestartOptions) (gaveUp bool, calls int) {
+	worker := func(context.Context) {
+		calls++
+		if calls <= panicTimes {
+			panic("injected by test")
+		}
+	}
+	defer func() { gaveUp = recover() != nil }()
+	Restart(context.Background(), discardLogger, "test_restart_api", worker, opts...)
+	return false, calls
+}
+
+// 對外的 Restart 不傳 option：預設第 3 次 panic 才放棄（鎖住預設值和 Restart 傳給 run 的門檻）
+func TestRestartDefault(t *testing.T) {
+	if gaveUp, calls := restartAndCatch(2); gaveUp || calls != 3 {
+		t.Errorf("2 panics: gaveUp = %v, calls = %d; want false, 3 (restarted twice)", gaveUp, calls)
+	}
+	if gaveUp, calls := restartAndCatch(10); !gaveUp || calls != 3 {
+		t.Errorf("always panics: gaveUp = %v, calls = %d; want true, 3 (give up on the 3rd)", gaveUp, calls)
+	}
+}
+
+// WithMaxPanics(n)：第 n 次 panic 放棄；n <= 0 視為沒設，沿用預設
+func TestRestartWithMaxPanics(t *testing.T) {
+	if gaveUp, calls := restartAndCatch(10, WithMaxPanics(1)); !gaveUp || calls != 1 {
+		t.Errorf("WithMaxPanics(1): gaveUp = %v, calls = %d; want true, 1", gaveUp, calls)
+	}
+	if gaveUp, calls := restartAndCatch(10, WithMaxPanics(5)); !gaveUp || calls != 5 {
+		t.Errorf("WithMaxPanics(5): gaveUp = %v, calls = %d; want true, 5", gaveUp, calls)
+	}
+	if gaveUp, calls := restartAndCatch(10, WithMaxPanics(0)); !gaveUp || calls != 3 {
+		t.Errorf("WithMaxPanics(0): gaveUp = %v, calls = %d; want true, 3 (default)", gaveUp, calls)
+	}
+}
+
+// 對外的 Escalate 真的是「第一次就放棄」（上面的 test 直接測 run，這裡鎖住 Escalate 傳進去的設定）
+func TestEscalateDoesNotRestart(t *testing.T) {
+	calls := 0
+	worker := func(context.Context) {
+		calls++
+		if calls == 1 {
+			panic("injected by test")
+		}
+	}
+	gaveUp := func() (gaveUp bool) {
+		defer func() { gaveUp = recover() != nil }()
+		Escalate(context.Background(), discardLogger, "test_escalate_api", worker)
+		return false
+	}()
+
+	if !gaveUp || calls != 1 {
+		t.Errorf("gaveUp = %v, calls = %d; want true, 1 (no restart)", gaveUp, calls)
+	}
 }
 
 func TestRunReturnsWhenWorkerReturns(t *testing.T) {

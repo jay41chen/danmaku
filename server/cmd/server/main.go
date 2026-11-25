@@ -60,11 +60,15 @@ func main() {
 		auth:     handler.NewAuthHandler(authUseCase, cfg.ClientIPHeader),
 		ws:       wsHandler,
 	})
-	// 全站共用的 worker：panic 時原地重啟，1 分鐘內第 3 次就讓 process 掛掉（見 supervise.Run）
-	// 兩個都能安全重啟：Broadcast 重跑 Subscribe 拿到的是同一個 go-redis channel（buffer 裡的訊息還在），
-	// Presence 每 10 秒整份重新同步
-	go supervise.Run(context.Background(), slog.Default(), "broadcast", func(context.Context) { wsHandler.StartBroadcast() })
-	go supervise.Run(context.Background(), slog.Default(), "presence", func(context.Context) { wsHandler.StartPresence(redis) })
+	// 全站共用的 worker，依「能不能安全重啟」選策略（ADR 0023）：
+	// - Broadcast 用 Escalate（第一次 panic 就讓 process 掛掉）：不能重啟。watchdog 重建 PubSub 時是先換新的、再關舊的，
+	//   consumer 還在消化舊 channel 時 panic 的話，重啟後會直接讀新的，舊的剩下的訊息丟掉、resetAfterRebuild 也不會跑
+	//   → 所有房間以為還訂閱著、新的 PubSub 卻只訂了心跳，整台 server 靜靜收不到訊息
+	// - Presence 用 Restart：每 10 秒整份重新同步，狀態在 Hub 和 Redis。代價：重啟會重建 presence worker，
+	//   它記錄「這台 server 寫過哪些人」的 lastWritten 從空的開始，重啟前寫進去、之後已離線的成員不會被主動移除，
+	//   要等它們的 entry 過期（約 30 秒）才會消失
+	go supervise.Escalate(context.Background(), slog.Default(), "broadcast", func(context.Context) { wsHandler.StartBroadcast() })
+	go supervise.Restart(context.Background(), slog.Default(), "presence", func(context.Context) { wsHandler.StartPresence(redis) })
 
 	startServer(mux, cfg.Port, cfg.CORSOrigins)
 }
@@ -114,7 +118,7 @@ func messageDepsFor(db *pgstore.DBStore, redis *redisstore.RedisStore, timingLog
 		}
 	}
 	logger := slog.Default().With("component", "loadtiming")
-	go supervise.Run(context.Background(), logger, "loadtiming", func(ctx context.Context) {
+	go supervise.Restart(context.Background(), logger, "loadtiming", func(ctx context.Context) {
 		loadtiming.Run(ctx, logger, loadtiming.DefaultInterval, hists, poolSample)
 	})
 	return messageDeps{
@@ -320,7 +324,7 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 // mux 是把 r.Pattern 寫進「它拿到的那個 *Request」，中間被複製的話 HttpMetrics 讀到的是 ""，全部變成 unmatched
 // 第一個在最外層（Chain 從後往前包）。位置理由：
 // - RequestID 最外層：後面所有 log（含 RecoverPanic 的 panic log）才帶得到 request_id
-// - RecoverPanic 在 Logging / HttpMetrics 內層：panic 在這裡被接住、寫出 500，外層才記得到這個 request 和 500；放外層的話 panic 會穿過它們，這個 request 不會被記錄
+// - RecoverPanic 在 Logging / HttpMetrics 內層：panic 在這裡被接住（response 還沒送出才寫 500），外層才記得到這個 request 和實際送出的 status；放外層的話 panic 會穿過它們，這個 request 不會被記錄
 func serviceHandler(mux *http.ServeMux, origins []string) http.Handler {
 	return middleware.Chain(
 		mux,
