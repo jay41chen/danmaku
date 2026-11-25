@@ -311,6 +311,9 @@ func registerRoutes(mux *http.ServeMux, tokens middleware.AccessTokenParser, h a
 // prod 和 test 共用的 middleware chain：test 走這裡，才測得到跟 prod 一樣的順序
 // 順序限制：HttpMetrics 和 mux 中間不能有會複製 request 的 middleware（r.WithContext，例如 RequestID）
 // mux 是把 r.Pattern 寫進「它拿到的那個 *Request」，中間被複製的話 HttpMetrics 讀到的是 ""，全部變成 unmatched
+// 第一個在最外層（Chain 從後往前包）。位置理由：
+// - RequestID 最外層：後面所有 log（含 RecoverPanic 的 panic log）才帶得到 request_id
+// - RecoverPanic 在 Logging / HttpMetrics 內層：panic 在這裡被接住、寫出 500，外層才記得到這個 request 和 500；放外層的話 panic 會穿過它們，這個 request 不會被記錄
 func serviceHandler(mux *http.ServeMux, origins []string) http.Handler {
 	return middleware.Chain(
 		mux,
