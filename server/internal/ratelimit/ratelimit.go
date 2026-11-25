@@ -72,3 +72,37 @@ func Check(ctx context.Context, limiter Limiter, logger *slog.Logger, rule Rule,
 	}
 	return allowed, retryAfter, nil
 }
+
+// Reset / Refund 需要的最小 interface，同 Limiter，定義在使用方；由 *redisstore.RedisStore 實作
+type Resetter interface {
+	// 清掉 key 的計數（登入成功時用，避免使用者自己打錯幾次後被鎖）
+	Reset(ctx context.Context, key string) error
+}
+
+type Refunder interface {
+	// 退還這一次 Allow 用掉的額度（-1）；key 已經過期就什麼都不做
+	Refund(ctx context.Context, key string) error
+}
+
+// 把這條規則下 value 的計數歸零（例如登入成功後清掉帳號的失敗次數）
+// best effort：限流的附屬功能，失敗或超時只記 warn log，不回 error、不影響呼叫端的結果
+// 跟 Check 共用 checkTimeout（200ms）：Redis 不回應時最多卡這麼久
+func Reset(ctx context.Context, limiter Resetter, logger *slog.Logger, rule Rule, value string) {
+	resetCtx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+	if err := limiter.Reset(resetCtx, rule.Key(value)); err != nil {
+		logger.WarnContext(ctx, "rate limit reset failed",
+			"rule", rule.Name, "error", err)
+	}
+}
+
+// 退還這條規則下 value 的一次額度（計數 -1，例如登入成功就不算在 IP 的失敗次數裡）
+// best effort：失敗或超時只記 warn log，不回 error；跟 Check 共用 checkTimeout（200ms）
+func Refund(ctx context.Context, limiter Refunder, logger *slog.Logger, rule Rule, value string) {
+	refundCtx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+	if err := limiter.Refund(refundCtx, rule.Key(value)); err != nil {
+		logger.WarnContext(ctx, "rate limit refund failed",
+			"rule", rule.Name, "error", err)
+	}
+}

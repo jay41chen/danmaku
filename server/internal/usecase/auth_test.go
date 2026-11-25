@@ -18,6 +18,8 @@ type fakeAuthStore struct {
 	user      model.User
 	getErr    error
 	rotateErr error // RotateRefreshToken 回傳的錯
+	// 設了的話，CreateRefreshToken 會呼叫它（測試用：模擬 token 簽完後 client 斷線）
+	onCreateRefreshToken func()
 }
 
 func (f *fakeAuthStore) CreateUser(ctx context.Context, username, passwordHash string) (int64, error) {
@@ -29,6 +31,9 @@ func (f *fakeAuthStore) GetUser(ctx context.Context, username string) (model.Use
 }
 
 func (f *fakeAuthStore) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+	if f.onCreateRefreshToken != nil {
+		f.onCreateRefreshToken()
+	}
 	return nil
 }
 
@@ -48,6 +53,10 @@ func (f *fakeAuthStore) RevokeRefreshToken(ctx context.Context, tokenHash string
 type fakeAuthLimiter struct {
 	blockKey   string
 	retryAfter time.Duration
+
+	resetKey, refundKey                 string
+	resetCtxErr, refundCtxErr           error
+	resetHasDeadline, refundHasDeadline bool
 }
 
 func (f *fakeAuthLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
@@ -57,8 +66,17 @@ func (f *fakeAuthLimiter) Allow(ctx context.Context, key string, limit int, wind
 	return true, 0, nil
 }
 
-func (f *fakeAuthLimiter) Reset(ctx context.Context, key string) error  { return nil }
-func (f *fakeAuthLimiter) Refund(ctx context.Context, key string) error { return nil }
+func (f *fakeAuthLimiter) Reset(ctx context.Context, key string) error {
+	f.resetKey, f.resetCtxErr = key, ctx.Err()
+	_, f.resetHasDeadline = ctx.Deadline()
+	return nil
+}
+
+func (f *fakeAuthLimiter) Refund(ctx context.Context, key string) error {
+	f.refundKey, f.refundCtxErr = key, ctx.Err()
+	_, f.refundHasDeadline = ctx.Deadline()
+	return nil
+}
 
 func newTestAuthTokens(t *testing.T) *auth.TokenIssuer {
 	t.Helper()
@@ -114,6 +132,41 @@ func TestAuthLoginChecksPasswordForTiming(t *testing.T) {
 			t.Errorf("checkPassword hashes = %q, want exactly [user's PasswordHash]", gotHashes)
 		}
 	})
+}
+
+// 登入成功後 client 在收到回應前斷線（ctx 被取消）：Reset / Refund 仍要執行（密碼是對的），
+// 收到的 ctx 不能是已取消的，但要有期限（ratelimit 的 200ms 預算）
+func TestAuthLoginSuccessResetsAndRefundsEvenIfRequestCanceled(t *testing.T) {
+	const password = "kq7vz2mx"
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &fakeAuthStore{user: model.User{ID: 7, Username: "Jay", PasswordHash: hash}, onCreateRefreshToken: cancel}
+	limiter := &fakeAuthLimiter{}
+	uc := NewAuthUseCase(store, limiter, newTestAuthTokens(t))
+
+	if _, _, err := uc.Login(ctx, "1.2.3.4", "Jay", password); err != nil {
+		t.Fatalf("Login error = %v", err)
+	}
+
+	if ctx.Err() == nil {
+		t.Fatal("test setup: request ctx should have been canceled")
+	}
+	if limiter.resetKey != LoginUsernameRule.Key("jay") {
+		t.Errorf("Reset key = %q, want %q", limiter.resetKey, LoginUsernameRule.Key("jay"))
+	}
+	if limiter.refundKey != LoginIPRule.Key("1.2.3.4") {
+		t.Errorf("Refund key = %q, want %q", limiter.refundKey, LoginIPRule.Key("1.2.3.4"))
+	}
+	if limiter.resetCtxErr != nil || limiter.refundCtxErr != nil {
+		t.Errorf("ctx canceled at call time: reset=%v refund=%v", limiter.resetCtxErr, limiter.refundCtxErr)
+	}
+	if !limiter.resetHasDeadline || !limiter.refundHasDeadline {
+		t.Errorf("missing deadline: reset=%v refund=%v", limiter.resetHasDeadline, limiter.refundHasDeadline)
+	}
 }
 
 // 守住帳號限流被擋時 log 要帶 client_ip，才查得到攻擊來源 IP；也要回 RetryAfter 給 handler 翻成 429

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 )
@@ -31,6 +32,8 @@ type fakeRoomStore struct {
 	byIDErr   error
 	byIDCalls int
 	gotIDs    []string
+	// GetRoomsByPublicIDs 收到的 ctx 有沒有期限（確認排行的時間預算沒有漏到查 DB）
+	byIDHasDeadline bool
 }
 
 func (f *fakeRoomStore) CreateRoom(ctx context.Context, ownerID int64, name string, maxRooms int) (model.Room, error) {
@@ -53,6 +56,7 @@ func (f *fakeRoomStore) GetRoomLists(ctx context.Context, userID *int64, after *
 func (f *fakeRoomStore) GetRoomsByPublicIDs(ctx context.Context, publicIDs []string) ([]model.Room, error) {
 	f.gotIDs = publicIDs
 	f.byIDCalls++
+	_, f.byIDHasDeadline = ctx.Deadline()
 	return f.byIDRooms, f.byIDErr
 }
 
@@ -194,6 +198,59 @@ func (f *fakeRanking) TopRooms(ctx context.Context, n int) ([]model.RoomViewers,
 	f.calls++
 	f.gotN = n
 	return f.top, f.err
+}
+
+// 一直擋到 ctx 結束才回傳（模擬 Redis 不回應）；3 秒的保險：沒套期限的話回 errRankingNoDeadline，測試會失敗而不是卡住
+var errRankingNoDeadline = errors.New("ranking ctx was never canceled")
+
+type blockingRanking struct{}
+
+func (blockingRanking) TopRooms(ctx context.Context, n int) ([]model.RoomViewers, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(3 * time.Second):
+		return nil, errRankingNoDeadline
+	}
+}
+
+// Redis 不回應時，排行這一步要在 topRoomsTimeout 內放棄，回 ErrViewerRankingUnavailable
+func TestRoomListPopularRoomsRankingTimeout(t *testing.T) {
+	store := &fakeRoomStore{}
+
+	start := time.Now()
+	_, err := NewRoomUseCase(store, blockingRanking{}).ListPopularRooms(t.Context(), 20)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, model.ErrViewerRankingUnavailable) {
+		t.Fatalf("error = %v, want ErrViewerRankingUnavailable", err)
+	}
+	if errors.Is(err, errRankingNoDeadline) {
+		t.Fatalf("TopRooms got a ctx without deadline")
+	}
+	if elapsed > time.Second {
+		t.Errorf("took %v, want about %v", elapsed, topRoomsTimeout)
+	}
+	if store.byIDCalls != 0 {
+		t.Errorf("store should not be called")
+	}
+}
+
+// 排行的 topRoomsTimeout 只套在排行那一步，不能漏到後面查 DB 的 ctx：request ctx 沒期限，DB 收到的 ctx 也不能有期限
+func TestRoomListPopularRoomsDBCtxHasNoRankingDeadline(t *testing.T) {
+	ranking := &fakeRanking{top: []model.RoomViewers{{PublicID: "a", Count: 1}}}
+	store := &fakeRoomStore{byIDRooms: []model.Room{{PublicID: "a"}}}
+
+	if _, err := NewRoomUseCase(store, ranking).ListPopularRooms(context.Background(), 1); err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	if store.byIDCalls != 1 {
+		t.Fatalf("byIDCalls = %d, want 1", store.byIDCalls)
+	}
+	if store.byIDHasDeadline {
+		t.Error("GetRoomsByPublicIDs ctx has a deadline, ranking budget leaked into DB query")
+	}
 }
 
 func TestRoomListPopularRooms(t *testing.T) {

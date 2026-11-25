@@ -3,10 +3,15 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/textrule"
 )
+
+// 熱門列表讀排行的時間預算：這是列表頁，正常遠低於 10ms（即使 10 輪），跟 publishTimeout 同一級
+// 比 Redis client 沒期限時的預設（約 4 秒）嚴格得多：Redis 不回應時盡快回 503，不讓列表頁卡住
+const topRoomsTimeout = 500 * time.Millisecond
 
 // 這個 use case 需要的 DB 方法（consumer-side interface，同 ADR 0009）
 type roomStore interface {
@@ -58,10 +63,13 @@ func (this *RoomUseCase) ListRooms(ctx context.Context, ownerID *int64, after *m
 
 // 目前人數最多的前 limit 間房間（由多到少），帶人數；結果可能少於 limit
 // 流程：排行取前 limit 名 → 用 public_id 去 DB 撈房間 → 依排行順序重排，DB 沒回的（已刪除）丟掉
-// 排行讀取失敗回 ErrViewerRankingUnavailable（%w 包著原因）；DB 的錯誤原樣回傳
+// 排行讀取失敗或超過 topRoomsTimeout 回 ErrViewerRankingUnavailable（%w 包著原因）；DB 的錯誤原樣回傳
 // 用途：GET /rooms?sort=viewers
 func (this *RoomUseCase) ListPopularRooms(ctx context.Context, limit int) ([]model.PopularRoom, error) {
-	top, err := this.ranking.TopRooms(ctx, limit)
+	// 只有排行這一步套 topRoomsTimeout，呼叫完立刻 cancel；後面查 DB 仍用原本的 ctx
+	rankCtx, cancel := context.WithTimeout(ctx, topRoomsTimeout)
+	top, err := this.ranking.TopRooms(rankCtx, limit)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", model.ErrViewerRankingUnavailable, err)
 	}

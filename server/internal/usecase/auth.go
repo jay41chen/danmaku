@@ -43,13 +43,11 @@ type authStore interface {
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 }
 
-// 限流器：Allow 之外，login 成功時還要 Reset / Refund
+// 限流器：Allow 之外，login 成功時還要 Reset / Refund（說明見 ratelimit 各 interface）
 type authLimiter interface {
 	ratelimit.Limiter
-	// 清掉 key 的計數（登入成功時用，避免使用者自己打錯幾次後被鎖）
-	Reset(ctx context.Context, key string) error
-	// 退還這一次 Allow 用掉的額度（-1）；key 已經過期就什麼都不做
-	Refund(ctx context.Context, key string) error
+	ratelimit.Resetter
+	ratelimit.Refunder
 }
 
 // 只需要「能簽 access token」：*auth.TokenIssuer 不用宣告就自動符合
@@ -191,16 +189,13 @@ func (this *AuthUseCase) Login(ctx context.Context, ip, username, password strin
 
 	// 成功登入，reset 這個帳號的計數（使用者自己打錯幾次不該被鎖）
 	// 失敗只記 log：限流的附屬功能壞掉，不該讓登入失敗
-	if err := this.limiter.Reset(ctx, LoginUsernameRule.Key(lowerName)); err != nil {
-		this.logger.WarnContext(ctx, "rate limit reset failed",
-			"rule", LoginUsernameRule.Name, "error", err)
-	}
+	// WithoutCancel：密碼是對的，這個事實不會因為 client 在收到回應前斷線而改變，計數照樣要清；
+	// ratelimit.Reset / Refund 自己有 200ms 的預算，不會因此卡住
+	cleanupCtx := context.WithoutCancel(ctx)
+	ratelimit.Reset(cleanupCtx, this.limiter, this.logger, LoginUsernameRule, lowerName)
 	// IP 只退還這一次（-1），等於只數失敗：共用出口 IP 的人（公司 NAT）正常登入不會互相擋到
 	// 不 reset IP：否則攻擊者用自己的帳號登入一次，就能把 IP 計數歸零
-	if err := this.limiter.Refund(ctx, LoginIPRule.Key(ip)); err != nil {
-		this.logger.WarnContext(ctx, "rate limit refund failed",
-			"rule", LoginIPRule.Name, "error", err)
-	}
+	ratelimit.Refund(cleanupCtx, this.limiter, this.logger, LoginIPRule, ip)
 
 	return user, model.TokenPair{
 		AccessToken:  accessToken,

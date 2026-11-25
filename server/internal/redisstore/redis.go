@@ -25,6 +25,41 @@ type RedisStore struct {
 	logger    *slog.Logger
 }
 
+// 我們的 client 預設值：沒帶 context 期限的呼叫，Redis 不回應（封包被丟）時最多等多久
+const (
+	defaultReadTimeout   = time.Second
+	defaultDialTimeout   = time.Second
+	defaultDialerRetries = 1
+)
+
+// 把 go-redis 過長的預設值換成我們的：URL 沒設（零值）才補，URL 有設的（例如 ?read_timeout=3s）照用
+// 非零值一律不動：ReadTimeout 負值 = 不設逾時（go-redis init() 處理）；DialTimeout 負值 go-redis 不處理，會原樣交給 net.Dialer，等於 deadline 已過、撥號立刻失敗（URL 的 dial_timeout<=0 會被轉成 -1）。兩者我們都不動，保持 URL 的原意；DialerRetries 的 <=0 go-redis 會當成 5（options.go），
+// 但 URL 設不了 dialer_retries，所以這個欄位實際上永遠是零值，目前走不到這條路徑
+// go-redis 的預設 ReadTimeout 5s / DialTimeout 5s / DialerRetries 5 / MaxRetries 3，封包被丟時實測一個沒期限的呼叫要卡 20s ~ 100s 以上（ADR 0020）
+// 改完之後，封包被丟（TCP 連不上）時，沒期限的呼叫最壞約 4 秒：每次嘗試最多 1 秒（既有連線的讀是 ReadTimeout 1s；新連線是 DialerRetries × DialTimeout = 1s），共 4 次（MaxRetries 3 不動）
+// TCP 連得上但 Redis 不回應（process 卡住）時，新連線還要做 HELLO / AUTH 握手，這段讀也受 ReadTimeout 限制：每次嘗試最多約 2 秒，4 次約 8 秒
+// WriteTimeout 沒設時跟著 ReadTimeout（go-redis init()），所以也是 1s
+// 行為改變：我們沒設 PoolTimeout，它由 ReadTimeout 推導（ReadTimeout + 1s，options.go），所以從 6s 變成 2s：
+// 連線池被占滿（Redis 正常、負載很高）時，沒期限的呼叫等不到連線會在 2 秒（原本 6 秒）後得到 ErrPoolTimeout，而 ErrPoolTimeout 會被重試（最多 4 次）
+// 要更快的呼叫仍然自己傳 ctx 期限：ctx 期限和 socket 逾時取較早的（go-redis internal/pool/conn.go 的 deadline）
+// PubSub 的 Receive 沒有 socket 逾時（timeout 0、ctx 是 TODO），不受 ReadTimeout 影響；
+// 健康檢查的 ping 只寫不讀，寫入期限 = min(5s 的 ping ctx, WriteTimeout = 現在的 1s)；重連用新的 dial 設定（1s、只撥一次）
+// DialerRetries=1 也降低了啟動時對「Redis 還沒好」的容忍：Redis 拒絕連線時，啟動的 Ping（cmd/server/main.go initRedis）
+// 4 次嘗試在幾百 ms 內全部失敗、process 直接退出，原本約有 2 秒的緩衝；有 Redis healthcheck / depends_on 的環境不受影響
+// 要不要讓啟動等 Redis 暫緩，留到部署時決定
+func applyClientDefaults(opt *redis.Options) {
+	if opt.ReadTimeout == 0 {
+		opt.ReadTimeout = defaultReadTimeout
+	}
+	if opt.DialTimeout == 0 {
+		opt.DialTimeout = defaultDialTimeout
+	}
+	// dialer_retries 不能從 URL 設，所以實際上永遠是零值；仍只在零值時補，保持跟其他欄位一致
+	if opt.DialerRetries == 0 {
+		opt.DialerRetries = defaultDialerRetries
+	}
+}
+
 // constuctor
 func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	logger := slog.Default().With("component", "redis")
@@ -36,11 +71,12 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 		return nil, errors.New("invalid redis url: want redis:// or rediss://[[user]:password@]host[:port][/db-number], special characters in password must be percent-encoded")
 	}
 
-	// ctx 的期限要能套到 socket 讀寫上，否則 Redis 不回應（封包被丟）時，一般指令會等 read timeout（go-redis 預設 5 秒）再重試
+	// ctx 的期限要能套到 socket 讀寫上，否則 Redis 不回應（封包被丟）時，一般指令會等 read timeout（go-redis 預設 5 秒；我們改成 1 秒，見 applyClientDefaults）再重試
 	// 這個選項只影響一般指令 / pipeline，沒有期限的 ctx 行為不變
 	// PubSub 的 SUB / UNSUB / Receive 本來就直接套用 ctx 期限，不受這個選項影響
 	option.ContextTimeoutEnabled = true
 
+	applyClientDefaults(option)
 	client := redis.NewClient(option)
 
 	if err := client.Ping(ctx).Err(); err != nil {

@@ -189,3 +189,130 @@ func TestCheckFailsClosedOnTimeout(t *testing.T) {
 		t.Errorf("log %q missing fail closed message", out)
 	}
 }
+
+// Reset / Refund 共用的假 limiter：記下 key 和 ctx 狀態，可設定回傳的錯，或一直擋到 ctx 結束（3 秒保險，沒期限就會失敗而不是卡住）
+type fakeCleanup struct {
+	err         error
+	block       bool
+	gotKey      string
+	hasDeadline bool
+}
+
+func (f *fakeCleanup) do(ctx context.Context, key string) error {
+	f.gotKey = key
+	_, f.hasDeadline = ctx.Deadline()
+	if f.block {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+			return errors.New("ctx never canceled")
+		}
+	}
+	return f.err
+}
+
+type fakeResetter struct{ fakeCleanup }
+
+func (f *fakeResetter) Reset(ctx context.Context, key string) error { return f.do(ctx, key) }
+
+type fakeRefunder struct{ fakeCleanup }
+
+func (f *fakeRefunder) Refund(ctx context.Context, key string) error { return f.do(ctx, key) }
+
+func TestResetCallsRuleKey(t *testing.T) {
+	l := &fakeResetter{}
+	logger, buf := newBufLogger()
+
+	Reset(context.Background(), l, logger, testRule, "v")
+
+	if l.gotKey != "rl:test:rule:v" {
+		t.Errorf("key = %q, want rl:test:rule:v", l.gotKey)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected log %q", buf.String())
+	}
+}
+
+func TestRefundCallsRuleKey(t *testing.T) {
+	l := &fakeRefunder{}
+	logger, buf := newBufLogger()
+
+	Refund(context.Background(), l, logger, testRule, "v")
+
+	if l.gotKey != "rl:test:rule:v" {
+		t.Errorf("key = %q, want rl:test:rule:v", l.gotKey)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected log %q", buf.String())
+	}
+}
+
+func TestResetLogsWarnOnError(t *testing.T) {
+	l := &fakeResetter{fakeCleanup{err: errors.New("redis down")}}
+	logger, buf := newBufLogger()
+
+	Reset(context.Background(), l, logger, testRule, "v")
+
+	out := buf.String()
+	for _, want := range []string{"level=WARN", "rate limit reset failed", "rule=test:rule", "redis down"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q missing %q", out, want)
+		}
+	}
+}
+
+func TestRefundLogsWarnOnError(t *testing.T) {
+	l := &fakeRefunder{fakeCleanup{err: errors.New("redis down")}}
+	logger, buf := newBufLogger()
+
+	Refund(context.Background(), l, logger, testRule, "v")
+
+	out := buf.String()
+	for _, want := range []string{"level=WARN", "rate limit refund failed", "rule=test:rule", "redis down"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q missing %q", out, want)
+		}
+	}
+}
+
+// Redis 不回應時，Reset / Refund 要在 checkTimeout 內放棄並記 warn，不能卡住
+func TestResetAndRefundTimeoutWithinBudget(t *testing.T) {
+	resetter := &fakeResetter{fakeCleanup{block: true}}
+	refunder := &fakeRefunder{fakeCleanup{block: true}}
+	cases := []struct {
+		name string
+		f    *fakeCleanup
+		run  func(logger *slog.Logger)
+		msg  string
+	}{
+		{"reset", &resetter.fakeCleanup, func(logger *slog.Logger) {
+			Reset(context.Background(), resetter, logger, testRule, "v")
+		}, "rate limit reset failed"},
+		{"refund", &refunder.fakeCleanup, func(logger *slog.Logger) {
+			Refund(context.Background(), refunder, logger, testRule, "v")
+		}, "rate limit refund failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, buf := newBufLogger()
+
+			start := time.Now()
+			tc.run(logger)
+			elapsed := time.Since(start)
+
+			if !tc.f.hasDeadline {
+				t.Fatal("ctx has no deadline")
+			}
+			if elapsed < checkTimeout-20*time.Millisecond || elapsed > time.Second {
+				t.Errorf("took %v, want about %v (< 1s)", elapsed, checkTimeout)
+			}
+			out := buf.String()
+			for _, want := range []string{tc.msg, "rule=test:rule", "context deadline exceeded"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("log %q missing %q", out, want)
+				}
+			}
+		})
+	}
+}
