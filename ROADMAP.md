@@ -245,7 +245,7 @@
   - test：`go.uber.org/goleak`（新套件，引入前先討論）在 test 結束時檢查多出來的 goroutine；`runtime.NumGoroutine` 前後比對太不準
   - production 定位：`net/http/pprof` 的 `/debug/pprof/goroutine?debug=1` 依 stack 分組計數，一眼看出卡在哪一行；**不能對外**，開在只有內網能連的 port
   - 同樣沒測的：`pingLoop` 寫 ping 失敗時的 `Close`（難穩定製造寫入失敗）→ 靠 log 追：同一個 `request_id` 的 `write ping failed` 到 `client disconnected` 應該只差幾 ms，差 ~75s 代表 Close 沒生效
-- [ ] Graceful shutdown 時對 WS client 送 close frame（`1001 Going Away`）：`server.Shutdown` 不會關已 hijack 的 WS 連線，現在重新部署時 client 只會看到 `1006` 異常斷線。前端判斷要不要重連看的是「是不是 client 自己關的」，不看 `code` / `wasClean`，所以補上後前端不用改
+- [x] Graceful shutdown 時對 WS client 送 close frame（`1001 Going Away`）：`server.Shutdown` 不會關已 hijack 的 WS 連線，現在重新部署時 client 只會看到 `1006` 異常斷線。前端判斷要不要重連看的是「是不是 client 自己關的」，不看 `code` / `wasClean`，所以補上後前端不用改（等 close handshake，期限內等不到才強制關，ADR 0024）
 - [x] Migration 成功時 log 目前的 schema version（`m.Version()`）：現在成功時完全沒有 log，只能從 `server listening` 間接推斷，要確認版本得去開 DB（2026-11-25 完成：`migration done` 帶 version / dirty / applied）
 - [ ] 大表加 index 改用 `CREATE INDEX CONCURRENTLY`：一般的 `CREATE INDEX`（如 000009 的 `messages_user_id_idx`）建立期間會擋住該表的寫入，表小時一瞬間，量大時彈幕會卡住。`CONCURRENTLY` 不能放在 transaction 裡 → 獨立一份 migration、不包 `BEGIN` / `COMMIT`；失敗會留下 `INVALID` 的 index，要先 `DROP INDEX` 再重跑
 - [x] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code（2026-11-25 完成：寫錯值啟動失敗，見 README.zh-TW env 表）
