@@ -75,7 +75,7 @@ func main() {
 	go supervise.Escalate(context.Background(), slog.Default(), "broadcast", func(context.Context) { wsHandler.StartBroadcast() })
 	go supervise.Restart(context.Background(), slog.Default(), "presence", func(context.Context) { wsHandler.StartPresence(redis) })
 
-	startServer(mux, cfg.Port, cfg.CORSOrigins)
+	startServer(mux, cfg.Port, cfg.CORSOrigins, wsHandler.CloseAll)
 }
 
 // 訊息 use case / notifier 需要的三個依賴；型別是 usecase 的 messageStore、handler 的 messagePublisher、ratelimit.Limiter 的超集合，
@@ -342,7 +342,7 @@ func serviceHandler(mux *http.ServeMux, origins []string) http.Handler {
 }
 
 // origins 已經由 config.Load 用 middleware.ParseOrigins 解析、檢查過
-func startServer(mux *http.ServeMux, port string, origins []string) {
+func startServer(mux *http.ServeMux, port string, origins []string, onClose func(context.Context)) {
 
 	// 建立SERVER
 	server := http.Server{
@@ -382,5 +382,8 @@ func startServer(mux *http.ServeMux, port string, origins []string) {
 		slog.Error("shutdown failed", "error", err)
 		os.Exit(1)
 	}
+	// 傳 shutdownCtx 不傳 ctx：
+	// ctx 收到 signal 時就已經取消了，之後要用 ctx 控制等待時間的話會一進去就放棄
+	onClose(shutdownCtx)
 	slog.Info("server stopped gracefully")
 }

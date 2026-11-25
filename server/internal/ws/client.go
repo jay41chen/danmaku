@@ -250,3 +250,14 @@ func (c *Client) Close() {
 		c.conn.Close()
 	})
 }
+
+// 送 1001 Going Away 的 close frame，只送不關：關閉連線由呼叫端決定（Hub.CloseAll）
+// gorilla 的 conn.Close() 只關 TCP、不送 close frame，要自己用 WriteControl 送
+// 送失敗（連線本來就壞了、或慢 client 卡到 writeWait）只記 log
+func (c *Client) emitCloseSignal(ctx context.Context) {
+	// 組 payload：前 2 byte 是 code 1001，後面是原因文字
+	msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
+	if err := c.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(writeWait)); err != nil {
+		c.logger.WarnContext(ctx, "send going away failed", "error", err)
+	}
+}

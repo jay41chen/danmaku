@@ -325,3 +325,8 @@ func (h *WebsocketHandler) StartPresence(store wsPresence) {
 	worker := newPresenceWorker(h.hub, store, h.logger)
 	worker.run(context.Background(), h.hub.PresenceChanged(), renew.C, count.C)
 }
+
+// 關機時呼叫：通知所有 WS 連線 server 要下線（server.Shutdown 不會處理 hijack 過的連線，要另外通知）
+func (h *WebsocketHandler) CloseAll(ctx context.Context) {
+	h.hub.CloseAll(ctx)
+}

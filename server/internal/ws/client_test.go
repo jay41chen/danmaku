@@ -251,3 +251,24 @@ func TestSlowClientKickedWithoutBlockingBroadcast(t *testing.T) {
 		t.Errorf("fast room = %q, want still registered in a", got)
 	}
 }
+
+// 關機：CloseAll 之後每一條連線都要收到 1001 Going Away（不是直接斷線的 1006），server 端也要清理完
+func TestCloseAllSendsGoingAway(t *testing.T) {
+	s := newHubServer(t, "a")
+	connA, _ := s.dial(t)
+	connB, _ := s.dial(t)
+
+	s.hub.CloseAll(context.Background())
+
+	for name, conn := range map[string]*websocket.Conn{"a": connA, "b": connB} {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := conn.ReadMessage()
+		if !websocket.IsCloseError(err, websocket.CloseGoingAway) {
+			t.Errorf("client %s read err = %v, want close 1001 (going away)", name, err)
+		}
+	}
+
+	// server 端兩條都走完清理（ReadLoop 醒來 → Unregister）
+	s.waitClosed(t, 2*time.Second)
+	s.waitClosed(t, 2*time.Second)
+}

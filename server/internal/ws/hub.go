@@ -297,6 +297,28 @@ func (h *Hub) BroadcastExceptUser(ctx context.Context, room string, exceptUserID
 	}
 }
 
+// 實作細節：在 lock 裡複製一份目前所有已註冊的連線，給要在 lock 外做慢事（寫網路）的呼叫端用
+// 不跟 PresenceSnapshot 共用：那邊只要在房間裡的連線，而且要在同一次 lock 裡讀 clientState
+func (h *Hub) clientsSnapshot() []*Client {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	snapshot := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		snapshot = append(snapshot, client)
+	}
+	return snapshot
+}
+
+// 關機時呼叫（server.Shutdown 之後）：對每一條連線送 1001 Going Away 再關閉，瀏覽器才看得出是 server 下線而不是異常斷線（1006）
+// 寫網路在 lock 外做：慢 client 的 WriteControl 最多卡 writeWait，拿著 h.mu 的話整個 Hub（Unregister、Broadcast…）都會跟著卡住
+func (h *Hub) CloseAll(ctx context.Context) {
+	clients := h.clientsSnapshot()
+	for _, c := range clients {
+		c.emitCloseSignal(ctx)
+		c.Close()
+	}
+}
+
 // 排 frame（呼叫時要持有 h.mu）；frame == nil = 呼叫端編碼失敗，什麼都不送
 func (h *Hub) sendLocked(ctx context.Context, c *Client, st *clientState, frame []byte) {
 	if frame == nil {
