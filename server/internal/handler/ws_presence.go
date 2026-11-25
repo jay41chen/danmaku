@@ -61,7 +61,7 @@ func newPresenceWorker(hub presenceHub, store wsPresence, logger *slog.Logger) *
 //	                       不續期的話 30 秒後 c1 會被 CountPresence 當成過期刪掉
 //
 // 只有 run 這一個 goroutine 會呼叫，所以 lastWritten 不用鎖；
-// 每次寫入前都重拿快照，不會有「舊快照晚一步寫回去」的 race（go-notes 3.27）
+// 每次寫入前都重拿快照，不會有「舊快照晚一步寫回去」的 race
 func (w *presenceWorker) sync(ctx context.Context, full bool) {
 	snapshot := w.hub.PresenceSnapshot()
 

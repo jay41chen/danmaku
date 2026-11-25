@@ -29,9 +29,17 @@ const (
 	refreshTokenGrace = 15 * time.Second
 )
 
-var (
-	dummyHash, _ = auth.HashPassword("timing-equalizer")
-)
+var dummyHash = mustDummyHash()
+
+// 算不出 dummyHash 的話，login 的 timing 防護會悄悄失效（查無使用者時少了一次雜湊的時間，可以拿來猜帳號是否存在），
+// 所以在 package init 就 panic，不要等到上線後才發現
+func mustDummyHash() string {
+	h, err := auth.HashPassword("timing-equalizer")
+	if err != nil {
+		panic("usecase: compute dummy password hash: " + err.Error())
+	}
+	return h
+}
 
 // 這個 use case 需要的 DB 方法（consumer-side interface，同 ADR 0009）
 type authStore interface {

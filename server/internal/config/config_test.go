@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ func TestLoad(t *testing.T) {
 			ClientIPHeader: "",
 			JWTSecret:      validSecret,
 			// 鎖住預設值：不設這些 env 時 production 行為不變
+			LogLevel:          slog.LevelInfo,
 			WSMaxClients:      100,
 			LoadtestTimingLog: false,
 		}
@@ -48,6 +50,7 @@ func TestLoad(t *testing.T) {
 			t.Fatalf("Load() error = %v, want nil", err)
 		}
 		want := Config{
+			LogLevel:          slog.LevelInfo,
 			WSMaxClients:      6000,
 			LoadtestTimingLog: true,
 			Port:              "9000",
@@ -59,6 +62,29 @@ func TestLoad(t *testing.T) {
 		}
 		assertConfig(t, cfg, want)
 	})
+}
+
+func TestLoadLogLevel(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want slog.Level
+	}{
+		{"", slog.LevelInfo},
+		{"debug", slog.LevelDebug},
+		{"WARN", slog.LevelWarn},
+	}
+	for _, tc := range cases {
+		t.Run("LOG_LEVEL="+tc.raw, func(t *testing.T) {
+			cfg, err := Load(fakeEnv(map[string]string{"JWT_SECRET": validSecret, "LOG_LEVEL": tc.raw}))
+
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+			if cfg.LogLevel != tc.want {
+				t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, tc.want)
+			}
+		})
+	}
 }
 
 // 每個錯誤訊息都要帶 env 名稱：看 log 的人才知道要去改哪一個
@@ -75,6 +101,7 @@ func TestLoadErrors(t *testing.T) {
 		{"ws max clients not a number", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "many"}, []string{"WS_MAX_CLIENTS"}},
 		{"ws max clients decimal", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "1.5"}, []string{"WS_MAX_CLIENTS"}},
 		{"ws max clients too large", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "99999999999"}, []string{"WS_MAX_CLIENTS"}},
+		{"log level invalid", map[string]string{"JWT_SECRET": validSecret, "LOG_LEVEL": "verbose"}, []string{"LOG_LEVEL"}},
 		{"timing log not a bool", map[string]string{"JWT_SECRET": validSecret, "LOADTEST_TIMING_LOG": "maybe"}, []string{"LOADTEST_TIMING_LOG"}},
 		{"reports every invalid load test setting at once", map[string]string{"JWT_SECRET": validSecret, "WS_MAX_CLIENTS": "0", "LOADTEST_TIMING_LOG": "x"},
 			[]string{"WS_MAX_CLIENTS", "LOADTEST_TIMING_LOG"}},

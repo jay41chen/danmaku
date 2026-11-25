@@ -27,6 +27,10 @@ import (
 
 const accessTokenTTL = time.Hour
 
+// logger 在讀 config 之前就要建好（config 錯誤本身也要能 log），所以 level 用 LevelVar：
+// 先用預設的 Info，config.Load 成功後再 Set 成 LOG_LEVEL 的值
+var logLevel = new(slog.LevelVar)
+
 func main() {
 	initApp()
 	// 設定：只讀 env + 檢查，沒有副作用；設錯就在這裡停，不會先連 DB、跑 migration
@@ -35,6 +39,7 @@ func main() {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
+	logLevel.Set(cfg.LogLevel)
 	logClientIPHeader(cfg.ClientIPHeader)
 	logLoadtestSettings(cfg)
 	tokens := initTokenIssuer(cfg.JWTSecret)
@@ -176,7 +181,7 @@ func logLoadtestSettings(cfg config.Config) {
 
 func initApp() {
 	// init slog
-	jsonHandler := slog.NewJSONHandler(os.Stdout, nil)
+	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
 	contextHandler := logging.NewContextHandler(jsonHandler)
 	slog.SetDefault(slog.New(contextHandler))
 }

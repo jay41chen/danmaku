@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/jay41chen/danmaku/server/internal/auth"
@@ -31,8 +32,9 @@ type Config struct {
 	ClientIPHeader string   // 空字串 = 用 RemoteAddr
 	JWTSecret      string
 
-	WSMaxClients      int  // 這台 server 的 WS 連線上限（Hub）
-	LoadtestTimingLog bool // 壓測用：每 5 秒 log 一行 DB 計時（見 internal/loadtiming），預設關
+	LogLevel          slog.Level // 沒設 = Info
+	WSMaxClients      int        // 這台 server 的 WS 連線上限（Hub）
+	LoadtestTimingLog bool       // 壓測用：每 5 秒 log 一行 DB 計時（見 internal/loadtiming），預設關
 }
 
 // 讀一個「正整數」env：沒設用預設值；不是整數、<= 0、超過上限都回 error（錯誤訊息帶 env 名稱，但不帶使用者輸入以外的東西）
@@ -82,6 +84,13 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, fmt.Errorf("JWT_SECRET: %w", err))
 	}
 
+	logLevel := slog.LevelInfo
+	if raw := getenv("LOG_LEVEL"); raw != "" {
+		if err := logLevel.UnmarshalText([]byte(raw)); err != nil {
+			errs = append(errs, fmt.Errorf("LOG_LEVEL: want one of DEBUG, INFO, WARN, ERROR, got %q", raw))
+		}
+	}
+
 	wsMaxClients, err := positiveIntEnv(getenv, "WS_MAX_CLIENTS", DefaultWSMaxClients)
 	if err != nil {
 		errs = append(errs, err)
@@ -102,6 +111,7 @@ func Load(getenv func(string) string) (Config, error) {
 		CORSOrigins:    validOrigins,
 		JWTSecret:      jwtSecret,
 
+		LogLevel:          logLevel,
 		WSMaxClients:      wsMaxClients,
 		LoadtestTimingLog: timingLog,
 	}, nil

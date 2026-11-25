@@ -16,7 +16,7 @@ import (
 // member = "<conn_id>:<user_id>"（匿名 user_id = 0），score = 最後一次續期的 Redis 時間（秒）
 // 時間一律用 Redis 自己的 TIME，不用各台 server 的時鐘，避免時鐘不同步
 const (
-	// 成員的 TTL（N）：go-notes 3.27 —— 每 X = 10 秒續期一次，N 要 > 2X 才撐得過掉一次續期；這裡取 30 秒
+	// 成員的 TTL（N）：每 X = 10 秒續期一次，N 要 > 2X 才撐得過掉一次續期；這裡取 30 秒
 	// 同時用在兩個地方：key 整個的 EXPIRE（房間沒人續期就整個消失），以及計數時剔除 score 太舊的 member
 	presenceTTL = 30 * time.Second
 )

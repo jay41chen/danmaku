@@ -3,6 +3,7 @@ package pgstore
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/golang-migrate/migrate/v4"
 	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
@@ -62,8 +63,23 @@ func RunMigration(dbURL string) error {
 	// 記得defer，不然會有leak
 	defer m.Close()
 	// migrate.ErrNoChange 代表不用更新，所以要exclude掉這個error
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("apply migrations: %w", err)
+	applied := true
+	if err := m.Up(); err != nil {
+		if !errors.Is(err, migrate.ErrNoChange) {
+			return fmt.Errorf("apply migrations: %w", err)
+		}
+		applied = false
 	}
+
+	// 以前成功時沒有任何 log，要知道 schema 版本得連進 DB 查；這裡記一行：版本、有沒有 dirty、這次有沒有真的套用
+	version, dirty, err := m.Version()
+	if err != nil {
+		// 還沒套用過任何 migration 時回 ErrNilVersion，當成版本 0
+		if !errors.Is(err, migrate.ErrNilVersion) {
+			return fmt.Errorf("read migration version: %w", err)
+		}
+		version, dirty = 0, false
+	}
+	slog.Default().With("component", "db").Info("migration done", "version", version, "dirty", dirty, "applied", applied)
 	return nil
 }

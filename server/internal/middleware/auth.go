@@ -63,10 +63,6 @@ func withUserID(ctx context.Context, userID int64) context.Context {
 
 // 取出 RequireAuth 放進去的 user id；沒經過 RequireAuth 的 request 回 (0, false)
 func UserIDFromContext(ctx context.Context) (int64, bool) {
-	value := ctx.Value(userIDKey{})
-	id, ok := value.(int64)
-	if !ok {
-		return 0, false
-	}
+	id, ok := ctx.Value(userIDKey{}).(int64)
 	return id, ok
 }

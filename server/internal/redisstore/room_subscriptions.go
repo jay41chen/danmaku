@@ -29,7 +29,7 @@ import (
 // 只算這台 server 自己身上的連線，不需要知道別台
 
 // 最後一個人離開後，等多久才讓 worker 送 UNSUBSCRIBE（debounce）：這段時間內有人回來就取消，不用重新 SUBSCRIBE
-// 冷門房人數在 0↔1 之間跳時，不會每次都送一對 SUBSCRIBE / UNSUBSCRIBE（見 go-notes 3.29 flapping）
+// 冷門房人數在 0↔1 之間跳時，不會每次都送一對 SUBSCRIBE / UNSUBSCRIBE（避免 flapping：人數在 0↔1 來回跳）
 const unsubscribeDelay = 30 * time.Second
 
 // *time.Timer 符合這個 interface；test 換成假的，才能手動控制「時間到」
