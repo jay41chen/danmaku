@@ -35,6 +35,15 @@ var (
 		},
 		[]string{"rule"},
 	)
+	// 全站共用的背景 worker panic 後被接住、原地重啟的次數（supervise.Run）；alert 條件：有增加
+	// label 是程式碼裡寫死的 worker 名稱（broadcast、presence…），值的數量固定
+	workerPanicsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_panics_total",
+			Help: "Total number of recovered panics in server-wide background workers, by worker",
+		},
+		[]string{"worker"},
+	)
 	// label 只放規則名稱，理由同 rateLimitedTotal
 	rateLimiterErrorsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -132,6 +141,11 @@ func HTTPRequest(method, path string, status int, d time.Duration) {
 // 請求被 rate limit 規則擋下
 func RateLimited(rule string) {
 	rateLimitedTotal.WithLabelValues(rule).Inc()
+}
+
+// 背景 worker panic 被接住（之後會原地重啟，或超過上限讓 process 掛掉）
+func WorkerPanic(worker string) {
+	workerPanicsTotal.WithLabelValues(worker).Inc()
 }
 
 // 限流器（Redis）出錯或超時；不管之後是放行（fail open）還是擋下（fail closed）都會計

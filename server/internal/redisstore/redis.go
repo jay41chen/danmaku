@@ -9,6 +9,7 @@ import (
 
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
 	"github.com/jay41chen/danmaku/server/internal/randx"
+	"github.com/jay41chen/danmaku/server/internal/supervise"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -105,16 +106,17 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 	// 送 SUB / UNSUB 的 worker：整台 server 一個，跟 process 活一樣久（main 傳進來的是 context.Background()）
 	// 不能等到 Subscribe 才啟動：Subscribe 是 ws.go 另外起的 goroutine，順序不保證，
 	// 第一個 Join 可能比它早到，標了 dirty 卻沒人處理
-	go this.rooms.run(ctx)
+	// supervise.Run：panic 時原地重啟（desired / actual 存在 rooms 裡，重啟後照樣比對），1 分鐘內第 3 次就讓 process 掛掉
+	go supervise.Run(ctx, logger, "redis_rooms", this.rooms.run)
 
 	// watchdog 同理：跟 process 一樣久，不能等 Subscribe 啟動（心跳是 Subscribe 的 consumer 收到才算數，但發送和判定不依賴它啟動順序）
 	// ticker 在這裡建、傳進去：run 不自己建 ticker，test 才能用手動的 tick channel
-	// Stop 放在 goroutine 裡：NewRedisStore return 後 ticker 還要繼續用，不能 defer 在這個函式
-	go func() {
+	// Stop 放在 goroutine 裡：NewRedisStore return 後 ticker 還要繼續用，不能 defer 在這個函式；重啟時每次重建一個
+	go supervise.Run(ctx, logger, "redis_watchdog", func(ctx context.Context) {
 		tick := time.NewTicker(heartbeatInterval)
 		defer tick.Stop()
 		this.watchdog.run(ctx, tick.C)
-	}()
+	})
 
 	return this, nil
 }

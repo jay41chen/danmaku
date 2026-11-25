@@ -19,6 +19,7 @@ import (
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/pgstore"
 	"github.com/jay41chen/danmaku/server/internal/redisstore"
+	"github.com/jay41chen/danmaku/server/internal/supervise"
 	"github.com/jay41chen/danmaku/server/internal/usecase"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -59,8 +60,11 @@ func main() {
 		auth:     handler.NewAuthHandler(authUseCase, cfg.ClientIPHeader),
 		ws:       wsHandler,
 	})
-	go wsHandler.StartBroadcast()
-	go wsHandler.StartPresence(redis)
+	// 全站共用的 worker：panic 時原地重啟，1 分鐘內第 3 次就讓 process 掛掉（見 supervise.Run）
+	// 兩個都能安全重啟：Broadcast 重跑 Subscribe 拿到的是同一個 go-redis channel（buffer 裡的訊息還在），
+	// Presence 每 10 秒整份重新同步
+	go supervise.Run(context.Background(), slog.Default(), "broadcast", func(context.Context) { wsHandler.StartBroadcast() })
+	go supervise.Run(context.Background(), slog.Default(), "presence", func(context.Context) { wsHandler.StartPresence(redis) })
 
 	startServer(mux, cfg.Port, cfg.CORSOrigins)
 }
@@ -97,19 +101,22 @@ func messageDepsFor(db *pgstore.DBStore, redis *redisstore.RedisStore, timingLog
 	}
 	slog.Warn("LOADTEST_TIMING_LOG on: logging DB / limiter / publish timing every 5s (load test only)")
 	hists := loadtiming.Hists{Create: loadtiming.NewHistogram(), Limiter: loadtiming.NewHistogram(), Publish: loadtiming.NewHistogram()}
-	go loadtiming.Run(context.Background(), slog.Default().With("component", "loadtiming"), loadtiming.DefaultInterval, hists,
-		func() loadtiming.PoolSample {
-			s := db.PoolStat()
-			return loadtiming.PoolSample{
-				AcquireCount:         s.AcquireCount(),
-				AcquireDuration:      s.AcquireDuration(),
-				EmptyAcquireCount:    s.EmptyAcquireCount(),
-				CanceledAcquireCount: s.CanceledAcquireCount(),
-				Acquired:             s.AcquiredConns(),
-				Idle:                 s.IdleConns(),
-				Max:                  s.MaxConns(),
-			}
-		})
+	poolSample := func() loadtiming.PoolSample {
+		s := db.PoolStat()
+		return loadtiming.PoolSample{
+			AcquireCount:         s.AcquireCount(),
+			AcquireDuration:      s.AcquireDuration(),
+			EmptyAcquireCount:    s.EmptyAcquireCount(),
+			CanceledAcquireCount: s.CanceledAcquireCount(),
+			Acquired:             s.AcquiredConns(),
+			Idle:                 s.IdleConns(),
+			Max:                  s.MaxConns(),
+		}
+	}
+	logger := slog.Default().With("component", "loadtiming")
+	go supervise.Run(context.Background(), logger, "loadtiming", func(ctx context.Context) {
+		loadtiming.Run(ctx, logger, loadtiming.DefaultInterval, hists, poolSample)
+	})
 	return messageDeps{
 		store:     timedStore{DBStore: db, hist: hists.Create},
 		publisher: timedPublisher{messagePublisherAPI: redis, hist: hists.Publish},

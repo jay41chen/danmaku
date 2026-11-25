@@ -67,6 +67,11 @@ func RateLimiterErrorCount(rule string) float64 {
 	return find("rate_limiter_errors_total", map[string]string{"rule": rule}).GetCounter().GetValue()
 }
 
+// worker_panics_total {worker}
+func WorkerPanicCount(worker string) float64 {
+	return find("worker_panics_total", map[string]string{"worker": worker}).GetCounter().GetValue()
+}
+
 // client_ip_fallback_total {reason}
 func ClientIPFallbackCount(reason string) float64 {
 	return find("client_ip_fallback_total", map[string]string{"reason": reason}).GetCounter().GetValue()
