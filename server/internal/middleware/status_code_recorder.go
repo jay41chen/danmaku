@@ -64,6 +64,13 @@ func (r *StatusCodeRecorder) WriteHeader(statusCode int) {
 	r.ResponseWriter.WriteHeader(statusCode)
 }
 
+// response 是否已送出（WriteHeader / Write / Hijack 之後為 true），送出後就不能再改 status
+// 給 RecoverPanic 判斷：已送出就只記 log，不再寫錯誤回應
+// 不叫 WroteHeader()：跟 WriteHeader() 只差一個字母，容易看錯
+func (r *StatusCodeRecorder) Committed() bool {
+	return r.wroteHeader
+}
+
 // WebSocket upgrade 需要 Hijack 取得底層 TCP 連線
 // 所以需要override這個method，否則upgrade的request會failed
 //

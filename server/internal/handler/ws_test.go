@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jay41chen/danmaku/server/internal/httpx"
+	"github.com/jay41chen/danmaku/server/internal/middleware"
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	"github.com/jay41chen/danmaku/server/internal/prometheus/promtest"
@@ -411,6 +412,37 @@ func TestWebsocketMemberRefcount(t *testing.T) {
 
 	conn2.Close()
 	waitGauge(t, promtest.MemberViewers, 0)
+}
+
+// ---- 讀取迴圈 panic ----
+
+// 讓 auth frame 在 server 端 panic：GetUserByID 直接 panic，其他方法沿用 wsFakeDB
+type panicOnAuthDB struct{ *wsFakeDB }
+
+func (panicOnAuthDB) GetUserByID(ctx context.Context, id int64) (model.User, error) {
+	panic("injected by test: GetUserByID")
+}
+
+// 處理訊息時 panic（跑在 handler 的 goroutine 上，由 RecoverPanic 接住）：清理還是要跑，否則連線變成 Hub 裡的幽靈
+// （一直算在房間人數裡、佔 maxClients 名額、Redis 不 UNSUB）
+func TestWebsocketReadLoopPanicStillCleansUp(t *testing.T) {
+	redis := &fakeRedis{}
+	db := &wsFakeDB{users: map[int64]string{7: "jay"}, rooms: map[string]bool{"abcDEF12345": true}}
+	h := NewWebsocketHandler(redis, usecase.NewRoomUseCase(db, nil), usecase.NewAuthUseCase(panicOnAuthDB{db}, nil, nil), fakeClaimsParser{})
+	// 跟 prod 一樣包 RecoverPanic（沒包的話 net/http 自己也會 recover，但那不是 prod 的路徑）
+	srv := httptest.NewServer(middleware.RecoverPanic(http.HandlerFunc(h.HandleWebsocket)))
+	t.Cleanup(srv.Close)
+	conn := dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http"))
+	joinRoom(t, conn, "abcDEF12345")
+	inRoom := func() float64 { return float64(len(h.hub.PresenceSnapshot())) }
+	waitGauge(t, inRoom, 1)
+
+	sendAuth(t, conn, "user7") // server 端 GetUserByID panic
+
+	waitGauge(t, inRoom, 0) // hub.Unregister 有跑
+	if got := redis.leftRooms(); len(got) != 1 || got[0] != "abcDEF12345" {
+		t.Errorf("LeaveRoom calls = %v, want [abcDEF12345]", got)
+	}
 }
 
 // ---- keepalive（ping / pong / read deadline）----

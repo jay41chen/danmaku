@@ -5,6 +5,7 @@ package ws
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -98,7 +99,46 @@ func (c *Client) addPongReadDeadline() error {
 	return nil
 }
 
-func (c *Client) PingLoop(ctx context.Context) {
+// 實作細節：HandlePingLoop / HandleWriteLoop 共用的 panic 保護，panic 時只結束這條連線、不讓整個 process 掛掉
+// 必須跑在 loop 自己的 goroutine 上（呼叫端 go HandleXxx → HandleXxx → handleLoop，同一條堆疊）：
+// recover 只接得住同一個 goroutine 的 panic，go 開出去的 goroutine 外面沒人接得住
+// 接住後的處理跟寫入失敗一樣：記 log + Close 叫醒讀取迴圈，由它負責清理（清理 owner 不變）
+// 只 log 不 Close 的話，連線會「假活著」：留在 Hub、畫面不動，要等 client keepalive（最慢約 45 秒）或 outbox 滿才被清
+// （TestLoopPanicClosesConnection）
+func (c *Client) handleLoop(ctx context.Context, name string, loop func(context.Context)) {
+	defer func() {
+		rec := recover()
+		switch {
+		case rec != nil:
+			c.logger.ErrorContext(ctx, "ws loop panic recovered",
+				"loop", name, // 哪條 goroutine：PingLoop 還是 WriteLoop
+				"panic", rec,
+				"stacktrace", string(debug.Stack()),
+			)
+			c.Close()
+		}
+
+	}()
+	loop(ctx)
+}
+
+// HandlePingLoop 定期對這條連線送 WebSocket ping，用來發現已經斷掉的連線：
+// client 要在 pongWait 內回 pong，否則讀取逾時、ReadLoop return，連線被清掉。
+//
+// 會一直卡住，直到連線被 Close 或送 ping 失敗才 return，所以呼叫端要自己開 goroutine：
+//
+//	go client.HandlePingLoop(ctx)
+//
+// 每條連線在 Hub.Register 成功後呼叫一次（跟 HandleWriteLoop 一起）。
+// 要停止就呼叫 Close；ctx 只拿來記 log，取消 ctx 不會讓它結束。
+// 送 ping 失敗時會自己 Close 連線；內部 panic 也只會 Close 這條連線並記 error log，不會讓 process 掛掉。
+func (c *Client) HandlePingLoop(ctx context.Context) {
+	c.handleLoop(ctx, "PingLoop", c.pingLoop)
+}
+
+// 實作細節：每 pingPeriod 送一次 ping（WriteControl 可以跟 writeLoop 並行，不用經過 outbox）
+// 結束條件：done 被 close，或送 ping 失敗（失敗時先看 done，分辨是不是別人先關的）
+func (c *Client) pingLoop(ctx context.Context) {
 	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 	for {
@@ -130,12 +170,26 @@ func (c *Client) PingLoop(ctx context.Context) {
 	}
 }
 
-// 每條連線一個：唯一會把資料 frame 寫進 conn 的 goroutine
+// HandleWriteLoop 把排進這條連線 outbox 的 frame 依序寫給 client。
+// Hub 的 Send / Broadcast 只負責排進 outbox，真正送出去靠它；沒有啟動的話 frame 永遠送不出去，outbox 滿了連線會被踢。
+//
+// 會一直卡住，直到連線被 Close 或寫入失敗才 return，所以呼叫端要自己開 goroutine：
+//
+//	go client.HandleWriteLoop(ctx)
+//
+// 每條連線在 Hub.Register 成功後呼叫一次，而且只能一次：同一條 WebSocket 連線同時只能有一個 writer。
+// 要停止就呼叫 Close；ctx 只拿來記 log，取消 ctx 不會讓它結束。
+// 寫入失敗時會自己 Close 連線；內部 panic 也只會 Close 這條連線並記 error log，不會讓 process 掛掉。
+func (c *Client) HandleWriteLoop(ctx context.Context) {
+	c.handleLoop(ctx, "WriteLoop", c.writeLoop)
+}
+
+// 實作細節：每條連線一個，唯一會把資料 frame 寫進 conn 的 goroutine
 // 結束條件：done 被 close（有人呼叫 Close），或寫入失敗
 // 失敗時只 Close 叫醒讀取迴圈，不自己 Unregister（清理 owner 是讀取迴圈）
 // 寫入失敗時先看 done：已經 close = 別人先關的（被踢、正常斷線），失敗是預期中的 → 不 log
 // 這要靠 Close 先 close(done) 再關 conn：conn 一關寫入就失敗，那時 done 必須已經 close
-func (c *Client) WriteLoop(ctx context.Context) {
+func (c *Client) writeLoop(ctx context.Context) {
 	for {
 		select {
 		case <-c.done:

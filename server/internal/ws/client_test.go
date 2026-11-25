@@ -20,7 +20,7 @@ type closedConn struct {
 	room   string // hub.Unregister 回傳的房間
 }
 
-// 真的 websocket 伺服器：每條連線 Register + Join(room) + WriteLoop + ReadLoop，ReadLoop 結束後 Unregister
+// 真的 websocket 伺服器：每條連線 Register + Join(room) + HandlePingLoop / HandleWriteLoop + ReadLoop，ReadLoop 結束後 Unregister
 // 跟 handler.HandleWebsocket 的流程一樣，只是沒有 JSON protocol
 type hubServer struct {
 	hub    *Hub
@@ -48,7 +48,8 @@ func newHubServer(t *testing.T, room string) *hubServer {
 			return
 		}
 		s.hub.Join(ctx, c, room, nil)
-		go c.WriteLoop(ctx)
+		go c.HandlePingLoop(ctx) // pingPeriod 是 1 小時，測試期間不會送 ping
+		go c.HandleWriteLoop(ctx)
 		s.opened <- c
 		c.ReadLoop(ctx, func([]byte) {})
 		cc := closedConn{client: c, room: s.hub.Unregister(ctx, c)}
@@ -100,6 +101,20 @@ func (s *hubServer) waitClosed(t *testing.T, wait time.Duration) closedConn {
 	case <-time.After(wait):
 		t.Fatal("no connection was cleaned up")
 		return closedConn{}
+	}
+}
+
+// 背景 loop panic：process 不能掛（沒 recover 的話整個 test binary 會直接 crash），
+// 而且要 Close 這條連線 → 讀取迴圈醒來清理（Unregister），不能留在 Hub「假活著」
+func TestLoopPanicClosesConnection(t *testing.T) {
+	s := newHubServer(t, "a")
+	_, c := s.dial(t)
+
+	go c.handleLoop(context.Background(), "test", func(context.Context) { panic("injected by test") })
+
+	cc := s.waitClosed(t, 2*time.Second)
+	if cc.client != c || cc.room != "a" {
+		t.Errorf("cleaned up = %+v, want the panicked client in room a", cc)
 	}
 }
 

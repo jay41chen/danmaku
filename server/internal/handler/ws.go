@@ -127,7 +127,7 @@ func NewWebsocketHandler(redis wsPubSub, rooms wsRoomUseCase, users wsUserUseCas
 
 // 一條連線的生命週期：清理只有一個 owner（listenConnection 的讀取迴圈）
 //
-//	各種原因 → ReadMessage 失敗 → ReadLoop return → hub.Unregister + LeaveRoom → HandleWebsocket return
+//	各種原因 → ReadMessage 失敗 → ReadLoop return（或處理訊息時 panic）→ hub.Unregister + LeaveRoom（defer）→ HandleWebsocket return
 //	                                                                          └ defer client.Close() → close(done)（PingLoop、WriteLoop 結束）+ conn.Close()（已經被 Close 過就什麼都不做）
 //
 // 其他人發現連線壞了只 Close() 叫醒讀取迴圈，不自己 Unregister / LeaveRoom：
@@ -168,23 +168,27 @@ func (this *WebsocketHandler) HandleWebsocket(w http.ResponseWriter, r *http.Req
 	if !this.hub.Register(r.Context(), client) {
 		return
 	}
-	// 兩個goroutine共用 client 內的 `done`，Close 可以一次叫醒兩個goroutine
-	// 類似在kotlin裡面呼叫 `job.cancel()`的感覺
-	go client.PingLoop(r.Context())
-	go client.WriteLoop(r.Context())
+	go client.HandlePingLoop(r.Context())
+	go client.HandleWriteLoop(r.Context())
 
 	this.listenConnection(r.Context(), client)
 }
 
+// 讀取迴圈：跑在 HandleWebsocket 的 goroutine 上，連線活著的期間都在這裡；結束時把連線從 Hub 移除
 func (this *WebsocketHandler) listenConnection(ctx context.Context, client *ws.Client) {
 	session := newWsSession(this, client)
-
+	// 清理寫成 defer、而且要在 ReadLoop 之前登記：處理訊息時 panic 也會跑（panic 會跳過後面的程式碼，只有已登記的 defer 會跑）
+	// 不 recover：panic 繼續往外走，由 RecoverPanic 印 stacktrace；這裡只負責「一定要做」的清理
+	// 少了它，連線會變成 Hub 裡的幽靈：一直算在房間人數裡、佔 maxClients 名額、房間沒人也不 UNSUB
+	// （TestWebsocketReadLoopPanicStillCleansUp）
+	defer func() {
+		// ReadMessage 失敗（conn遇到錯誤）或 panic：把該連線從 Hub 移除
+		// 還在房間裡就要 LeaveRoom（Hub 外做）；被踢（outbox 滿）、WriteLoop / PingLoop 寫失敗也都是 Close 之後走到這裡清理
+		if room := this.hub.Unregister(ctx, client); room != "" {
+			this.leaveRoom(ctx, room)
+		}
+	}()
 	client.ReadLoop(ctx, func(msg []byte) { session.onMessage(ctx, msg) })
-	// ReadMessage 失敗（conn遇到錯誤）：把該連線從 Hub 移除
-	// 還在房間裡就要 LeaveRoom（Hub 外做）；被踢（outbox 滿）、WriteLoop / PingLoop 寫失敗也都是 Close 之後走到這裡清理
-	if room := this.hub.Unregister(ctx, client); room != "" {
-		this.leaveRoom(ctx, room)
-	}
 }
 
 // 編碼一個 envelope 成要送出的 frame；失敗只記 log 並回傳 nil（Hub 的方法收到 nil = 只改狀態、不送 frame）

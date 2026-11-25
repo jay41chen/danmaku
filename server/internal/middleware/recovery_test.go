@@ -43,6 +43,24 @@ func TestRecoverPanicOverwritesCacheControl(t *testing.T) {
 	}
 }
 
+// handler 已經開始送 response 才 panic：status 改不了，不能再寫錯誤回應（WebSocket Hijack 後 panic 也是這條路）
+func TestRecoverPanicAfterResponseStartedWritesNothing(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("partial")) // 隱含送出 200
+		panic("expected panic")
+	})
+	rec := httptest.NewRecorder()
+
+	RecoverPanic(mock).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (already sent)", rec.Code, http.StatusOK)
+	}
+	if got := rec.Body.String(); got != "partial" {
+		t.Errorf("body = %q, want only %q (no error body appended)", got, "partial")
+	}
+}
+
 func TestRecoverPanicRethrowsAbortHandler(t *testing.T) {
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
