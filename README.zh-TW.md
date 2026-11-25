@@ -427,6 +427,7 @@ Docker Compose 模式下由 `docker-compose.yml` 的 `environment` 覆蓋，以�
 | `CLIENT_IP_HEADER` | 限流用的 client IP 從哪個 header 讀（如 `X-Real-IP`）；只能設成前面那層 proxy 會**覆蓋**的 header，否則 client 可以偽造。沒設時用連線的 RemoteAddr，在 proxy 後面會變成所有人共用同一個計數。有設但 request 沒帶或值不是單一 IP 時也會退回 RemoteAddr，此時 metric `client_ip_fallback_total{reason="missing"\|"unparsable"}` 會增加，每個 process 第一次發生時記一筆 warn log | 空（用 RemoteAddr） |
 | `JWT_SECRET` | 簽 access token（JWT，HS256）用的 secret，**至少 32 bytes**，所有 server instance 要用同一把；沒設或太短時拒絕啟動。產生方式：`openssl rand -base64 48` | **必填**，無預設值 |
 | `CORS_ORIGINS` | 允許的 CORS origin，逗號分隔（如 `https://a.com,http://localhost:5173`）；只含 scheme + host + port，不含 path 和結尾 `/`；全小寫、不寫預設 port；不可與 `*` 混用 | `*` |
+| `LOG_LEVEL` | log 的最低等級：`DEBUG`、`INFO`、`WARN`、`ERROR`（不分大小寫）；寫錯時拒絕啟動 | `INFO` |
 | `WS_MAX_CLIENTS` | 每台 server 的 WS 連線上限，1 到 1,000,000 的整數；壓測時才需要調高 | `100` |
 | `LOADTEST_TIMING_LOG` | 設成 true 時，每 5 秒輸出一行 `loadtest_timing`（DB 連線池、`CreateMessage`、限流、`PUBLISH` 的耗時）。**只給壓測用**；關閉時沒有額外的 wrapper 和 goroutine | `false` |
 | `VITE_API_URL` | 前端 API 位址 | `http://localhost:8080` |

@@ -37,6 +37,7 @@ The policy depends on what the goroutine is responsible for:
 | Server-wide workers that can be restarted (`supervise.Restart`): `StartPresence`, PubSub watchdog, `loadtiming` | Recover, log, count `worker_panics_total{worker}`, restart immediately. The 3rd panic within 1 minute (window starts at the first panic) re-panics so the process exits and the platform restarts it | Restart covers an occasional bug; giving up avoids a half-dead server |
 | Server-wide workers that can't (`supervise.Escalate`): `StartBroadcast` (Redis consumer), `rooms.run` (SUB/UNSUB worker) | Recover only to log and count, then re-panic on the first panic: the process exits and the platform restarts it | Part of their state lives in the goroutine; a restarted one can't pick it up (see below) |
 | `/health` check goroutines | Convert the panic into an error (`checkSafely`, named return + `defer`); `/health` answers 500 naming the failing side | Short-lived and per request: a failed check is the right answer |
+| `time.AfterFunc` callbacks: WebSocket token expiry (`ws_token_expiry`), room SUB/UNSUB debounce / retry / confirm timers (`redis_room_timer`) (added 2026-11-25) | Wrapped in `supervise.Escalate` | One-shot, nothing to restart. A panic on the runtime's timer goroutine already killed the process, but with no log line or metric; now it is recorded first |
 
 Rules that come with this:
 

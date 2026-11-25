@@ -246,9 +246,9 @@
   - production 定位：`net/http/pprof` 的 `/debug/pprof/goroutine?debug=1` 依 stack 分組計數，一眼看出卡在哪一行；**不能對外**，開在只有內網能連的 port
   - 同樣沒測的：`pingLoop` 寫 ping 失敗時的 `Close`（難穩定製造寫入失敗）→ 靠 log 追：同一個 `request_id` 的 `write ping failed` 到 `client disconnected` 應該只差幾 ms，差 ~75s 代表 Close 沒生效
 - [ ] Graceful shutdown 時對 WS client 送 close frame（`1001 Going Away`）：`server.Shutdown` 不會關已 hijack 的 WS 連線，現在重新部署時 client 只會看到 `1006` 異常斷線。前端判斷要不要重連看的是「是不是 client 自己關的」，不看 `code` / `wasClean`，所以補上後前端不用改
-- [ ] Migration 成功時 log 目前的 schema version（`m.Version()`）：現在成功時完全沒有 log，只能從 `server listening` 間接推斷，要確認版本得去開 DB
+- [x] Migration 成功時 log 目前的 schema version（`m.Version()`）：現在成功時完全沒有 log，只能從 `server listening` 間接推斷，要確認版本得去開 DB（2026-11-25 完成：`migration done` 帶 version / dirty / applied）
 - [ ] 大表加 index 改用 `CREATE INDEX CONCURRENTLY`：一般的 `CREATE INDEX`（如 000009 的 `messages_user_id_idx`）建立期間會擋住該表的寫入，表小時一瞬間，量大時彈幕會卡住。`CONCURRENTLY` 不能放在 transaction 裡 → 獨立一份 migration、不包 `BEGIN` / `COMMIT`；失敗會留下 `INVALID` 的 index，要先 `DROP INDEX` 再重跑
-- [ ] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code
+- [x] `LOG_LEVEL` 環境變數控制 log level（`slog.HandlerOptions.Level`），debug 時不用改 code（2026-11-25 完成：寫錯值啟動失敗，見 README.zh-TW env 表）
 - [ ] Chaos testing
 - [ ] Rate limiting（middleware）
   - `/login`、`/register` 的部分提前到 W4-3（部署前就要擋撞庫 / 暴力猜密碼），這裡處理其餘 endpoint
@@ -297,9 +297,9 @@
   - [x] 每條連線 / 每個 request 的部分（2026-11-25，Q677–Q688）：`WriteLoop` / `PingLoop` 改成 `HandleWriteLoop` / `HandlePingLoop`，panic 時記 log + Close（跟寫入失敗同一條路，清理 owner 仍是讀取迴圈）；讀取迴圈 panic 時清理改用 defer（原本 `Unregister` / `LeaveRoom` 會被跳過，連線變成 Hub 裡的幽靈）；`RecoverPanic` 在 response 已送出（含 WS Hijack）時只記 log、不再寫 500
   - [x] 全站共用的 worker（2026-11-25，Q689–Q704，[ADR 0023](docs/design/0023-goroutine-panic-policy.md)）：可以安全重啟的（`StartPresence`、watchdog、`loadtiming`）用 `supervise.Restart`：panic 時記 log + metric `worker_panics_total{worker}`、原地重啟，時間窗從第一次 panic 算，1 分鐘內第 3 次就重新 panic 讓 process 掛掉；有狀態存在 goroutine 裡的（`StartBroadcast`、`rooms.run`）用 `supervise.Escalate`：第一次 panic 就記 log + metric 後讓 process 掛掉（只接住會變成「活著但不轉發」，`/health` 還是 200）。原本 5 個都原地重啟，Judge 抓到 `rooms.run`（dirty 取到區域變數）和 consumer（重建 PubSub 時重啟會跳過 `resetAfterRebuild`）不能重啟。alert 規則等部署平台（Q612）
   - [x] health check 每個 request 開的兩個 goroutine（2026-11-25，Q693 A）：`checkSafely` 把 panic 轉成 error（具名回傳值 + defer），`/health` 回 500 標出哪一邊壞；同步函式，`go` / `wg.Done()` 留在呼叫端
-- [ ] 啟動時沒有 Ping Postgres（W4-2 時記的 known issue，2026-11-25 從舊 memory 搬過來）：`pgxpool` 建立時不連線，DB 連不到要等第一個 query 才知道；現在靠 `RunMigration` 在前面先跑擋住。哪天 migration 改成獨立步驟（例如部署平台的 release command）就會漏掉，到時在建立連線池後加一次 `Ping`（Redis 已經有）
-- [ ] `time.AfterFunc` 的 callback 沒有 panic 保護（2026-11-25，ADR 0023 Judge 觀察）：token 到期 timer（`ws/hub.go`）、`room_subscriptions` 的 debounce / 重試 / 確認 timer 都跑在 runtime 開的 goroutine 上，panic 會讓 process 掛掉。callback 都很短（拿鎖、標 dirty、改狀態），風險低；要修就比照 [ADR 0023](docs/design/0023-goroutine-panic-policy.md) 選一種策略
-- [ ] 公開 repo 的 code 註解引用 gitignored 的 go-notes 段落編號（2026-11-25，ADR 0023 Judge 觀察）：例如 `room_subscriptions.go` 的「go-notes 3.29」，外人看不到。既有慣例，要統一就改成直接寫理由或指向 ADR
+- [x] 啟動時沒有 Ping Postgres（W4-2 時記的 known issue，2026-11-25 從舊 memory 搬過來）：`pgxpool` 建立時不連線，DB 連不到要等第一個 query 才知道；現在靠 `RunMigration` 在前面先跑擋住。哪天 migration 改成獨立步驟（例如部署平台的 release command）就會漏掉，到時在建立連線池後加一次 `Ping`（Redis 已經有）（2026-11-25 完成：`NewDBStore` 建好連線池後 Ping，5 秒 timeout）
+- [x] `time.AfterFunc` 的 callback 沒有 panic 保護（2026-11-25，ADR 0023 Judge 觀察）：token 到期 timer（`ws/hub.go`）、`room_subscriptions` 的 debounce / 重試 / 確認 timer 都跑在 runtime 開的 goroutine 上，panic 會讓 process 掛掉。callback 都很短（拿鎖、標 dirty、改狀態），風險低；要修就比照 [ADR 0023](docs/design/0023-goroutine-panic-policy.md) 選一種策略（2026-11-25 完成：包 `supervise.Escalate`，ADR 0023 表格補一列）
+- [x] 公開 repo 的 code 註解引用 gitignored 的 go-notes 段落編號（2026-11-25，ADR 0023 Judge 觀察）：例如 `room_subscriptions.go` 的「go-notes 3.29」，外人看不到。既有慣例，要統一就改成直接寫理由或指向 ADR（2026-11-25 完成：3 處改成直接寫理由）
 - [ ] 用 k6 寫壓測情境（2026-11-06，M6 決定先用 Go 自己寫）：業界常見，之後想學工具或壓 HTTP API 時再試
 
 - [ ] 房主 / 房管透過 WS 直送彈幕（2026-11-06 從 RBAC 移出，不一定會做）：好處只有少一次 HTTP，要多一條寫入路徑、自己做 ack 和去重、降級時處理已連上的連線。等 M6 顯示 `POST` 真的太慢再談
@@ -310,11 +310,13 @@
   - 失敗超過門檻時改成要求驗證，而不是直接 429：真人解完照樣登入，bot 每次嘗試都要付成本
 - [ ] CORS origin canonical 檢查的剩餘缺口（低優先）：port 前導 0（`:08443`）、非 ASCII 的 IDN host（應寫 punycode）目前仍會通過
 - [ ] 小修（2026-10-30 Judge，低優先）：`dummyHash` 產生失敗的 error 被吞掉（應 fail fast，否則 timing 防護無聲失效）；`ContextHandler.WithGroup` 之後 `request_id` 會被放進 group 裡（目前沒人呼叫）；`UserIDFromContext` 多餘的 `if !ok`；receiver 命名 `this` 不符 Go 慣例（staticcheck ST1006，要改就一次機械性 rename）
+  - 2026-11-25：`dummyHash` 改成 init 時 panic、`WithGroup` 照 slog handler 指南重寫（`request_id` 留在最上層）、`UserIDFromContext` 簡化，都已完成；剩 `this` receiver rename
+  - `ContextHandler` 已知限制（Judge 觀察，low）：group 裡只有 key 為空字串的 attr 時，stdlib JSONHandler 會輸出少逗號的 JSON（stdlib 本身的 bug，原本轉給 inner 的路徑不會觸發）；repo 目前沒用 group，要修就在包 group 前濾掉空 key 的 attr
 - [ ] 密碼外洩檢查：register 時查 HIBP Pwned Passwords API（取代 / 補強 W4-3 embed 的常見密碼清單）
   - k-anonymity：只送 SHA-1 前 5 碼，比對在本機做，原密碼與完整 hash 都不離開 server
   - 要決定外部服務慢 / 掛掉時 fail open（放行）還是 fail closed（擋下），並加 timeout
   - 順帶評估 NFKC 正規化（`golang.org/x/text/unicode/norm`，新套件），避免同字不同編碼登不進去
 - [ ] API versioning
-- [ ] 評估引入 OpenTelemetry（W4 結束後決定）
+- [ ] 評估引入 OpenTelemetry（W4 結束後決定）：接入時確認 bridge 有沒有呼叫 `WithGroup`，對照 `ContextHandler` 的已知限制
   - metrics 改走 vendor-neutral API，backend 可替換
   - 評估 tracing 的 trace ID 是否取代 W4a 的 request ID
