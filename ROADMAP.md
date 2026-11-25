@@ -108,7 +108,7 @@
 
 > Room 排在 RBAC 前面：有「房主」之後，權限規則才具體（房主刪訊息、踢人）
 
-- [ ] Room 概念（房間 + 房主）
+- [x] Room 概念（房間 + 房主）
   - 房間 = 長期存在的 channel（跟著擁有者，不是一次直播）；「一次直播」之後需要時再加 `streams` 子實體 + `messages.stream_id`（見 go-notes 3.28）
   - 網址 `/{username}/{public_id}`：只用 `public_id`（11 字元 base64url，`randx.URLText(8)` 產生，跟 refresh token 共用，unique index 擋碰撞）找房間，username 對不上就 301 導向；內部 PK / FK 仍用 `BIGINT id`
     - **暫時做法（待改）**：前端先用 `?room={public_id}`，沒帶就進 `legacy00000`。原因：GitHub Pages 是純靜態 hosting，直接開 `/{username}/{public_id}` 這種深層路徑會 404（沒有 SPA fallback）。等有自訂網域 / 換 hosting，或用 `404.html` 轉址做 SPA fallback 時，改回上面的路徑格式
@@ -125,7 +125,7 @@
     - 部署分兩次 push：先上前端（舊 backend 對 `join` 回 `ws_write_forbidden`，前端要當無害忽略），再上 backend；backend 上線後還開著舊頁面的人要重新整理
   - [x] Pub/Sub flapping debounce（`unsubscribeDelay` 30 秒，generation check 擋過期 timer；fakeClock 測情境 A / B）：冷門房 `viewers` 在 0↔1 之間跳，每次都送 SUBSCRIBE / UNSUBSCRIBE；20,000 間房 × 10 台 server 會超過單台 Redis。做法：延遲 UNSUBSCRIBE（例如 30 秒，SUBSCRIBE 不延遲）；timer 觸發時要重新上鎖再檢查 `viewers == 0`（`timer.Stop()` 回 `false` 時取消不了）；有 timer 在等的 entry 不能刪；test 要能注入時間
   - [x] `join_ok` 等 Redis 確認 SUBSCRIBE 才回（`ChannelWithSubscriptions` 的 `*redis.Subscription` → entry 的 `ready` channel，鎖外等）：補「join_ok 之後補撈歷史」的洞（JoinRoom 原本只寫出指令就回傳，緊接著的訊息可能兩邊都漏）；順便修好 `TestRoomPubSub` 的 flaky（30 次 fail 5 次 → 50/50）
-  - [ ] W4a + Room 概念 Judge 審查（2026-10-30，3 個 Judge：W4a、Room、時序洞；無 high、無 977b0e6 造成的退步）後的修正
+  - [x] W4a + Room 概念 Judge 審查（2026-10-30，3 個 Judge：W4a、Room、時序洞；無 high、無 977b0e6 造成的退步）後的修正
     - [x] Refresh token：duplicate use 撤銷全部之後，15s grace 內剛 rotate 的 token 仍能換出新的有效 token（撤銷全部沒有立即生效；攻擊者每 14 秒 rotate 一次就能穩定繞過）
       - 做法：新表 `user_credential_state(user_id, valid_after)`（migration 000012）；撤銷全部 = 寫 `valid_after`（`clock_timestamp()`），`created_at <= valid_after` 的 token 一律無效、**不再觸發撤銷**（攻擊者拿舊 token 不能一直把使用者登出），也不再 UPDATE `refresh_tokens`（不用列舉狀態就不會漏列）。`RotateRefreshToken`：查 user_id → `lockUser`（users 列當同一個 user 的排隊點，`lockOwner` 通用化）→ 鎖之後才檢查（TOCTOU）。舊的 `duplicate_use_detected` 資料 backfill 成 `valid_after`。被撤銷的 token 再出現記 Warn（`RefreshTokenRevokedError`）
       - 3 輪 Judge 通過（mutation 都有 test 擋）。設計過程見 go-notes 3.31
@@ -222,7 +222,7 @@
   - 「server 自己的 PubSub 重連、WS 沒斷」（本機 kill pubsub 連線實驗每次漏 1–2 則）：M4 決定接受、不解（Q296）。之後要解的話，重用 M4 的 `resync` frame：已 ready 的房間又收到 subscribe 確認 = 剛重連過
 - [x] PubSub 連線 half-open 偵測（M4，2026-11-05）：每 15 秒 PUBLISH 給自己的心跳 channel，連續 2 次沒收到就重建 PubSub，訂閱確認後送 `resync`；用「不斷線但不轉發」的 proxy 實測 35～44 秒恢復，見 [ADR 0011](docs/design/0011-message-delivery-recovery.md)
 - [x] kernel 擋住 socket 寫入時 server 會 crash（✅ 2026-11-17 M10a 在 Linux 容器（Docker Desktop VM、單次）驗證：3,000 條不讀資料的連線，3,000 行 outbox full log、41 秒內全踢（推論 outbox 滿、寫入被擋），`go_threads` 最多 22、沒 crash → macOS 的 crash 這次沒重現；沒驗：goroutine 實際卡在哪（沒拿 dump）、3,000 條以上、Linux 跑 M6 的 5,000 × 100，見 [ADR 0017](docs/design/0017-stuck-clients-fault-env.md)）（2026-11-16 M6 發現，[ADR 0014](docs/design/0014-load-baseline-keep-sync-writes.md)）：卡在 `write()` 裡的 goroutine 各佔一個 OS thread，唯一的上限 `WS_MAX_CLIENTS`（這次 6,000）高於 thread 上限，macOS 到 2048 條時 `pthread_create` 失敗、SIGABRT；`writeWait` 擋不住（`write()` 本身沒回來）。目前只在壓測機自己塞爆時看到，先記錄不修。正式環境預設 `WS_MAX_CLIENTS=100` 且跑 Linux（Go 在 macOS / Linux 都用 non-blocking + netpoller，理論上應回 `EAGAIN`、park goroutine；M6 在 macOS 上 `write()` 沒返回的原因未查）→ M10 在 Linux 容器驗證（Q415 A）
-- [ ] Redis 不回應時 `POST` 可能卡約 5 秒（2026-11-05 M4 驗收時發現，既有行為）：`publishTimeout` 的 500ms 擋不住 socket I/O，因為沒開 go-redis 的 `ContextTimeoutEnabled`；要開的話影響所有 Redis 呼叫，先確認 pool 和 PubSub 的行為再做
+- [x] Redis 不回應時 `POST` 可能卡約 5 秒（2026-11-05 M4 驗收時發現，既有行為；2026-11-24 已解決：[ADR 0020](docs/design/0020-redis-blackhole-gray-failure.md) Fix 1 開了 `ContextTimeoutEnabled`，500ms 會套到 socket）：`publishTimeout` 的 500ms 擋不住 socket I/O，因為沒開 go-redis 的 `ContextTimeoutEnabled`；要開的話影響所有 Redis 呼叫，先確認 pool 和 PubSub 的行為再做
 - [ ] 接 CDN（要先有自訂網域；有流量再做）：`GET .../messages` 已帶 `s-maxage=1`，application 不用改。**要另外確認 CDN 有類似 `proxy_cache_use_stale updating` 的設定**，實測只開 `proxy_cache_lock` 時，快取到期的 1,000 個併發全部回源。錯誤回應已是 `no-store`，但也要確認 CDN 對 404 這類錯誤的預設行為
 - [ ] `maxClients` 每台 100、被拒的連線還是會先 upgrade：M6 用 `WS_MAX_CLIENTS=6000` 跑，上限還沒決定（本機 2 台共 2,500 人，每台約 1,250 人，100 則／秒仍有效）；要決定上限，以及要不要在 upgrade 前就拒絕（在 upgrade 前拒絕的話，`onopen` 不會觸發，滿房的人就看不到歷史，要一起想）
 - [ ] Store integration test 不能同時跑兩份：共用 `danmaku_test` / Redis db 15，3 個 Judge 同時跑時每次 fail 的 test 都不一樣（單獨跑都過）。CI 平行化時要每個 runner 各自的 DB / Redis db
