@@ -32,3 +32,4 @@ server/cmd/server/server
 # Fault experiment env (deploy/fault): cross-compiled tool and result JSON
 deploy/fault/.bin/
 deploy/fault/out/
+CLAUDE.local.md
