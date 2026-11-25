@@ -100,7 +100,13 @@ func NewRedisStore(ctx context.Context, address string) (*RedisStore, error) {
 		func(ctx context.Context, roomID string) error {
 			return this.pubsub.Load().Unsubscribe(ctx, roomChannel(roomID))
 		},
-		func(d time.Duration, f func()) stopper { return time.AfterFunc(d, f) },
+		// room_subscriptions 的 debounce / retry / confirm timer：callback 跑在 runtime 建的 goroutine，
+		// 直接 panic 會讓 process 掛掉但沒有 log / metric；Escalate 結果一樣（process 掛掉），只是先記錄下來（ADR 0023）
+		func(d time.Duration, f func()) stopper {
+			return time.AfterFunc(d, func() {
+				supervise.Escalate(ctx, logger, "redis_room_timer", func(context.Context) { f() })
+			})
+		},
 		logger,
 	)
 	// 送 SUB / UNSUB 的 worker：整台 server 一個，跟 process 活一樣久（main 傳進來的是 context.Background()）

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jay41chen/danmaku/server/internal/model"
 	prom "github.com/jay41chen/danmaku/server/internal/prometheus"
+	"github.com/jay41chen/danmaku/server/internal/supervise"
 )
 
 const (
@@ -358,24 +359,29 @@ func (h *Hub) scheduleExpiryLocked(ctx context.Context, c *Client, st *clientSta
 	}
 
 	// 建立新的timer
+	// timer callback 跑在 runtime 建的 goroutine，直接 panic 會讓 process 掛掉但沒有 log / metric；
+	// Escalate 結果一樣（process 掛掉），只是先記錄下來（ADR 0023）。
+	// defer Unlock 在 worker 裡面，所以 re-panic 之前 lock 已經釋放
 	st.timer = time.AfterFunc(time.Until(st.exp), func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
+		supervise.Escalate(ctx, h.logger, "ws_token_expiry", func(context.Context) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
 
-		if h.clients[c] != st {
-			// 等lock的時候已經被其他goroutine移除了
-			return
-		}
-		if time.Now().Before(st.exp) {
-			// 等lock的時候已經被其他goroutine給renew了
-			return
-		}
-		if st.userID == 0 {
-			// 等lock的時候已經被其他goroutine降級回匿名了（例如送了壞掉的 auth frame）
-			return
-		}
-		h.downgradeLocked(ctx, c, st, reasonExpired)
-		h.sendLocked(ctx, c, st, expired)
+			if h.clients[c] != st {
+				// 等lock的時候已經被其他goroutine移除了
+				return
+			}
+			if time.Now().Before(st.exp) {
+				// 等lock的時候已經被其他goroutine給renew了
+				return
+			}
+			if st.userID == 0 {
+				// 等lock的時候已經被其他goroutine降級回匿名了（例如送了壞掉的 auth frame）
+				return
+			}
+			h.downgradeLocked(ctx, c, st, reasonExpired)
+			h.sendLocked(ctx, c, st, expired)
+		})
 	})
 }
 
